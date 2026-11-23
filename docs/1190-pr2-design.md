@@ -29,7 +29,7 @@ design's reading, individually vetoable.
 Inferred (vetoable):
 - **I1.** R5.5's deadline applies to lens forks at both points, not to the provenance fork (the issue is about the tool-using fork; provenance is untouched by R7).
 - **I2.** The deadline is wall-clock over the whole fork, paused time included ("the whole critique fork"). Cost: on a channel busy for longer than the deadline, a paused fork becomes a logged miss. Excluding pauses was considered and rejected: a paused fork holds a TaskQueue worker (4 by default, `task.py:461`) with no wall-clock bound, so a few busy channels would stall subagent and provenance tasks.
-- **I3.** R5.3 also governs the fork's start (PRD Critique 1: after the exchange "critique does not start while a message waits on its channel"): critique waits *before* the fork renders, so the rendered window never includes a turn that arrived after the reply.
+- **I3.** R5.3 also governs the fork's start (PRD Critique 1: after the exchange "critique does not start while a message waits on its channel"): critique waits *before* the fork renders, so it never renders while a turn is in flight. Because waiting lets later turns land in the window, the idle fork also passes `cut` = the index after the reply's row (from `_reply`, as `_provenance_fork` does), so it sees the window up to the reply and nothing after (PRD §3.8 item 2). The reply missing from the window, or a compaction since it, skips the lenses with the provenance path's reasons.
 - **I4.** Both new keys are static operator config, not runtime tunables: the agent must not raise its own cap or deadline.
 
 ## Plan
@@ -85,8 +85,10 @@ Callers:
   which forks once, then writes the two existing records unchanged in shape:
   the built-in record `{"critique": {"lenses", "objections", "sampled_below_threshold", "detail"?}}`
   for built-ins that ran, and the added-lens record `{"critique": {<name>: {…}}}`
-  for added lenses that ran; then one `_record_and_register` for all
-  objections (waking split per lens is already done there by `o["lens"]`).
+  for added lenses that ran. `_record_and_register`'s `outcome: dict` becomes
+  `outcomes: list[dict]`: it writes each record through `on_trace_record`,
+  then registers all objections once (waking split per lens is already done
+  there by `o["lens"]`). Provenance passes a one-element list.
   `_run_critique`, `_run_added_lenses` and `_enqueue_lens`'s two branches fold into this.
 - **Before send:** `_run_before_send` forks once for the selected lenses and
   records `{"critique_before_send": {"lenses", "objections", "sampled", "detail"?}}`
@@ -98,7 +100,10 @@ New key `critique.max_tool_calls` (int ≥ 0, default 3), read with
 `config_value(self.config, …)` at fork time. Idle fork passes it as
 `max_tool_calls`; before send passes 0. Validation joins `_value_problems`:
 a bool, non-int or negative value fails startup naming key, value and
-"a whole number ≥ 0"; at reload it warns and the default applies.
+"a whole number ≥ 0"; at reload it warns. The checks go before
+`_value_problems`'s early return on a non-dict `critique.lens`. The fork-time
+reader applies the same check and uses the default (with a warning naming key
+and value) on a bad value, so a reloaded bad value never reaches `fork`.
 
 `response_format`: sent only when the fork's `max_tool_calls` is 0. With
 tools allowed, the grammar may block tool calls or be rejected by
@@ -128,7 +133,9 @@ a callback that awaits it again, then compares
 `self._compactions.get(channel.id, 0)` with the value taken at fork start on
 **every** call, raising `_ForkStale` on a change. `_fork_lenses` catches
 `_ForkStale` and skips every lens with "the channel compacted while the fork
-ran". Before send passes no callback and does not wait.
+ran"; the same comparison runs once more after `fork` returns, so a
+compaction during the last request is a miss too. Before send passes no
+callback and does not wait.
 
 ### 5. Deadline (R5.5)
 
@@ -137,6 +144,8 @@ New key `critique.fork_timeout` (seconds, positive finite number, default
 `asyncio.timeout(deadline)` (wall clock, including pauses, I2; the pre-render
 wait is inside it too). On `TimeoutError` with `cm.expired()`, every lens
 skips with `_skip_lens(…, "the fork exceeded critique.fork_timeout (<n> s)")`,
+or, if it expired in the pre-render wait, "the channel stayed busy past
+critique.fork_timeout (<n> s)",
 which names lens, channel and trace; a `TimeoutError` raised from inside the
 request (a provider timeout) is reported as a fork failure, as today.
 Validation as for the cap.
@@ -158,8 +167,8 @@ already carries `trace_id`).
 markdown_recall registers one main-loop tool, `search_notes(query: str) -> str`,
 declared `reads_only = True`, wrapping its own `resolve_markdown_recall_search`
 (no hook round trip inside the plugin). `None` from the search → the result
-"No notes are indexed yet; try again later." Untrusted output declared
-(`untrusted=True`), so the main loop fences it; inside a fork the kernel
+"No notes are indexed yet; try again later."; `""` → "No notes matched." Untrusted output declared
+(`returns_untrusted = True`, as `search_transcripts` does), so the main loop fences it; inside a fork the kernel
 frames it anyway. `threat-model.md`: the main agent and forks can now search
 the configured roots on demand (previously recall only). Main-loop tool, so
 `tools.disabled` can remove it.
@@ -168,7 +177,7 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 
 - **Trim the fork's tool list / fork-only tools.** Breaks prefix parity (owner, 7099929016).
 - **Combined fork keeps each lens's own JSON tail.** The per-lens "Respond with a single JSON object {"objections": …}" contradicts a keyed combined reply and says "Do not call tools".
-- **Deadline including paused time.** Simpler by a line, but a busy channel makes every resumed fork a miss, contradicting the resume ruling.
+- **Deadline excluding paused time.** Keeps resumed forks alive on busy channels, but a paused fork then holds a TaskQueue worker with no wall-clock bound (I2).
 - **Yield via idle-tracker watches.** Event-driven, but needs a per-fork watch registration and teardown; a 1 s poll on an existing query is less mechanism.
 - **Kernel deadline parameter on `Agent.fork`.** The caller can bound its own await; no second caller needs it.
 - **`response_format` on the forced-verdict request only.** Needs a second kernel parameter (a final-request body); revisit if the harness shows text-only parsing is unreliable.
@@ -178,7 +187,7 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 
 - An operator override of a built-in lens's `fork_prompt` written for the old contract still contains the old tail; it now sits inside a combined prompt and contradicts the new tail. Consequence: that lens's replies may come back in the old shape and be skipped. Documented in `configuration.md`; no migration code.
 - A lens the reply omits is skipped alone; no retry.
-- `before_request` poll granularity: a turn that starts and finishes within 1 s between polls is not waited for. Harmless (the next request sees the window as the fork rendered it anyway).
+- Poll granularity: a turn that starts and finishes within 1 s between polls is not waited for. Mid-fork, harmless: the fork's messages are fixed at render. Before render, harmless too: the `cut` at the reply excludes it.
 
 ## Open (for the owner at the design gate)
 
@@ -189,3 +198,4 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 ## Review log
 
 - Design round 1 (cold): FAIL. Important: R6 unplanned → §7 added, still open to the owner; PRD Critique 1 edit missing → added to R9; I2 reschedule could not work → I2 flipped to wall clock (also fixes the worker-starvation edge). Edges fixed: wait before render (I3), staleness check on every callback, `cm.expired()`, before-send findings quote the draft. Cosmetics fixed: §6 against #1221, hookspec docstring and prompt copies in R9, R7 wording, S1 example, `.get`.
+- Design round 2 (cold): PASS, no critical or important. Cosmetics fixed: stale rejected alternative (C1); I3's reason was backwards (C2) → the idle fork now passes `cut` at the reply, per PRD §3.8 item 2 (new behaviour, small; re-reviewed in round 3); `returns_untrusted` (C3); `outcomes: list[dict]` (C4); fork-time validation and placement (C5); busy-channel timeout message (C6). Edges fixed: compaction check after `fork` returns (E1); empty search result (E2); Deferred poll note (E3).
