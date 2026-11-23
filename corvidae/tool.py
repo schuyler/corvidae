@@ -14,6 +14,7 @@ Public API:
     - ToolTimeouts: the per-call time bound (default plus per-tool overrides)
     - resolve_own_timeout(): read a tool's declared ``own_timeout`` at dispatch
     - declares_untrusted_output(): read a tool's ``returns_untrusted`` declaration
+    - declares_read_only(): read a tool's ``reads_only`` declaration (forks, #1190)
 """
 
 from __future__ import annotations
@@ -725,3 +726,9 @@ def declares_untrusted_output(tool_fn: Callable | None) -> bool:
     """True when the tool declares ``returns_untrusted = True``: its results
     carry outside content and reach the model fenced."""
     return getattr(tool_fn, "returns_untrusted", False) is True
+
+
+def declares_read_only(tool_fn: Callable | None) -> bool:
+    """True when the tool declares ``reads_only = True``: it changes nothing,
+    so a fork may call it (#1190). Nothing is read-only by default."""
+    return getattr(tool_fn, "reads_only", False) is True

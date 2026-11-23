@@ -456,6 +456,10 @@ class MemoryToolsPlugin(CorvidaePlugin):
             ]
             return f"{KEYWORD_ONLY_NOTE}\n" + _format_results(entries, max_tokens)
 
+        # Read-only for forks (#1190): it only searches. recall_raw is not
+        # declared, because it bumps access stats.
+        search_memory.reads_only = True  # type: ignore[attr-defined]
+
         async def search_transcripts(
             query: str,
             channel: str | None = None,
@@ -538,6 +542,8 @@ class MemoryToolsPlugin(CorvidaePlugin):
 
         # The output is other channels' raw text: fence it (#648).
         search_transcripts.returns_untrusted = True  # type: ignore[attr-defined]
+        # Read-only for forks (#1190): it only searches.
+        search_transcripts.reads_only = True  # type: ignore[attr-defined]
 
         async def recall_raw(
             memory_id: int | None = None,
