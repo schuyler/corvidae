@@ -1233,20 +1233,39 @@ class TestProvenanceCritic:
         finally:
             await _teardown(env)
 
-    async def test_failed_search_never_reaches_the_critic_as_no_match(self, tmp_path, caplog):
+    async def test_failed_search_never_reaches_the_critic_as_no_match(
+        self, tmp_path, caplog, monkeypatch
+    ):
         # A search that raised looked at nothing: telling the critic "no
         # earlier message matched" would turn a supported claim into an
-        # objection. A lone surrogate (a truncated emoji escape in the
-        # model's JSON) is one real input that makes sqlite's bind raise.
+        # objection. #1186: a lone surrogate no longer raises (it is not a
+        # search term), so the failure is injected at the second claim's
+        # search, the seam where sqlite's own error would surface.
+        import sqlite3
+
+        from corvidae_cognition import critique as critique_module
+
+        real_where = critique_module.keyword_where
+        calls = {"n": 0}
+
+        def failing_where(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise sqlite3.OperationalError("injected search failure")
+            return real_where(*args, **kwargs)
+
+        monkeypatch.setattr(critique_module, "keyword_where", failing_where)
         env = await _provenance_env(tmp_path)
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(
                 env, agent, trace_id="kfail",
                 support="Heads up: the quarterly audit deadline is Thursday.")
-            claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["\ud83d Tuesday"]}]
+            claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["Tuesday"]}]
             with caplog.at_level("WARNING", logger="corvidae.critique"):
+                calls["n"] = 0
                 assert await env.plugin._gather_evidence(env.channel, "kfail", claims) is None
+                calls["n"] = 0
                 await _run_provenance(env, "kfail", claims)
             assert agent.calls == [] and env.stub.chat_calls == []
             assert "evidence search failed for trace kfail" in caplog.text

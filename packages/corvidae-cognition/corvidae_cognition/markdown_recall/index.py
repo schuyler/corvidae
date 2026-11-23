@@ -28,6 +28,12 @@ from typing import Any, Callable
 
 import aiosqlite
 
+from corvidae_cognition.fts import (
+    TOKENIZE_CLAUSE,
+    create_fts_table,
+    keyword_query,
+    keyword_where,
+)
 from corvidae_cognition.markdown_recall.chunking import chunk_page
 
 logger = logging.getLogger("corvidae.markdown_recall.index")
@@ -46,7 +52,9 @@ OVERFETCH = 3
 # (#863), so every chunk's text is different — reconcile() only re-chunks a
 # file whose content hash moved, so without this bump the fix would never
 # reach a page nobody edits again.
-CHUNKER_VERSION = "otterwiki-2"
+# otterwiki-3: chunks are sized in UTF-8 bytes and cut as spans of the source
+# (#1186), so every chunk boundary moves.
+CHUNKER_VERSION = "otterwiki-3"
 
 CHUNKS_DDL = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -59,9 +67,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 )
 """
 
-CHUNKS_FTS_DDL = """
+CHUNKS_FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    text, content='chunks', content_rowid='rowid'
+    text, content='chunks', content_rowid='rowid',
+    {TOKENIZE_CLAUSE}
 )
 """
 
@@ -240,7 +249,7 @@ class MarkdownIndex:
             return db
 
         await db.execute(CHUNKS_DDL)
-        await db.execute(CHUNKS_FTS_DDL)
+        await create_fts_table(db, "chunks_fts", CHUNKS_FTS_DDL)
         await db.execute(CHUNKS_FTS_INSERT_TRIGGER)
         await db.execute(CHUNKS_FTS_DELETE_TRIGGER)
         await db.execute(MANIFEST_DDL)
@@ -702,14 +711,16 @@ class MarkdownIndex:
     async def _fts_ids(
         self, db: aiosqlite.Connection, query: str, limit: int
     ) -> list[int]:
-        """Rowids matching ``query`` in bm25 order (a sanitized MATCH)."""
-        match = _fts_match(query)
-        if not match:
+        """Rowids matching ``query``: bm25 order over 3-character pieces, or
+        a LIKE scan (by rowid) for a query of only short terms."""
+        q = keyword_query(query)
+        if not q.terms:
             return []
+        where, params = keyword_where(q, "chunks_fts", "text")
+        order = "bm25(chunks_fts)" if q.match is not None else "rowid"
         async with db.execute(
-            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
-            "ORDER BY bm25(chunks_fts) LIMIT ?",
-            (match, limit),
+            f"SELECT rowid FROM chunks_fts WHERE {where} ORDER BY {order} LIMIT ?",
+            (*params, limit),
         ) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
@@ -776,19 +787,3 @@ class MarkdownIndex:
             await self._db.close()
             self._db = None
             self._schema_ready = False
-
-
-def _fts_match(query: str) -> str:
-    """Sanitize a free-text query into an FTS5 MATCH expression.
-
-    Each token becomes a prefix term (``tok*``) so partial words match, and
-    the tokens are OR-joined so one good term carries the query when another
-    is a stopword. Returns "" when there is nothing to match.
-    """
-    tokens = [t for t in query.lower().split() if t]
-    if not tokens:
-        return ""
-    # A `"` inside a double-quoted FTS5 term is escaped by doubling it, so a
-    # query token that contains one (foo"bar) does not break the MATCH syntax.
-    escaped = [t.replace('"', '""') for t in tokens]
-    return " OR ".join(f'"{t}"*' for t in escaped)

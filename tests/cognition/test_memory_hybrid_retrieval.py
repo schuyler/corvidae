@@ -43,6 +43,19 @@ DISTRACTORS = [
     "so what about them",
 ]
 QUERY = "what about Yoz"
+# #1186 (U1): records near QUERY by cosine but sharing no 3-character piece
+# with it. Under the stub's hashed bag of words, `velvet` lands in the bucket
+# of `what` and `aspen` in that of `about`, so each acts as a paraphrase of the
+# query's common words without sharing a word, as an embedding would. With no
+# stopword list, DISTRACTORS (which repeat `what about`) now match the keyword
+# side too; these keep the fixtures' claims about what only keywords can find.
+PARAPHRASES = [
+    "velvet aspen lantern",
+    "vale aspen harbor",
+    "velvet aspen meadow",
+    "vale aspen orchid",
+    "velvet aspen timber",
+]
 
 
 def config(candidates: str | None = None, k: int = 1, **retrieval) -> dict:
@@ -65,15 +78,22 @@ async def seed_named_and_distractors(db, channel_id: str) -> int:
     return await seed_memory(db, channel_id, NAMED)
 
 
+async def seed_named_and_paraphrases(db, channel_id: str) -> int:
+    """Seed the paraphrases, then NAMED; return NAMED's id."""
+    for text in PARAPHRASES:
+        await seed_memory(db, channel_id, text)
+    return await seed_memory(db, channel_id, NAMED)
+
+
 class TestFusion:
     def test_choices_default_to_hybrid(self):
         assert CANDIDATES_CHOICES == ("hybrid", "vector")
 
     async def test_name_query_ranks_the_naming_record_first(self):
-        # Sanity: every distractor beats NAMED on cosine, so vec alone loses it.
-        assert all(cosine(QUERY, d) > cosine(QUERY, NAMED) for d in DISTRACTORS)
+        # Sanity: every paraphrase beats NAMED on cosine, so vec alone loses it.
+        assert all(cosine(QUERY, d) > cosine(QUERY, NAMED) for d in PARAPHRASES)
         memory, _e, channel, _conv, db = await build_retrieval_env(config())
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         pool = await memory._retrieve_pool(QUERY)
 
@@ -104,7 +124,7 @@ class TestFusion:
 
     async def test_record_in_both_lists_is_marked_both(self):
         memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         pool = await memory._retrieve_pool(QUERY)
 
@@ -222,7 +242,7 @@ class TestNoKeywordFloor:
 class TestCandidateLog:
     async def test_source_is_logged_per_candidate(self):
         memory, _e, channel, conv, db = await build_retrieval_env(config(k=1))
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         conv.append({"role": "user", "content": QUERY})
         await memory_turn(memory, channel=channel, trace_id=None)
@@ -282,7 +302,7 @@ class TestWindowExclusion:
         memory, _e, channel, conv, db = await build_retrieval_env(
             config(k=2, band_on="similarity", bands={"moderate": 0.0})
         )
-        for text in DISTRACTORS:
+        for text in PARAPHRASES:
             await seed(db, channel.id, text, 1, 2)
         in_window = await seed(db, channel.id, NAMED, WINDOW_START, WINDOW_START + 1)
         older = await seed(db, channel.id, "Yoz reviewed the battery design", 1, 2)
@@ -352,7 +372,7 @@ class TestUnmeasuredDoesNotTakeASlot:
         # decay with age while its ranking score does. The unembedded record
         # is fresh, ties on fused rank (both are rank 1 in their own list) and
         # wins the score tiebreak, so it used to take the single slot.
-        measured_text = "what about what about"
+        measured_text = "velvet aspen velvet aspen"
         assert cosine(QUERY, measured_text) >= 0.6  # clears the gate
         memory, _e, channel, conv, db = await build_retrieval_env(
             config(k=1, band_on="similarity")
