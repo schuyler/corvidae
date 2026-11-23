@@ -562,7 +562,7 @@ class TestRevisionIsNeverHeld:
         assert len(env.trace.held()) == 1
         # The objections were admitted, so the not-admitted warning stays quiet.
         assert not [r for r in caplog.records
-                    if r.levelno >= logging.WARNING and "objection" in r.getMessage()]
+                    if r.levelno >= logging.WARNING and "objection" in r.getMessage().lower()]
 
         # The span ended at the revision's final: the next final is checked.
         await say(env, "another question")

@@ -92,7 +92,7 @@ class PreSendHold:
 10. **Warnings (R10).** One warning per miss:
     - Appraisal's existing skip warning names the channel, the trace and the cause.
     - With appraisal loaded, critique's before-send selection no longer warns on `lenses=None` (`warn=False` on that path): appraisal already did.
-    - Forks being off for appraisal's stage is logged per final at DEBUG, not WARNING; `on_start` states it once (#1169 R5.5).
+    - Forks being off for appraisal's stage is logged per final at DEBUG, not WARNING, **on the before-send path only**; `on_start` states it once (#1169 R5.5). Stage 2's skip warning after the exchange is unchanged.
     - A critique lens fork that misses keeps its own warning, naming the lens, channel, trace and cause (`_skip_lens`).
 
 ### How the acceptance inputs come out
@@ -232,3 +232,8 @@ class PreSendHold:
 - E1 (always-warn mutation): **fixed now**, a one-line assertion of no warning when the objections were admitted.
 - Cosmetics 2–4 left as they are: the overlapping fallback tests, the odd but consistent draft text, R8 under R9 (not in R9's criterion).
 - E2 (any-offer mutation): Deferred with the last-batch-count rule. E3 and E4: no action.
+
+### Red round 3: PASS
+- Cosmetic 3: a case-insensitive warning match. **Fixed.**
+- Edge (forks-off per final at DEBUG): the design now says this covers the before-send path only; stage 2 keeps its warning.
+- Cosmetics 1, 2 and 4: left as they are, with reasons in the review.
