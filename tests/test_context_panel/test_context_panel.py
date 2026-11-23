@@ -7,13 +7,15 @@ WebPlugin, so the panel's routes sit behind the console's authentication.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from context_panel import ContextPanelPlugin
 
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, ReasoningHistory
 from corvidae.channels.web import WebPlugin
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.hooks import TransportPlugin, create_plugin_manager, install_plugin_hookspecs
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.thinking import apply_reasoning_history
@@ -263,6 +265,17 @@ class TestChannelsAndWindow:
         assert body["cursor"]["count"] == 6
         assert body["cursor"]["digest"]
 
+    async def test_window_non_dict_row_carries_token_count(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="sp")
+        row = ("strange", "row")
+        win.messages.append(row)  # PRD 3.1.18.1: a row the kernel tolerates as-is
+        body = await open_window(env, "web:main")
+        last = body["rows"][-1]
+        assert last["type"] is None
+        assert last["msg"]["content"] == repr(row)
+        assert last["tokens"] == count_tokens(repr(row))
+
     async def test_window_unloaded_and_unregistered_channel(self, make_env):
         env, _ = await panel_env(make_env)
         env.registry.get_or_create("web", "pending")  # conversation is None
@@ -281,6 +294,32 @@ class TestChannelsAndWindow:
         full = await open_window(env, "web:main", all="1")
         assert len(full["rows"]) == 250
         assert full["first"] == 0
+
+    async def test_window_rows_and_head_carry_token_counts(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="the system prompt")
+        schemas = [{"type": "function", "function": {"name": "lookup"}}]
+        win.tool_view = ToolView(schemas=schemas)
+        win.append({"role": "user", "content": "hello"})
+        body = await open_window(env, "web:main")
+        assert body["system_prompt_tokens"] == count_tokens("the system prompt")
+        assert body["tools_tokens"] == count_tokens(json.dumps(schemas, default=str))
+        assert body["rows"][0]["tokens"] == message_tokens({"role": "user", "content": "hello"})
+
+    async def test_window_head_tokens_null_until_tools_resolve(self, make_env):
+        env, _ = await panel_env(make_env)
+        seed(env, prompt="sp")
+        body = await open_window(env, "web:main")
+        assert body["tools"] is None
+        assert body["tools_tokens"] is None
+
+    async def test_poll_rows_carry_token_counts(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, numbered(2))
+        cursor = (await open_window(env, "web:main"))["cursor"]
+        win.append({"role": "user", "content": "tail"})
+        body = await poll(env, "web:main", cursor)
+        assert body["rows"][0]["tokens"] == message_tokens({"role": "user", "content": "tail"})
 
     async def test_poll_never_carries_the_window(self, make_env):
         env, _ = await panel_env(make_env)
@@ -317,6 +356,8 @@ class TestRendered:
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role="system",
         )
+        assert body["total_tokens"] == sum(
+            message_tokens(m) for m in body["messages"])
 
     async def test_rendered_passes_the_channel_pending_tool_calls(self, make_env):
         """A call still in flight renders with its placeholder, not as a bare call."""

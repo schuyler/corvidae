@@ -18,7 +18,7 @@ from aiohttp import web
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.web import Panel
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.outbound import (
     Outbound,
@@ -48,12 +48,14 @@ def _visible(row: dict) -> dict:
 
 
 def _wire_row(row: object) -> dict:
-    """A window row as the client sees it: its type tag and visible fields."""
+    """A window row as the client sees it: type tag, visible fields, token count."""
     # A non-dict row (PRD 3.1.18.1) is shown as its repr.
     if not isinstance(row, dict):
-        return {"type": None, "msg": {"role": None, "content": repr(row)}}
+        return {"type": None, "msg": {"role": None, "content": repr(row)},
+                "tokens": message_tokens(row)}
     kind = row.get("_message_type", MessageType.MESSAGE)
-    return {"type": MessageType(kind).value, "msg": _visible(row)}
+    return {"type": MessageType(kind).value, "msg": _visible(row),
+            "tokens": message_tokens(row)}
 
 
 def _row_bytes(row: object) -> bytes:
@@ -239,10 +241,17 @@ class ContextPanelPlugin(CorvidaePlugin):
         rows = conv.messages
         shown = rows if request.query.get("all") == "1" else rows[-WINDOW_ROWS:]
         wire = [_wire_row(r) for r in shown]
+        tools = _tools(conv)
         body = {
             "loaded": True,
             "system_prompt": conv.system_prompt,
-            "tools": _tools(conv),
+            "system_prompt_tokens": count_tokens(conv.system_prompt),
+            "tools": tools,
+            # None while the tool view is unresolved, like tools itself. The
+            # count is of the compact wire serialization (what the model pays
+            # for); the panel pretty-prints tools for display, so shown text
+            # and counted text differ by whitespace by design.
+            "tools_tokens": None if tools is None else count_tokens(json.dumps(tools, default=str)),
             "total": len(rows),
             "first": len(rows) - len(shown),
             "rows": wire,
@@ -280,7 +289,8 @@ class ContextPanelPlugin(CorvidaePlugin):
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role=self._mid_system_role(),
         )
-        return _json({"loaded": True, "messages": messages, "total": len(messages)})
+        return _json({"loaded": True, "messages": messages, "total": len(messages),
+                      "total_tokens": sum(message_tokens(m) for m in messages)})
 
     async def poll(self, request: web.Request) -> web.Response:
         """Tail a channel from the client's cursor, plus its live events."""
