@@ -11,7 +11,7 @@ critique's hookimpls, are in ``tests/cognition/test_presend_hooks.py``.)
 
 Why ``Checker`` stands in for appraisal. ``Checker`` owns a
 ``PreSendHold(pm, reporter="checker")`` and wires it the way
-``docs/1149-presend-hold-design.md`` says appraisal does: the same four hooks,
+docs/cognition.md ("Held for a revision") says appraisal does: the same four hooks,
 in the same order. ``should_send_response`` on a "final" skips when
 ``hold.suppressed(channel.id)`` and otherwise returns
 ``await hold.refuse(...)`` for a draft the test scripted as objectionable;

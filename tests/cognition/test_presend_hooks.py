@@ -1,5 +1,5 @@
 """RED tests for #1149 (with #1169 part 2): how appraisal and critique are wired
-to ``corvidae_cognition.presend.PreSendHold`` (docs/1149-presend-hold-design.md).
+to ``corvidae_cognition.presend.PreSendHold`` (docs/cognition.md, "Held for a revision").
 
 The state machine itself (R3 to R6 interleavings through a real Agent) is
 proved in test_presend_real_path.py. These tests pin the wiring: what the
