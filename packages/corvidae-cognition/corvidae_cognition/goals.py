@@ -279,7 +279,9 @@ class GoalsPlugin(CorvidaePlugin):
         return goal
 
     def _now(self) -> float:
-        return self.pm.get_plugin("clock").now()
+        from corvidae.clock import Clock
+
+        return get_dependency(self.pm, "clock", Clock).now()
 
     async def _fire_state_changed(
         self,

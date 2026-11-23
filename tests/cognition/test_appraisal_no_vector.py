@@ -20,7 +20,8 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
-from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry, FakeForkAgent, stub_llm_config, window_of, with_chat_llm
 from .test_appraisal_stage2 import StubClient, _read_appraisal, _teardown, build_env
 from tests.cognition.trace_helpers import add_trace
 
@@ -139,6 +140,10 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
     await init_db(db)
     try:
         pm = create_plugin_manager()
+        # memory's on_start resolves the kernel clock and idle tracker (#1180).
+        install_kernel_clock(pm)
+        # memory's consolidation commit resolves the kernel registry (#1180).
+        add_kernel_registry(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")

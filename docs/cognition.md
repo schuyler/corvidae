@@ -75,7 +75,7 @@ reinstall the extra before redacting, or every form refuses
 ### MemoryPlugin
 
 `memory.py` — autobiographical memory. Entry point
-name: `"memory"`; `depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the former
+name: `"memory"`; `depends_on = {"persistence", "llm", "clock", "idle", "trace", "registry"}`. Absorbs the former
 `DreamPlugin` embryo (removed): compaction becomes memory formation instead
 of file-based fact scraping.
 
@@ -1050,15 +1050,14 @@ The hook's contract is under `FunnelPlugin` in the reference below.
 Autobiographical memory: consolidates dialog (at turn ends, on idle, and at compaction) into first-person
 memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
 prompt through the admission funnel. Entry point name: `"memory"`;
-`depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the removed `DreamPlugin`.
+`depends_on = {"persistence", "llm", "clock", "idle", "trace", "registry"}`. Absorbs the removed `DreamPlugin`.
 
 Implements six hooks and two kernel timers:
 
 - `on_start` — creates the memory schema on the persistence connection
   (retried lazily on first use; on_start ordering is LIFO across plugins),
   runs the retention check, then registers the two clock-driven pieces
-  below. Without the kernel clock and idle tracker it logs a warning and
-  skips them.
+  below.
 - `before_compaction` — with `agent.forks` on for `consolidation`, copies
   the window and spawns a background task that forks the memory record
   from the prefix about to be dropped (when every dialog row of the range
@@ -1757,8 +1756,8 @@ traces an evicted trace resolves to `None`; the gate treats that as `task`.
 
 A message refused by a transport gate (an allowlist refusing a stranger) is
 not recorded: a channel the `ChannelRegistry` does not hold is skipped, so
-no refused sender's channel id lands in the file. With no registry plugin
-the guard fails open and records. Rejections on known channels (the
+no refused sender's channel id lands in the file. The registry is a declared
+dependency, so it is always there. Rejections on known channels (the
 `limits` plugin's, say) are recorded, with no `message_rowid`.
 
 **When it cannot write.** An in-memory session database has no file to sit

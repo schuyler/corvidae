@@ -22,6 +22,7 @@ from corvidae.channel import Channel
 from corvidae.context import ContextWindow
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
+from fake_clock import install_kernel_clock
 from corvidae.llm_plugin import LLMPlugin
 from helpers import stub_llm_config, with_chat_llm
 from corvidae_cognition.memory import MemoryPlugin
@@ -76,6 +77,8 @@ async def build_benchmark_env(config=None):
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")

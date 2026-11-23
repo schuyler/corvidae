@@ -16,6 +16,7 @@ from corvidae.channel import Channel
 from corvidae.context import ContextWindow
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
+from fake_clock import install_kernel_clock
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin
@@ -51,6 +52,8 @@ async def _start_daemon_plugins(state_dir: Path):
     config = _render("buster-memrole")
     config["_base_dir"] = state_dir
     pm = create_plugin_manager()
+    # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     pm.register(persistence, name="persistence")
     llm = LLMPlugin()

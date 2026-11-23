@@ -13,12 +13,12 @@ from corvidae.context import MessageType, message_tokens
 from corvidae.hooks import create_plugin_manager
 from corvidae_cognition.memory import MemoryPlugin
 
-from helpers import FakeForkAgent, window_of, with_chat_llm
+from helpers import FakeForkAgent, add_kernel_registry, window_of, with_chat_llm
 from .test_memory_consolidation import (
     EMBED_CONFIG, build_consolidation_env, entries_reply, fetch_stamped_memories,
     fetch_watermark, seed_dialog,
 )
-from .test_memory_fork import DIALOG, _Registry
+from .test_memory_fork import DIALOG
 
 #: A one-entry reply (the embed stub returns one fixed vector; see the
 #: design's Traps list).
@@ -86,7 +86,8 @@ async def make_env() -> Any:
         agent = agent or FakeForkAgent({"consolidation"}, text=REPLY)
         memory.pm.unregister(name="agent")
         memory.pm.register(agent, name="agent")
-        memory.pm.register(_Registry(channel), name="registry")
+        # The builder already registered the kernel registry; add the channel to it.
+        add_kernel_registry(memory.pm).channels[channel.id] = channel
         # Persist the dialog and hold (part of) it in the live window.
         ids = await seed_dialog(persistence, channel, DIALOG)
         channel.conversation = window_of(

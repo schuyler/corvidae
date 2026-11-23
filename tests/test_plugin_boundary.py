@@ -36,47 +36,15 @@ DYNAMIC = "<dynamic>"
 # -> (how many calls, the issue that removes them). Lower a count, or delete
 # the entry, in the change that removes a call.
 ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
-    "packages/context-panel/context_panel/__init__.py": {
-        "agent": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/appraisal.py": {
-        "task": (1, "#1180"),
-    },
     "packages/corvidae-cognition/corvidae_cognition/critique.py": {
         "appraisal": (2, "#1169"),
         "funnel": (1, "#1176"),
-        "task": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/goals.py": {
-        "clock": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/heartbeat.py": {
-        "registry": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/markdown_recall/plugin.py": {
-        "idle": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/memory.py": {
-        "clock": (1, "#1180"),
         "funnel": (1, "#1176"),
-        "idle": (1, "#1180"),
-        "registry": (2, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/outcome_log.py": {
-        "registry": (1, "#1180"),
-    },
-    "packages/corvidae-inotify/corvidae_inotify/__init__.py": {
-        "agent": (1, "#1180"),
     },
     "packages/corvidae-planning/corvidae_planning/__init__.py": {
         "goals": (1, "#1181"),
-    },
-    "packages/corvidae-restart/corvidae_restart/__init__.py": {
-        "agent": (2, "#1180"),
-        "registry": (2, "#1180"),
-    },
-    "packages/outbound-cap/outbound_cap/__init__.py": {
-        "clock": (1, "#1180"),
     },
 }
 

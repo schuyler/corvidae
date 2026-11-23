@@ -65,7 +65,7 @@ async def outcomes_path(db: aiosqlite.Connection) -> Path | None:
 class OutcomeLogPlugin(CorvidaePlugin):
     """Appends trace records to JSONL and remembers each trace's origin."""
 
-    depends_on = frozenset({"persistence", "trace"})
+    depends_on = frozenset({"persistence", "trace", "registry"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -92,10 +92,11 @@ class OutcomeLogPlugin(CorvidaePlugin):
         A transport gate refuses strangers on a transient channel the
         registry never held. A record keyed on that id would grow the log
         without bound and keep a trace of a refused sender, and it feeds no
-        calibration. With no registry plugin, fail open and record.
+        calibration.
         """
-        registry = self.pm.get_plugin("registry")
-        if registry is not None and registry.get(channel_id) is None:
+        from corvidae.channel import ChannelRegistry
+
+        if get_dependency(self.pm, "registry", ChannelRegistry).get(channel_id) is None:
             logger.debug(
                 "outcome_log: no record for unregistered channel %s (trace %s)",
                 channel_id, trace_id,

@@ -24,8 +24,8 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition import retention as retention_module
 from corvidae_cognition import memory as memory_module
 from corvidae_cognition.memory import MemoryPlugin
-from fake_clock import FakeClock, install_kernel_clock
-from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
+from fake_clock import install_kernel_clock
+from helpers import FakeForkAgent, add_kernel_registry, stub_llm_config, with_chat_llm
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -137,7 +137,7 @@ async def make_env(retention_runs):
     cleanups = []
 
     async def make(
-        config=None, *, last_run=None, with_idle=True, pm=None, db=None,
+        config=None, *, last_run=None, pm=None, db=None,
         persistence=None, channel=None,
     ) -> Env:
         config = with_chat_llm(config or CONFIG)
@@ -166,12 +166,10 @@ async def make_env(retention_runs):
         if pm.get_plugin("agent") is None:
             pm.register(FakeForkAgent(set()), name="agent")
 
-        if with_idle:
-            clock, tracker = install_kernel_clock(pm)
-        else:
-            # The clock alone: memory must treat a missing tracker as "no kernel idle".
-            clock, tracker = FakeClock(), None
-            pm.register(clock, name="clock")
+        # Kernel registry (consolidation resolves channels through it) and
+        # the fake clock with its idle tracker (#1180).
+        add_kernel_registry(pm)
+        clock, tracker = install_kernel_clock(pm)
         cleanups.append(clock.close)
 
         memory = MemoryPlugin()
@@ -485,28 +483,6 @@ async def test_retention_write_failure_retries_at_bounded_rate(
     # Without the floor this is about 60 attempts; with it, at most 13.
     assert 1 <= len(attempts) <= limit
     assert len(warnings) == len(attempts)
-
-
-async def test_clock_without_idle_tracker_warns_once_and_arms_nothing(
-    make_env, retention_runs, caplog,
-):
-    """Memory uses the clock and tracker together or not at all.
-
-    With a clock but no tracker it warns once, arms no timers, and still runs
-    the startup retention check.
-    """
-    caplog.set_level(logging.WARNING)
-    env = await make_env(with_idle=False)
-
-    warnings = [
-        r for r in caplog.records
-        if "no kernel clock/idle tracker registered" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-    assert warnings[0].levelno == logging.WARNING
-    assert env.clock.live_timer_names() == []
-    # Memory ran the check once; when it ran is not pinned.
-    assert len(retention_runs) == 1
 
 
 # ---------------------------------------------------------------------------

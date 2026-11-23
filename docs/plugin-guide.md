@@ -1328,8 +1328,12 @@ two peers points is a design choice that a string lookup hides.
 `get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
 list does not cover, and on an entry that covers more calls than remain.
 The list holds the calls that predate the rule, each with the issue that
-removes it: `appraisal` (#1169), `goals` (#1181), the funnel (#1176, below) and the kernel plugins,
-which still need `depends_on` and `get_dependency` (#1180). When you remove
+removes it: `appraisal` (#1169), `goals` (#1181) and the funnel (#1176,
+below). A missing kernel plugin is not something a plugin works around:
+`get_dependency` raises naming it, and a test that builds a plugin manager
+by hand registers the kernel plugins its plugin uses (`add_kernel_registry`
+in `tests/helpers.py`, `install_kernel_clock` in `tests/fake_clock.py`;
+#1180). When you remove
 a call, lower its count or delete its entry in the same change. New work
 never adds an entry: the list only shrinks.
 

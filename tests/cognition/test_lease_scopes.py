@@ -24,6 +24,7 @@ from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT, MemoryPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from tests.cognition.trace_helpers import add_trace
+from fake_clock import install_kernel_clock
 from helpers import build_plugin_and_channel, window_of
 from test_lease_scopes import ScriptedSession, loud_unleased_records, usage_rows
 
@@ -106,6 +107,8 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     # The memory plugin's dedicated writer needs the daemon's WAL mode.
     await db.execute("PRAGMA journal_mode=wal")
     pm = plugin.pm
+    # memory's on_start resolves the kernel clock and idle tracker (#1180).
+    install_kernel_clock(pm)
     config = {
         **EMBED_CONFIG,
         "daemon": {"session_db": db_path},

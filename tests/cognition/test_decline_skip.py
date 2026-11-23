@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from corvidae.task import TaskPlugin
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
 
@@ -59,10 +60,14 @@ def _window_ending_in(channel: Channel, text: str, final_type: MessageType) -> C
     return conv
 
 
-class _QueueSpy:
-    """Stands in for TaskPlugin: records each enqueued task's description."""
+class _QueueSpy(TaskPlugin):
+    """Stands in for TaskPlugin: records each enqueued task's description.
+
+    Subclasses TaskPlugin so get_dependency's isinstance check (#1180) passes.
+    """
 
     def __init__(self):
+        super().__init__()
         self.descriptions: list[str] = []
         self.task_queue = SimpleNamespace(enqueue=self._enqueue)
 

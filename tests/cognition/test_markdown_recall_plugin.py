@@ -21,6 +21,7 @@ from corvidae_cognition.markdown_recall.index import Hit
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager, install_plugin_hookspecs
+from fake_clock import install_kernel_clock
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -58,6 +59,8 @@ async def make(config: dict, root: Path, tmp_path: Path) -> SimpleNamespace:
     persistence.db = db
     pm.register(persistence, name="persistence")
     clock = Clock()
+    # Kernel clock and idle tracker MarkdownRecallPlugin.on_start resolves.
+    install_kernel_clock(pm)
     funnel = FunnelPlugin(now=clock)
     pm.register(funnel, name="funnel")
     source = MarkdownRecallPlugin()
@@ -219,6 +222,8 @@ async def test_unconfigured_source_is_inert_in_funnel_ingest(tmp_path):
     persistence.db = db
     pm.register(persistence, name="persistence")
     clock = Clock()
+    # Kernel clock and idle tracker MarkdownRecallPlugin.on_start resolves.
+    install_kernel_clock(pm)
     funnel = FunnelPlugin(now=clock)
     pm.register(funnel, name="funnel")
     source = MarkdownRecallPlugin()

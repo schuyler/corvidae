@@ -21,8 +21,8 @@ from collections.abc import Awaitable, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.task import Task
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae_cognition.config_keys import warn_removed_keys
 from corvidae_cognition.silence import is_decline
@@ -353,7 +353,7 @@ class AppraisalPlugin(CorvidaePlugin):
     """
 
     # trace owns the hook stage 2 is reported on (#1179).
-    depends_on = frozenset({"persistence", "trace"})
+    depends_on = frozenset({"persistence", "trace", "task"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -503,8 +503,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
-        queue = getattr(task_plugin, "task_queue", None)
+        queue = get_dependency(self.pm, "task", TaskPlugin).task_queue
         if queue is None:
             logger.debug("stage-2 appraisal skipped: task queue unavailable")
             return

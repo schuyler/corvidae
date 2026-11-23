@@ -15,6 +15,7 @@ from typing import Iterator
 import aiosqlite
 from aiohttp import web
 
+from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.web import Panel
 from corvidae.context import ContextWindow, MessageType
@@ -121,7 +122,7 @@ def _json(data: dict) -> web.Response:
 class ContextPanelPlugin(CorvidaePlugin):
     """Web console sidebar section with one tab per loaded channel, each showing that channel's context window."""
 
-    depends_on = frozenset({"registry", "persistence"})
+    depends_on = frozenset({"registry", "persistence", "agent"})
     optional_depends_on = frozenset({"web"})
 
     def __init__(self, pm=None) -> None:
@@ -255,24 +256,10 @@ class ContextPanelPlugin(CorvidaePlugin):
         """``agent.mid_conversation_system_role`` as the agent resolved it.
 
         Read from the live agent so a config reload is honoured without this
-        plugin parsing the key a second time; "system" is the agent's own
-        default when the key is absent (agent.py's
-        ``_resolve_mid_conversation_system_role``).
+        plugin parsing the key a second time; the agent resolves an absent key
+        to its own default (agent.py's ``_resolve_mid_conversation_system_role``).
         """
-        agent = self.pm.get_plugin("agent") if self.pm is not None else None
-        role = getattr(agent, "mid_conversation_system_role", None)
-        if role is None:
-            # The agent's own default, used knowingly: with no agent (a panel on
-            # a hand-built plugin manager) there is no resolved key to read, and
-            # a rename would otherwise silently show a different role than the
-            # model receives (#695 review).
-            logger.warning(
-                "context panel: no agent.mid_conversation_system_role to read; "
-                "rendering mid-conversation system rows as 'system', which may "
-                "not be the role the agent uses",
-            )
-            return "system"
-        return role
+        return get_dependency(self.pm, "agent", Agent).mid_conversation_system_role
 
     async def rendered(self, request: web.Request) -> web.Response:
         """A channel's window as the request body the agent would send (#695).

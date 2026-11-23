@@ -55,9 +55,15 @@ counted and nothing is withheld.
 from __future__ import annotations
 
 import logging
-import time
 
-from corvidae.hooks import CorvidaePlugin, TransportPlugin, hookimpl, resolve_reject_wins
+from corvidae.clock import Clock
+from corvidae.hooks import (
+    CorvidaePlugin,
+    TransportPlugin,
+    get_dependency,
+    hookimpl,
+    resolve_reject_wins,
+)
 from corvidae.tuning import resolve_tunable
 
 logger = logging.getLogger("corvidae.outbound_cap")
@@ -140,6 +146,9 @@ def parse_window_seconds(value: object, key: str = WINDOW_SECONDS_KEY) -> int | 
 class OutboundCapPlugin(CorvidaePlugin):
     """Caps agent messages per channel between admitted human messages."""
 
+    # The sliding window runs on the kernel clock, so a test can swap it.
+    depends_on = frozenset({"clock"})
+
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
@@ -155,8 +164,6 @@ class OutboundCapPlugin(CorvidaePlugin):
         self._window_withheld: dict[str, int] = {}
         # channel ids that have already logged their first WARNING this run
         self._warned: set[str] = set()
-        # Whether the no-clock fallback has been reported (#821 review).
-        self._no_clock_logged = False
         # Validate at startup so a bad value names itself here rather than
         # capping nothing at the first send.
         block = config.get("outbound_cap")
@@ -270,34 +277,8 @@ class OutboundCapPlugin(CorvidaePlugin):
             )
 
     def _now(self) -> float:
-        """The kernel clock's time, or a monotonic fallback without one.
-
-        A plugin manager with no ``clock`` plugin — a bare one, or a test — falls
-        back to ``time.monotonic()``: the right kind of time for a sliding
-        window, just not a swappable one. The fallback says so once at INFO, so
-        a daemon running without the clock plugin is visible rather than merely
-        odd under test, and a plugin manager that cannot answer at all is logged
-        with its reason (#821 review).
-        """
-        clock = None
-        try:
-            clock = self._pm.get_plugin("clock")
-        except Exception:  # pragma: no cover - a pm without get_plugin
-            logger.warning(
-                "outbound_cap: the plugin manager could not answer get_plugin('clock'); "
-                "timing the window on time.monotonic()",
-                exc_info=True,
-            )
-            return time.monotonic()
-        if clock is None:
-            if not self._no_clock_logged:
-                self._no_clock_logged = True
-                logger.info(
-                    "outbound_cap: no clock plugin; the sliding window runs on "
-                    "time.monotonic() and cannot be swapped in a test",
-                )
-            return time.monotonic()
-        return clock.now()
+        """The kernel clock's time, which a test can swap for a fake."""
+        return get_dependency(self._pm, "clock", Clock).now()
 
     def _window(self, channel) -> tuple[int | None, int | None, str]:
         """The channel's window limit, its length and the key that set it."""

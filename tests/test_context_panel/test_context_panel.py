@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 from context_panel import ContextPanelPlugin
 
+from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, ReasoningHistory
 from corvidae.channels.web import WebPlugin
 from corvidae.context import ContextWindow, MessageType
@@ -17,7 +18,7 @@ from corvidae.hooks import TransportPlugin, create_plugin_manager, install_plugi
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.thinking import apply_reasoning_history
 from corvidae.tool_policy import ToolView
-from tests.test_web_plugin import TOKEN, _no_env_token, make_env, parse_side_body  # noqa: F401
+from tests.test_web_plugin import TOKEN, AgentStub, _no_env_token, make_env, parse_side_body  # noqa: F401
 
 PANEL = "/panel/context_panel"
 ENABLED = {"context_panel": {}}
@@ -29,6 +30,19 @@ class EchoTransport(TransportPlugin):
     transport = "testtx"
 
 
+class PanelAgentStub(AgentStub, Agent):
+    """An AgentStub that passes ``get_dependency(pm, "agent", Agent)``.
+
+    The panel reads ``mid_conversation_system_role`` off the registered agent;
+    the class attributes below shadow Agent's read-only properties so they can be set.
+    Agent.__init__ is not run (AgentStub's is), so no kernel state is built.
+    """
+
+    mid_conversation_system_role = "system"
+    # Agent.started is also a read-only property; AgentStub assigns it.
+    started = True
+
+
 async def panel_env(make_env, **kwargs):
     """A running web console with the context panel loaded and enabled."""
     plugin = ContextPanelPlugin()
@@ -37,6 +51,10 @@ async def panel_env(make_env, **kwargs):
         extra_config=kwargs.pop("extra_config", ENABLED),
         **kwargs,
     )
+    # Swap the shared stub for one that is an Agent, as the panel now requires.
+    env.pm.unregister(name="agent")
+    env.agent = PanelAgentStub(env.pm)
+    env.pm.register(env.agent, name="agent")
     return env, plugin
 
 
@@ -317,12 +335,12 @@ class TestRendered:
         assert body["messages"] == win.build_prompt(
             frozenset({"c9"}), mid_conversation_system_role="system")
 
-    async def test_rendered_uses_the_agents_mid_system_role(self, make_env, caplog):
+    async def test_rendered_uses_the_agents_mid_system_role(self, make_env):
         """The re-roling the issue wants visible, and the one thing no test reached.
 
-        Hardcoding "system" in ``_mid_system_role`` passed all 34 tests, because
-        the stub agent has no ``mid_conversation_system_role`` and every expected
-        body passed ``"system"`` explicitly (#695 review).
+        Hardcoding "system" in ``_mid_system_role`` once passed all 34 tests,
+        because every expected body passed ``"system"`` explicitly (#695
+        review); this test sets the agent's role to "user" so it cannot.
         """
         env, _ = await panel_env(make_env)
         env.agent.mid_conversation_system_role = "user"
@@ -340,22 +358,6 @@ class TestRendered:
         # The point of the finding: the mid-conversation row is re-roled as the
         # agent would send it, not as stored.
         assert [m["role"] for m in body["messages"]] == ["system", "user", "user"]
-        assert "no agent.mid_conversation_system_role" not in caplog.text
-
-    async def test_rendered_without_an_agent_says_which_role_it_assumed(
-        self, make_env, caplog,
-    ):
-        """A missing attribute is a rescue, so it is a warning naming the guess."""
-        env, _ = await panel_env(make_env)
-        env.pm.unregister(name="agent")
-        win = seed(env, prompt="p")
-        win.append({"role": "system", "content": "ctx"}, MessageType.CONTEXT)
-
-        body = await fetch(env, "rendered", channel="web:main")
-
-        assert body["messages"] == win.build_prompt(
-            frozenset(), mid_conversation_system_role="system")
-        assert "no agent.mid_conversation_system_role" in caplog.text
 
     async def test_rendered_unloaded_channel(self, make_env):
         env, _ = await panel_env(make_env)

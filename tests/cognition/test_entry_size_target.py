@@ -18,7 +18,7 @@ from corvidae_cognition.memory import (
     entry_size_sentence,
     resolve_entry_target_tokens,
 )
-from helpers import FakeForkAgent, window_of
+from helpers import FakeForkAgent, add_kernel_registry, window_of
 
 from corvidae.context import count_tokens
 
@@ -32,7 +32,7 @@ from .test_memory_consolidation import (
     fetch_memories,
     seed_dialog,
 )
-from .test_memory_fork import DIALOG, _compaction, _Registry, _use
+from .test_memory_fork import DIALOG, _compaction, _use
 from .test_memory_stamps import config_with, prompt_text, stamps_of
 
 
@@ -63,7 +63,8 @@ async def fork_env(config, tmp_path, name="s.db"):
     memory, persistence, _stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / name)
     )
-    memory.pm.register(_Registry(channel), name="registry")
+    # The builder already registered the kernel registry; add the channel to it.
+    add_kernel_registry(memory.pm).channels[channel.id] = channel
     ids = await seed_dialog(persistence, channel, DIALOG)
     channel.conversation = window_of(channel.id, ids, contents=[c for _, c in DIALOG])
     return memory, channel, db, ids
