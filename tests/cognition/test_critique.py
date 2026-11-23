@@ -644,6 +644,21 @@ class TestRetentionRootFromRecall:
         assert any("knowledge base root is «values/»" in t for t in instructions), instructions
         await _teardown(env)
 
+    async def test_the_lens_fork_writes_a_fork_log_row(self, tmp_path):
+        """#1204: the lens point is recorded, not just the provenance one."""
+        env = await self._env(tmp_path, {"root": "values/"})
+        await _fire(env, "klens", origin="user", vector={"retention": 1.0})
+        await _run_next_task(env.task)
+        async with env.db.execute(
+            "SELECT stage, point, instruction FROM fork_log"
+        ) as cur:
+            rows = await cur.fetchall()
+        assert any(
+            stage == "critique" and point == "lens" and "knowledge base root" in instr
+            for stage, point, instr in rows
+        ), rows
+        await _teardown(env)
+
     async def test_the_wake_stub_names_recalls_root(self, tmp_path):
         """AC9a: the filing turn is told the same root."""
         env = await self._env(
