@@ -226,3 +226,9 @@ class PreSendHold:
 - Cosmetics left as they are: (d) by policy drop (equivalent end state, said in a docstring), R11 on two traces, overlapping stub counts, the weak "unusable" cause check.
 - Edges Deferred: no test isolates the last-batch-count rule or the `resolve_trace_origin` row.
 - Upstream concern accepted: `on_final` takes `response_text` (design sketch updated). The draft match no longer scans the window.
+
+### Red round 2: FAIL
+- F1 (important): no test showed appraisal skipping the check while a hold is outstanding. **Fixed** in the appraisal forwarding test.
+- E1 (always-warn mutation): **fixed now**, a one-line assertion of no warning when the objections were admitted.
+- Cosmetics 2–4 left as they are: the overlapping fallback tests, the odd but consistent draft text, R8 under R9 (not in R9's criterion).
+- E2 (any-offer mutation): Deferred with the last-batch-count rule. E3 and E4: no action.
