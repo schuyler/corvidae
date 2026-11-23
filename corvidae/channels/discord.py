@@ -282,6 +282,36 @@ _TRIGGER_MAP_MAX = 256
 _MAX_EMOJI_CHARS = 64
 
 
+def _name_mentions(text: str, message: Any, bot_user_id: int) -> str:
+    """Replace every mention token in ``text`` with the name behind it (#1215).
+
+    Discord sends ``<@id>`` (``<@!id>`` for a nickname mention): an id the
+    model cannot resolve. Each mentioned user travels with the name the guild
+    shows, so the sentence reads the way it was typed, and a mention of the
+    bot still says the message was addressed to it. The bot's own token falls
+    back to ``@you`` when Discord gives no name for it; a user missing from
+    ``message.mentions`` keeps its token rather than losing the reference.
+    """
+    names: dict[str, str] = {}
+    for user in getattr(message, "mentions", None) or ():
+        name = (
+            getattr(user, "display_name", None)
+            or getattr(user, "global_name", None)
+            or getattr(user, "name", None)
+        )
+        if name:
+            names[str(getattr(user, "id", ""))] = name
+    own = str(bot_user_id)
+
+    def replace(match: "re.Match[str]") -> str:
+        uid = match.group(1)
+        if uid == own:
+            return f"@{names.get(uid, 'you')}"
+        return f"@{names[uid]}" if uid in names else match.group(0)
+
+    return re.sub(r"<@!?(\d+)>", replace, text)
+
+
 def _channel_name(channel: Any) -> str | None:
     """The name to show the model for a Discord channel or thread (#513).
 
@@ -795,9 +825,16 @@ class DiscordPlugin(TransportPlugin):
                         message.channel.id,
                     )
                     return
-            # Remove the bot's own mention token (both forms); a no-op when
-            # the message does not mention the bot.
-            text = re.sub(rf"<@!?{bot_user_id}>", "", text)
+            # Name each mention token instead of cutting the bot's own: the
+            # model reads "@Alfred" rather than an id it cannot resolve, the
+            # sentence keeps the shape it was typed in, and the fact that it
+            # was addressed survives. Cutting the token also left its
+            # whitespace behind (#1215). A no-op when nothing is mentioned.
+            bare = not re.sub(rf"<@!?{bot_user_id}>", "", text).strip()
+            text = _name_mentions(text, message, bot_user_id)
+            # A bare mention is the name and nothing else: nothing to answer.
+            if bare:
+                text = ""
 
         # Scope: DMs key on the user (stable across DM channel ids), servers
         # and threads on their own channel id.
