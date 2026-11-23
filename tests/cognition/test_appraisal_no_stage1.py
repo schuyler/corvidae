@@ -28,13 +28,13 @@ def test_appraisal_implements_no_gate_hook():
     assert not hasattr(AppraisalPlugin, "should_send_response")
 
 
-# Every stage-1 block, plus one stage-2 key that must not be reported.
+# Every stage-1 block. The importance-prior weights #1189 removed are
+# tested in test_appraisal_no_vector.py.
 _REMOVED = {
     "appraisal": {
         "probe": {"budget_ms": 50, "max_tokens": 12, "rank_scale": 10.0},
         "weights": {"novelty": 0.35, "question": 0.15},
         "novelty": {"no_probe_default": 0.5},
-        "prior": {"w_stakes": 0.4},
     }
 }
 
@@ -56,5 +56,3 @@ async def test_each_removed_key_is_warned_by_name(caplog, hook):
         hits = [m for m in messages if key in m]
         assert hits, f"no warning names {key}: {messages}"
         assert all("delete" in m and "agent.yaml" in m for m in hits), hits
-    # The stage-2 importance-prior weights still work and are not reported.
-    assert not any("appraisal.prior" in m for m in messages)

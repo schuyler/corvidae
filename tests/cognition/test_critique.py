@@ -738,7 +738,7 @@ async def _stage2(env, trace_id, claims, annotations=None, response_text=CUE_FRE
     [listener] = env.appraisal.stage2_listeners
     await listener(
         channel=env.channel, trace_id=trace_id, response_text=response_text,
-        annotations=annotations or {}, stage2={"valence": 0.5, "past_claims": claims},
+        annotations=annotations or {}, stage2={"past_claims": claims},
     )
 
 
@@ -1258,10 +1258,7 @@ class TestProvenanceCritic:
 
 
 def _stage2_reply(past_claims):
-    return json.dumps({
-        "valence": 0.5, "stakes": 0.5, "ambiguity": 0.0, "commitment_density": 0.0,
-        "novelty": 0.5, "correction": False, "past_claims": past_claims,
-    })
+    return json.dumps({"past_claims": past_claims})
 
 
 async def _real_path_env(tmp_path, replies, past_claims):
@@ -1302,9 +1299,9 @@ async def _real_path_env(tmp_path, replies, past_claims):
     install_plugin_hookspecs(pm)
     for p in plugins:
         await p.on_init(pm=pm, config=cfg)
-    for p in plugins:
-        await p.on_start(config=cfg)
     critique = plugins[1]
+    # Appraisal has no on_start of its own (#1189).
+    await critique.on_start(config=cfg)
     assert await critique._probe.get() is not None
 
     gathered: dict[str, list] = {}

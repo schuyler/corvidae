@@ -1,5 +1,4 @@
-"""RED tests for WP2.5 — AppraisalPlugin stage 2: full appraisal, importance
-prior, valence.
+"""RED tests for WP2.5 — AppraisalPlugin stage 2.
 
 Per plans/implementation/phase-2.md WP2.5:
 - on_agent_response enqueues exactly one SILENT (deliver=False) stage-2 task,
@@ -11,18 +10,13 @@ Per plans/implementation/phase-2.md WP2.5:
 - malformed model output is logged and the row gets no stage 2; no exception
   escapes;
 - a stage-2 task for origin="critique" exchanges too (#1031);
-- AppraisalPrior scores a covered msg-id range from stored appraisals and falls
-  back to the wrapped prior when uncovered; consolidation writes mean stage-2
-  valence into the memory record;
 - entropy_summary summarizes an OpenAI-style logprobs envelope (topn + residual,
   NLL fallback, absent → None).
 """
 
 import asyncio
 import json
-import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
@@ -35,12 +29,13 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
-from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
+from helpers import FakeForkAgent, window_of
 
 
+# A stage-2 reply as the fork now asks for it: the reply's claims about the
+# past (the appraisal vector was removed, #1189).
 VALID_STAGE2_JSON = json.dumps({
-    "valence": 0.8, "stakes": 0.9, "ambiguity": 0.2,
-    "commitment_density": 0.5, "novelty": 0.7, "correction": True,
+    "past_claims": [{"claim": "we agreed on Tuesday", "queries": ["Tuesday"]}],
 })
 
 
@@ -108,7 +103,6 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     pm.register(appraisal, name="appraisal")
     cfg = {"daemon": {"session_db": db_path}}
     await appraisal.on_init(pm=pm, config=cfg)
-    await appraisal.on_start(config=cfg)
 
     channel = _make_channel()
     # Stage 2 is a fork of the live window (#320): a fork agent answers it
@@ -345,9 +339,7 @@ class TestStage2Persist:
         )
         await _run_next_task(env.task)
         env_appraisal = await _read_appraisal(env.db, "kp")
-        assert env_appraisal["stage2"]["valence"] == 0.8
-        assert env_appraisal["stage2"]["stakes"] == 0.9
-        assert env_appraisal["stage2"]["correction"] is True
+        assert env_appraisal["stage2"] == json.loads(VALID_STAGE2_JSON)
         await _teardown(env)
 
     async def test_merge_not_overwrite_keeps_stage1_and_stage1_out(self, tmp_path):
@@ -368,7 +360,7 @@ class TestStage2Persist:
         envelope = await _read_appraisal(env.db, "km")
         assert envelope["stage1"] == {"salience": 0.3}
         assert envelope["stage1_out"] == {"salience": 0.4}
-        assert envelope["stage2"]["valence"] == 0.8
+        assert envelope["stage2"] == json.loads(VALID_STAGE2_JSON)
         await _teardown(env)
 
     async def test_malformed_output_keeps_stage1_no_exception(self, tmp_path):
@@ -433,7 +425,7 @@ class TestPastClaims:
 
     def test_missing_field_is_no_claims(self):
         from corvidae_cognition.appraisal import _stage2_from_text
-        assert _stage2_from_text(VALID_STAGE2_JSON)["past_claims"] == []
+        assert _stage2_from_text(json.dumps({}))["past_claims"] == []
 
     def test_malformed_entries_dropped_and_logged(self, caplog):
         from corvidae_cognition.appraisal import _stage2_from_text
@@ -637,482 +629,6 @@ class TestEntropySummary:
         assert env["max"] == pytest.approx(2.0)
 
 
-# ---------------------------------------------------------------------------
-# 4. AppraisalPrior + mean_valence over a msg-id range
-# ---------------------------------------------------------------------------
-
-
-class TestAppraisalPrior:
-    async def _seed(self, env, key, rowid, stage1=None, stage2=None,
-                    channel_id=None):
-        # channel_id defaults to env.channel so existing tests are unchanged.
-        channel_id = channel_id if channel_id is not None else env.channel.id
-        env_appraisal = {}
-        if stage1 is not None:
-            env_appraisal["stage1"] = stage1
-        if stage2 is not None:
-            env_appraisal["stage2"] = stage2
-        await env.outcome.upsert_exchange(
-            key, channel_id, "user", appraisal=env_appraisal,
-        )
-        await env.outcome.update_exchange(key, message_rowid=rowid)
-
-    async def test_covered_range_returns_composite(self, tmp_path):
-        env = await build_env(tmp_path)
-        await self._seed(env, "e1", 10, stage2={"stakes": 1.0, "valence": 1.0, "novelty": 1.0})
-        score = await env.appraisal.importance_over_range(env.channel, (5, 15))
-        # composite = 0.4*1 + 0.3*|1-0.5|*2 + 0.3*1 = 1.0
-        assert score == pytest.approx(1.0)
-        await _teardown(env)
-
-    async def test_a_stored_stage1_score_is_ignored(self, tmp_path):
-        """#1185: a row written before stage 1 was removed still carries a
-        stage1 salience; the prior is the stage-2 composite alone."""
-        env = await build_env(tmp_path)
-        await self._seed(env, "e1", 10, stage1={"salience": 0.9},
-                         stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
-        score = await env.appraisal.importance_over_range(env.channel, (5, 15))
-        # composite = 0.4*0.5 + 0 + 0 = 0.2, not the stored 0.9
-        assert score == pytest.approx(0.2)
-        await _teardown(env)
-
-    async def test_prior_falls_back_on_a_stage1_only_row(self, tmp_path):
-        """#1185: a range whose only appraisal is an old stage-1 score is
-        not covered, so memory's own rubric scores it."""
-        from corvidae_cognition.appraisal import AppraisalPrior
-        env = await build_env(tmp_path)
-        await self._seed(env, "e2", 20, stage1={"salience": 0.42})
-        fallback = MagicMock()
-        fallback.score = AsyncMock(return_value=0.33)
-        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
-        result = await prior.score([{"role": "user", "content": "x"}],
-                                   msg_id_range=(15, 25), channel=env.channel)
-        assert result == pytest.approx(0.33)
-        fallback.score.assert_awaited_once()
-        await _teardown(env)
-
-    async def test_uncovered_range_returns_none(self, tmp_path):
-        env = await build_env(tmp_path)
-        await self._seed(env, "e3", 100, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.0})
-        assert await env.appraisal.importance_over_range(env.channel, (1, 10)) is None
-        await _teardown(env)
-
-    async def test_prior_falls_back_when_uncovered(self, tmp_path):
-        from corvidae_cognition.appraisal import AppraisalPrior
-        env = await build_env(tmp_path)
-        fallback = MagicMock()
-        fallback.score = AsyncMock(return_value=0.33)
-        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
-        result = await prior.score([{"role": "user", "content": "x"}],
-                                   msg_id_range=(1, 5), channel=env.channel)
-        assert result == 0.33
-        fallback.score.assert_awaited_once()
-        await _teardown(env)
-
-    async def test_prior_uses_appraisal_when_covered(self, tmp_path):
-        from corvidae_cognition.appraisal import AppraisalPrior
-        env = await build_env(tmp_path)
-        # composite = 0.4*1.0 + 0 + 0.3*0.5 = 0.55
-        await self._seed(env, "e4", 30, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.5})
-        fallback = MagicMock()
-        fallback.score = AsyncMock(return_value=0.1)
-        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
-        result = await prior.score([{"role": "user", "content": "x"}],
-                                   msg_id_range=(25, 35), channel=env.channel)
-        assert result == pytest.approx(0.55)
-        fallback.score.assert_not_awaited()
-        await _teardown(env)
-
-    async def test_mean_valence_over_range(self, tmp_path):
-        env = await build_env(tmp_path)
-        await self._seed(env, "v1", 40, stage2={"valence": 0.2})
-        await self._seed(env, "v2", 41, stage2={"valence": 0.8})
-        await self._seed(env, "v3", 42, stage1={"salience": 0.5})  # an old row: no stage2
-        mean = await env.appraisal.mean_valence(env.channel.id, (35, 45))
-        assert mean == pytest.approx(0.5)
-        # No stage-2 anywhere → None.
-        assert await env.appraisal.mean_valence(env.channel.id, (100, 200)) is None
-        await _teardown(env)
-
-    # R1 (#195): importance for channel A's range must ignore channel B's
-    # exchanges, whose message_log rowids interleave inside A's range.
-    async def test_importance_over_range_ignores_other_channels(self, tmp_path):
-        env = await build_env(tmp_path)
-        # Composites: a1 = 0.4*0.5 = 0.2; b1 = 0.4*1 + 0.3*1 = 0.7; a2 = 0.4*0.75 = 0.3.
-        await self._seed(env, "a1", 40, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
-        await self._seed(env, "b1", 41, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 1.0},
-                         channel_id="irc:#b")
-        await self._seed(env, "a2", 42, stage2={"stakes": 0.75, "valence": 0.5, "novelty": 0.0})
-        score = await env.appraisal.importance_over_range(env.channel, (40, 42))
-        # Only A's exchanges count: max(0.2, 0.3), not B's 0.7.
-        assert score == pytest.approx(0.3)
-        await _teardown(env)
-
-    # R2 (#195): mean_valence takes a channel id and averages only that
-    # channel's stage-2 valences (A: 0.2, 0.4; interleaved B: 0.9 -> 0.3).
-    async def test_mean_valence_ignores_other_channels(self, tmp_path):
-        env = await build_env(tmp_path)
-        await self._seed(env, "a1", 40, stage2={"valence": 0.2})
-        await self._seed(env, "b1", 41, stage2={"valence": 0.9},
-                         channel_id="irc:#b")
-        await self._seed(env, "a2", 42, stage2={"valence": 0.4})
-        mean = await env.appraisal.mean_valence(env.channel.id, (40, 42))
-        assert mean == pytest.approx(0.3)
-        await _teardown(env)
-
-    # #311: a corrupt exchange_log.appraisal value in the range is skipped
-    # with one WARNING per row naming the trace id, the channel and the
-    # remedy (#232's pattern); the rest of the range is still used. The
-    # writer API cannot produce a corrupt value, so tests inject one by
-    # direct SQL.
-    async def _corrupt_appraisal(self, env, key: str, value_sql: str) -> None:
-        await env.db.execute(
-            f"UPDATE exchange_log SET appraisal = {value_sql} "
-            "WHERE trace_id = ?",
-            (key,),
-        )
-        await env.db.commit()
-
-    def _corrupt_warnings(self, caplog) -> list[str]:
-        return [
-            r.getMessage() for r in caplog.records
-            if r.levelno >= logging.WARNING
-        ]
-
-    async def _invalid_utf8_appraisal(self, env, key: str) -> None:
-        # JSON '{"stage1":' followed by a lone 0x80/0xff byte: valid TEXT as
-        # far as sqlite is concerned, but refuses to decode as UTF-8. Only
-        # the CAST(... AS BLOB) makes the failure land at the row's decode
-        # instead of inside fetchall().
-        await env.db.execute(
-            "UPDATE exchange_log "
-            "SET appraisal = CAST(x'7b22737461676531223a80ff7d' AS TEXT) "
-            "WHERE trace_id = ?",
-            (key,),
-        )
-        await env.db.commit()
-
-    async def test_corrupt_appraisal_row_warns_and_rest_of_range_used(
-        self, tmp_path, caplog
-    ):
-        env = await build_env(tmp_path)
-        try:
-            # The range maximum sits AFTER the corrupt row, so a reader that
-            # stopped at it (break) would score 0.08 and find no valence.
-            await self._seed(env, "k1", 50, stage2={"stakes": 0.2, "valence": 0.5, "novelty": 0.0})
-            await self._seed(env, "k2", 51, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
-            await self._corrupt_appraisal(env, "k2", "'not json{'")
-            await self._seed(env, "k3", 52, stage2={"stakes": 1.0, "valence": 1.0,
-                                     "novelty": 1.0})
-            with caplog.at_level(logging.WARNING,
-                                 logger="corvidae.appraisal"):
-                score = await env.appraisal.importance_over_range(
-                    env.channel, (45, 55))
-                mean = await env.appraisal.mean_valence(
-                    env.channel.id, (45, 55))
-            # Both valid envelopes count, including the one after the corrupt
-            # row: the max composite is k3's, the mean valence is (0.5 + 1.0) / 2.
-            assert score == pytest.approx(1.0)
-            assert mean == pytest.approx(0.75)
-            # One WARNING per corrupt row per reader call: importance_over_range
-            # and mean_valence each read the range.
-            warnings = self._corrupt_warnings(caplog)
-            assert len(warnings) == 2, warnings
-            assert "k2" in warnings[0], warnings[0]
-            assert env.channel.id in warnings[0], warnings[0]
-            assert "inspect or correct" in warnings[0], warnings[0]
-        finally:
-            await _teardown(env)
-
-    async def test_non_dict_appraisal_row_warns_and_is_skipped(
-        self, tmp_path, caplog
-    ):
-        env = await build_env(tmp_path)
-        try:
-            await self._seed(env, "n1", 50, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
-            await self._seed(env, "n2", 51, stage2={"stakes": 0.25, "valence": 0.5, "novelty": 0.0})
-            # '[]' decodes as JSON but is not an appraisal envelope.
-            await self._corrupt_appraisal(env, "n2", "'[]'")
-            # A valid row after the corrupt one, so a reader that stopped at
-            # it (break) would score 0.2 instead of 0.4.
-            await self._seed(env, "n3", 52, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.0})
-            with caplog.at_level(logging.WARNING,
-                                 logger="corvidae.appraisal"):
-                score = await env.appraisal.importance_over_range(
-                    env.channel, (45, 55))
-            assert score == pytest.approx(0.4)
-            warnings = self._corrupt_warnings(caplog)
-            assert len(warnings) == 1, warnings
-            assert "n2" in warnings[0], warnings[0]
-            assert env.channel.id in warnings[0], warnings[0]
-            assert "inspect or correct" in warnings[0], warnings[0]
-        finally:
-            await _teardown(env)
-
-    async def test_invalid_utf8_appraisal_row_warns_and_is_skipped(
-        self, tmp_path, caplog
-    ):
-        env = await build_env(tmp_path)
-        try:
-            await self._seed(env, "u1", 50, stage2={"stakes": 0.25, "valence": 0.5, "novelty": 0.0})
-            await self._seed(env, "u2", 51, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
-            await self._invalid_utf8_appraisal(env, "u2")
-            await self._seed(env, "u3", 52, stage2={"stakes": 0.75, "valence": 0.5, "novelty": 0.0})
-            with caplog.at_level(logging.WARNING,
-                                 logger="corvidae.appraisal"):
-                score = await env.appraisal.importance_over_range(
-                    env.channel, (45, 55))
-            # Without CAST(... AS BLOB) the fetch itself raises and the whole
-            # range is lost, so this asserts the row is skipped, not the range.
-            assert score == pytest.approx(0.3)
-            warnings = self._corrupt_warnings(caplog)
-            assert len(warnings) == 1, warnings
-            assert "u2" in warnings[0], warnings[0]
-            assert "inspect or correct" in warnings[0], warnings[0]
-        finally:
-            await _teardown(env)
-
-    # R2 (#195) end to end: consolidating channel A stores A's mean valence
-    # even though a channel B exchange sits inside A's message-id range.
-    async def test_consolidation_valence_ignores_interleaved_channel(self, tmp_path):
-        from corvidae_cognition.appraisal import AppraisalPlugin
-        from corvidae.channel import Channel, ChannelConfig
-        from corvidae.context import MessageType
-        from corvidae_cognition.memory import MemoryPlugin
-
-        consolidation_json = json.dumps({
-            "summary": "I discussed the plan with the user.",
-            "topic_tags": ["plan"],
-            "participants": ["user"],
-        })
-
-        # Wire persistence, outcome_log, llm stub, memory and appraisal.
-        db_path = str(tmp_path / "sessions.db")
-        db = await aiosqlite.connect(db_path)
-        await init_db(db)
-        pm = create_plugin_manager()
-        persistence = PersistencePlugin()
-        persistence.db = db
-        pm.register(persistence, name="persistence")
-        outcome = OutcomeLogPlugin()
-        pm.register(outcome, name="outcome_log")
-        await outcome.on_init(pm=pm, config={})
-        await outcome.on_start(config={})
-        llm = LLMPlugin()
-        pm.register(llm, name="llm")
-        llm._clients["main"] = StubClient(consolidation_json)
-        stub_llm_config(llm)
-        cfg = with_chat_llm({"daemon": {"session_db": db_path}, "memory": {}})
-        memory = MemoryPlugin()
-        # A view-capable agent with forks off: the range is written from the main view.
-        pm.register(FakeForkAgent(set()), name="agent")
-        pm.register(memory, name="memory")
-        await memory.on_init(pm=pm, config=cfg)
-        await memory.on_start(config=cfg)
-        appraisal = AppraisalPlugin()
-        pm.register(appraisal, name="appraisal")
-        await appraisal.on_init(pm=pm, config=cfg)
-        await appraisal.on_start(config=cfg)
-
-        chan_a = Channel(transport="test", scope="conv-a", config=ChannelConfig())
-        chan_b = Channel(transport="test", scope="conv-b", config=ChannelConfig())
-
-        # Interleave message_log rows: A, B, A (B's row lands inside A's range).
-        rowids = []
-        for chan, role, content in [
-            (chan_a, "user", "here is the plan"),
-            (chan_b, "user", "unrelated chatter"),
-            (chan_a, "assistant", "understood, I will do it"),
-        ]:
-            rowids.append(await persistence.persist_message(
-                channel=chan,
-                message={"role": role, "content": content},
-                message_type=MessageType.MESSAGE,
-            ))
-
-        # Stage-2 valences: A 0.2 and 0.4, interleaved B 0.9 -> A's mean 0.3.
-        for key, chan, rowid, val in [
-            ("xa1", chan_a, rowids[0], 0.2),
-            ("xb1", chan_b, rowids[1], 0.9),
-            ("xa2", chan_a, rowids[2], 0.4),
-        ]:
-            await outcome.upsert_exchange(
-                key, chan.id, "user",
-                appraisal={"stage2": {"stakes": 0.5, "valence": val, "novelty": 0.5}},
-            )
-            await outcome.update_exchange(key, message_rowid=rowid)
-
-        # try/finally so teardown runs even when an assertion fails.
-        try:
-            await memory._consolidate_range(chan_a.id, rowids[-1], "test")
-
-            async with db.execute(
-                "SELECT valence FROM memory WHERE channel_id = ?", (chan_a.id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-            assert row is not None
-            assert row[0] == pytest.approx(0.3)
-
-        finally:
-            await db.close()
-
-    # R3 (#195): a failing exchange_log query is logged as one WARNING naming
-    # the channel, id range, exception type and fallback, and yields [].
-    async def test_appraisals_in_range_logs_lookup_failure(self, tmp_path, caplog):
-        import logging
-        import sqlite3
-
-        env = await build_env(tmp_path)
-        # Replace the exchange DB with one whose execute() raises.
-        broken = MagicMock()
-        broken.execute = MagicMock(side_effect=sqlite3.OperationalError("boom"))
-        env.appraisal._exchange_db = lambda: broken
-
-        with caplog.at_level(logging.WARNING):
-            result = await env.appraisal._appraisals_in_range(
-                env.channel.id, (40, 42)
-            )
-
-        assert result == []
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        record = warnings[0]
-        text = record.getMessage()
-        # Every element R3 names: the channel, the id range as the message
-        # renders it, the exception type, and both halves of the fallback.
-        for needle in (
-            env.channel.id,
-            "messages 40–42",
-            "OperationalError",
-            "rubric prior",
-            "NULL valence",
-        ):
-            assert needle in text
-        # The traceback attached is the lookup's own exception.
-        assert record.exc_info is not None
-        assert record.exc_info[0] is sqlite3.OperationalError
-        await _teardown(env)
-
-    async def test_consolidation_writes_mean_valence(self, tmp_path):
-        """End-to-end: consolidation writes mean stage-2 valence into the
-        memory record and uses the appraisal-driven importance prior."""
-        from corvidae_cognition.appraisal import AppraisalPlugin
-        from corvidae.channel import Channel, ChannelConfig
-        from corvidae.context import MessageType
-        from corvidae_cognition.memory import MemoryPlugin
-
-        consolidation_json = json.dumps({
-            "summary": "I discussed the plan with the user.",
-            "topic_tags": ["plan"],
-            "participants": ["user"],
-        })
-
-        db_path = str(tmp_path / "sessions.db")
-        db = await aiosqlite.connect(db_path)
-        await init_db(db)
-        pm = create_plugin_manager()
-        persistence = PersistencePlugin()
-        persistence.db = db
-        pm.register(persistence, name="persistence")
-
-        outcome = OutcomeLogPlugin()
-        pm.register(outcome, name="outcome_log")
-        await outcome.on_init(pm=pm, config={})
-        await outcome.on_start(config={})
-
-        llm = LLMPlugin()
-        pm.register(llm, name="llm")
-        llm._clients["main"] = StubClient(consolidation_json)
-        stub_llm_config(llm)
-
-        cfg = with_chat_llm({"daemon": {"session_db": db_path}, "memory": {}})
-        memory = MemoryPlugin()
-        # A view-capable agent with forks off: the range is written from the main view.
-        pm.register(FakeForkAgent(set()), name="agent")
-        pm.register(memory, name="memory")
-        await memory.on_init(pm=pm, config=cfg)
-        await memory.on_start(config=cfg)
-
-        appraisal = AppraisalPlugin()
-        pm.register(appraisal, name="appraisal")
-        await appraisal.on_init(pm=pm, config=cfg)
-        await appraisal.on_start(config=cfg)  # installs AppraisalPrior on memory
-
-        channel = Channel(transport="test", scope="conv", config=ChannelConfig())
-
-        # Seed dialog into message_log.
-        rowids = []
-        for role, content in [("user", "here is the plan"),
-                              ("assistant", "understood, I will do it")]:
-            rowids.append(await persistence.persist_message(
-                channel=channel,
-                message={"role": role, "content": content},
-                message_type=MessageType.MESSAGE,
-            ))
-
-        # Seed exchange_log appraisals covering the range with stage-2 valence.
-        await outcome.upsert_exchange(
-            "x1", channel.id, "user",
-            appraisal={"stage1": {"salience": 0.3},
-                       "stage2": {"stakes": 0.9, "valence": 0.9, "novelty": 0.5}},
-        )
-        await outcome.update_exchange("x1", message_rowid=rowids[0])
-        await outcome.upsert_exchange(
-            "x2", channel.id, "user",
-            appraisal={"stage2": {"stakes": 0.1, "valence": 0.7, "novelty": 0.1}},
-        )
-        await outcome.update_exchange("x2", message_rowid=rowids[1])
-
-        await memory._consolidate_range(channel.id, rowids[-1], "test")
-
-        async with db.execute(
-            "SELECT importance, valence FROM memory WHERE channel_id = ?",
-            (channel.id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row is not None
-        importance, valence = row
-        # Mean stage-2 valence = (0.9 + 0.7) / 2 = 0.8.
-        assert valence == pytest.approx(0.8)
-        # Importance came from the appraisal prior (covered range), not the
-        # rubric fallback: max composite over the two exchanges.
-        assert 0.0 <= importance <= 1.0
-
-        await db.close()
-
-    async def test_prior_installed_on_memory_at_start(self, tmp_path):
-        """AppraisalPlugin.on_start wraps MemoryPlugin.importance_prior."""
-        from corvidae_cognition.appraisal import AppraisalPlugin, AppraisalPrior
-
-        db_path = str(tmp_path / "sessions.db")
-        db = await aiosqlite.connect(db_path)
-        await init_db(db)
-        pm = create_plugin_manager()
-        persistence = PersistencePlugin()
-        persistence.db = db
-        pm.register(persistence, name="persistence")
-
-        from corvidae.hooks import CorvidaePlugin
-
-        class FakeMemory(CorvidaePlugin):
-            depends_on = frozenset()
-
-        memory = FakeMemory()
-        original_prior = object()
-        memory.importance_prior = original_prior
-        pm.register(memory, name="memory")
-
-        appraisal = AppraisalPlugin()
-        pm.register(appraisal, name="appraisal")
-        cfg = {"daemon": {"session_db": db_path}}
-        await appraisal.on_init(pm=pm, config=cfg)
-        await appraisal.on_start(config=cfg)
-
-        assert isinstance(memory.importance_prior, AppraisalPrior)
-        assert memory.importance_prior._fallback is original_prior
-        await db.close()
-
-
 def test_parse_json_block_error_names_appraisal_phase_and_long_text():
     """The appraisal JSON parse error names its phase and keeps >200 chars."""
     from corvidae_cognition.appraisal import _parse_json_block
@@ -1124,37 +640,3 @@ def test_parse_json_block_error_names_appraisal_phase_and_long_text():
     message = str(excinfo.value)
     assert "appraisal" in message.lower()
     assert "PROVIDER_ERROR_MARKER" in message
-
-
-class TestAppraisalPriorHint:
-    """#635 C8: the reply's importance reaches the prior as ``hint``;
-    appraisal wins where it covers the range, else the fallback gets it."""
-
-    @pytest.mark.parametrize(("covered", "expected_score"), [(True, 0.55), (False, 0.33)])
-    async def test_hint_goes_to_the_fallback_only_when_uncovered(
-        self, tmp_path, covered, expected_score
-    ):
-        from corvidae_cognition.appraisal import AppraisalPrior
-        env = await build_env(tmp_path)
-        if covered:
-            # An exchange inside (25, 35) with a stage-2 composite of 0.55
-            # (0.4 * 1.0 + 0.3 * 0.5).
-            await env.outcome.upsert_exchange(
-                "h1", env.channel.id, "user",
-                appraisal={"stage2": {"stakes": 1.0, "valence": 0.5, "novelty": 0.5}},
-            )
-            await env.outcome.update_exchange("h1", message_rowid=30)
-        fallback = MagicMock()
-        fallback.score = AsyncMock(return_value=0.33)
-        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
-
-        result = await prior.score([{"role": "user", "content": "x"}],
-                                   msg_id_range=(25, 35), channel=env.channel, hint=0.2)
-
-        assert result == pytest.approx(expected_score)
-        if covered:
-            fallback.score.assert_not_awaited()
-        else:
-            fallback.score.assert_awaited_once()
-            assert fallback.score.await_args.kwargs["hint"] == 0.2
-        await _teardown(env)

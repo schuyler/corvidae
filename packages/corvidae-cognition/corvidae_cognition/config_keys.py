@@ -1,10 +1,11 @@
 """Readers for a setting that moved from a ``heartbeat.*`` key to its owner (#1079),
-and the warning for a key that was removed outright (#1185).
+and the warning for a key that was removed outright (#1185, #1189).
 
 Memory and goals each read their beat settings through these, so the
 validation and the old-key rules are one implementation, not three that could
 drift apart. Neither plugin imports the other's config code. Appraisal and
-gates report the stage-1 keys #1185 removed through ``warn_removed_keys``.
+gates report the stage-1 keys #1185 removed, and appraisal the importance-prior
+weights #1189 removed, through ``warn_removed_keys``.
 
 Rules, for a setting with a ``new_key`` and a retired ``old_key``:
     - a key set to ``null``, or whose parent block is not a mapping, is absent;

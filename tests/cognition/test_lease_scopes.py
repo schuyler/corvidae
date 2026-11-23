@@ -131,7 +131,9 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     await llm.on_start(config)
     for p in (outcome, memory, appraisal, critique, usage_log):
         await p.on_init(pm=pm, config=config)
-        await p.on_start(config=config)
+        # Appraisal has no on_start of its own (#1189).
+        if p is not appraisal:
+            await p.on_start(config=config)
     # Embeddings are not under test: no HTTP and no usage row for them.
     llm._clients["embedding"] = _EmbedStub()
     plugin._client = llm.get_client()

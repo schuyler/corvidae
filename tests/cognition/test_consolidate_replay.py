@@ -237,8 +237,7 @@ async def test_fetch_range_rows_excludes_other_channels(tmp_path):
 
 async def test_fetch_range_rows_returns_non_dialog_rows_too(tmp_path):
     """The raw endpoints are what _consolidate_range stores as
-    memory.msg_id_start/msg_id_end and passes to the importance prior and
-    mean_valence. A summary row at the edge of a range still sets that
+    memory.msg_id_start/msg_id_end and passes to the importance prior. A summary row at the edge of a range still sets that
     endpoint, so the fetch must not pre-filter."""
     from corvidae_cognition.memory import fetch_range_rows
 

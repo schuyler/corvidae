@@ -232,8 +232,7 @@ async def turn_env(tmp_path):
     for name, p in (("silence", silence), ("appraisal", appraisal), ("critique", critique)):
         plugin.pm.register(p, name=name)
         await p.on_init(pm=plugin.pm, config=cfg)
-    for p in (appraisal, critique):
-        await p.on_start(config=cfg)
+    await critique.on_start(config=cfg)
     # Record what the turn hands the task queue; running it would need models.
     task_plugin = plugin.pm.get_plugin("task")
     enqueued: list[str] = []

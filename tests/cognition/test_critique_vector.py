@@ -513,9 +513,7 @@ class TestWake:
 # T6, T8 - the stage-2 fork carries the offer; the vector is persisted
 # ---------------------------------------------------------------------------
 
-DIMENSIONS_JSON = {
-    "valence": 0.1, "stakes": 0.2, "ambiguity": 0.3,
-    "commitment_density": 0.4, "novelty": 0.6, "correction": False,
+CLAIMS_JSON = {
     "past_claims": [{"claim": "we met Friday", "queries": ["Friday"]}],
 }
 OFFER = [("alpha", "Did the reply say alpha?"), ("beta", "Did the reply say beta?")]
@@ -551,8 +549,8 @@ class TestStage2Offer:
     ):
         """T6: the fork instruction lists each offered lens's name and
         question after the (overridden) prompt; one fork call, no
-        standalone call; dimensions and past_claims still parse."""
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        standalone call; past_claims still parse."""
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         env, agent, stored = await _appraise(tmp_path, reply)
         assert len(agent.calls) == 1
         assert env.stub.chat_calls == []
@@ -563,7 +561,6 @@ class TestStage2Offer:
             assert line in instruction
             assert instruction.index(line) > len("Score it.")
         assert '"lenses"' in instruction
-        assert stored["novelty"] == 0.6
         assert stored["past_claims"][0]["claim"] == "we met Friday"
 
     async def test_extra_body_carries_the_lenses_schema_without_touching_the_shared_one(
@@ -573,7 +570,7 @@ class TestStage2Offer:
         "none", required; the module's static schema is not modified."""
         from corvidae_cognition.appraisal import STAGE2_SCHEMA
 
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         _, agent, _ = await _appraise(tmp_path, reply)
         schema = agent.calls[0]["extra_body"]["response_format"]["json_schema"]["schema"]
         lenses = schema["properties"]["lenses"]
@@ -586,7 +583,7 @@ class TestStage2Offer:
         self, tmp_path,
     ):
         """T8: stage2["lenses"] is stored on the exchange, as shares of 1."""
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         _, _, stored = await _appraise(tmp_path, reply)
         assert stored["lenses"] == pytest.approx({"alpha": 0.6, "beta": 0.1, "none": 0.3})
 
@@ -614,7 +611,7 @@ def _parse(lenses, caplog, trace_id="k7", offered=("alpha", "beta")):
     (the raw JSON text, so NaN can be written); a None leaves the field out."""
     from corvidae_cognition.appraisal import _stage2_from_text
 
-    body = json.dumps({k: v for k, v in DIMENSIONS_JSON.items()})
+    body = json.dumps({k: v for k, v in CLAIMS_JSON.items()})
     if lenses is not None:
         body = body[:-1] + ', "lenses": ' + lenses + "}"
     caplog.set_level("WARNING")
@@ -626,7 +623,6 @@ class TestLensVector:
         """T7: the percentages become shares that sum to 1."""
         stage2 = _parse('{"alpha": 30, "beta": 10, "none": 10}', caplog)
         assert stage2["lenses"] == pytest.approx({"alpha": 0.6, "beta": 0.2, "none": 0.2})
-        assert stage2["novelty"] == 0.6
 
     def test_unknown_name_and_negative_value_are_dropped_with_warnings(self, caplog):
         """T7: each drop is a warning naming the entry and the trace."""
@@ -651,10 +647,10 @@ class TestLensVector:
                              ids=["missing", "not-a-dict", "all-zero"])
     def test_unusable_vector_leaves_none_and_warns_naming_the_trace(self, caplog, lenses):
         """T7: no usable vector warns with the trace and the reason; the
-        dimensions still land and stage2 has no ``lenses`` key."""
+        claims still land and stage2 has no ``lenses`` key."""
         stage2 = _parse(lenses, caplog)
         assert "lenses" not in stage2
-        assert stage2["novelty"] == 0.6
+        assert stage2["past_claims"][0]["claim"] == "we met Friday"
         assert _warnings(caplog, "k7", "lenses"), caplog.text
 
     async def test_critique_warns_naming_the_trace_when_stage2_is_none(

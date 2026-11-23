@@ -29,7 +29,7 @@ writing); an embedding call that fails or returns the wrong width leaves that
 segment's entries ``embedded = 0``, with a warning, for the retention job's
 backfill.
 
-shortcut: no valence, no near-dup merge, no halving of a rejected embedding
+shortcut: no near-dup merge, no halving of a rejected embedding
 batch, no widening of a scoped stretch over a record that reaches past it, and
 a record straddling two segments is credited to the first only. Upgrade when a
 measurement needs one.
