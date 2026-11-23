@@ -286,7 +286,7 @@ Each stage has a fork instruction:
 |-----|--------------|-------|
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a size sentence (`memory.entry_target_tokens`) and a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
-| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent. |
 | `critique.lens.<lens>.fork_prompt` (provenance: `critique.provenance.fork_prompt`) | `prompts/critique_<lens>_fork.md`; for a lens a plugin adds, the brief it declared | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. For an added lens the override replaces the brief only: critique appends the reply format itself. |
 
 These are resolved by `resolve_prompt` (#411): a string is inline text,

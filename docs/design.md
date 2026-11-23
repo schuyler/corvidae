@@ -2754,8 +2754,7 @@ copies in `prompts/*_fork.md`). They are read from static config with
 write them. Consolidation appends a sentence naming where the range
 starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
-are still in view). Appraisal appends the exchange quotes and the
-retrieval profile. Critique appends the exchange quotes, and the
+are still in view). Appraisal appends the exchange quotes. Critique appends the exchange quotes, and the
 provenance check also passes each past claim and its closest earlier
 messages.
 

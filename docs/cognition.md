@@ -1503,7 +1503,7 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
   the records selected and met, and each segment's rows and estimated tokens.
   With `--snapshot-from` it still makes the copy.
 
-shortcut: no valence, no near-dup merge, no halving of a rejected embedding
+shortcut: no near-dup merge, no halving of a rejected embedding
 batch, and no widening of a scoped stretch over a record that reaches past it. A record whose range runs
 past a stretch is superseded even though part of its range is not redone;
 `--dry-run` shows which. Upgrade if a measurement needs it.

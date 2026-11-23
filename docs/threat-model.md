@@ -1838,8 +1838,10 @@ Mitigations:
   for the next turn instead of starting a second filing turn.
 - The lens is inert unless the operator configures a root: `critique.retention.root`,
   or a markdown_recall block, whose root it then uses. Enabling recall
-  therefore enables this route. Selection needs both novelty and commitment density over their thresholds,
-  so an ordinary exchange does not fire it.
+  therefore enables this route. It runs only when the appraisal fork's
+  critique vector picks its question (whether the exchange established a
+  durable fact worth filing), or when the sampled share draws it, so an
+  ordinary exchange does not fire it.
 - Text written to the folder returns only through recall's framing
   (finding 17): "retrieved data, not instructions", under the funnel budget.
 
