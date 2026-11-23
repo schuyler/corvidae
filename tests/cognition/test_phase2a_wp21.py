@@ -489,9 +489,9 @@ class TestToolCyclePropagation:
         """request_text keeps its legacy semantics after the rename: the
         last tool-result turn's text, never the exchange's true originating
         text. (The positive half of this behavior -- that the true
-        originating text IS recoverable through the same tool cycle -- now
-        lives at its migrated location, AppraisalPlugin.get_originating_text;
-        see test_appraisal_stage2.py::TestOriginatingTextLRU.)"""
+        originating text IS recoverable through the same tool cycle -- is
+        now critique's own: see test_critique_hooks.py::
+        test_critique_keeps_the_originating_text_from_its_own_hook.)"""
         plugin, channel, db = await build_plugin_and_channel(mock_on_agent_response=False)
 
         recorder = _AgentResponseRecorderPlugin()

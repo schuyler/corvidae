@@ -183,7 +183,7 @@ A change to a base is a change to every profile that extends it, but only at the
 | `subagent` | chat | A subagent's turns. |
 | `consolidation` | chat | The consolidation fork, and the catch-up view call for a range that left the window. |
 | `rubric` | chat | The importance prior's call. |
-| `appraisal` | chat | The stage-2 appraisal fork. |
+| `appraisal` | chat | The appraisal forks: stage 2 and the before-send scoring. |
 | `critique` | chat | Each stylistic lens and the provenance check. |
 | `embedding` | embedding | Memory embedding, retrieval and retention. |
 
@@ -287,6 +287,7 @@ Each stage has a fork instruction:
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a size sentence (`memory.entry_target_tokens`) and a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent. |
+| `appraisal.before_send_fork_prompt` | `prompts/appraisal_before_send_fork.md` | Followed by quotes of the exchange's opening message and of the whole draft reply (not truncated), then the lens offer. Used for the fork that scores a final draft before it is sent (#1169). |
 | `critique.lens.<lens>.fork_prompt` (provenance: `critique.provenance.fork_prompt`) | `prompts/critique_<lens>_fork.md`; for a lens a plugin adds, the brief it declared | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. For an added lens the override replaces the brief only: critique appends the reply format itself. |
 
 These are resolved by `resolve_prompt` (#411): a string is inline text,
@@ -323,6 +324,7 @@ the key.
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | `agent.yaml` reload |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | restart |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | `agent.yaml` reload |
+| `appraisal.before_send_fork_prompt` | `prompts/appraisal_before_send_fork.md` | `agent.yaml` reload |
 | `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt` | `prompts/critique_<lens>_fork.md` | `agent.yaml` reload |
 | `heartbeat.prompt` | `prompts/heartbeat.md` | restart |
 | `goals.heartbeat_instruction` | `prompts/heartbeat-goals.md` | restart |
@@ -382,6 +384,7 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
+| `critique.fallback_rate` | Without an appraisal plugin it is the only way a lens runs; an agent that sets it to 0 turns every lens off. |
 | `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`, `outbound_cap.count_progress` | The runaway-send caps (#791, #821). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
 | `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
 
@@ -389,11 +392,11 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
-- `critique.provenance.enabled`, `critique.sample_below_rate`
+- `critique.provenance.enabled`, `critique.sample_below_rate`, `critique.fallback_rate`
 - `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.quiet_origins`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
 
-The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`), the lens appraisal questions (`critique.lens.<lens>.appraisal_question`) and `critique.lens.proactivity.enabled` are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
+The fork instruction keys (`appraisal.stage2_fork_prompt`, `appraisal.before_send_fork_prompt`, `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`), the lens appraisal questions (`critique.lens.<lens>.appraisal_question`) and `critique.lens.proactivity.enabled` are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
 Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Two dotted keys are read at neither: `appraisal.stage2_prompt` and `critique.prompt.<lens>`, because the stages that owned them run only as forks (#320, #1129). Setting either in `agent.yaml` neither fails nor warns, and a `set_settings` write to either succeeds and changes nothing. Undotted keys are allowlisted in code: `set_settings` accepts only the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, which go into the LLM request body, and the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`. `max_turns` and `max_context_tokens` must be positive integers (a string, a float, a boolean, zero or a negative number rejects the whole call, naming the key and the value). Any other undotted key (`messages`, `model`, `tools`, `tool_choice`, …) rejects the whole call; see [threat-model.md](threat-model.md), finding 1. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
@@ -440,10 +443,12 @@ A plugin can contribute critique lenses through `on_critique_init`; see [cogniti
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `critique.lens.<name>.appraisal_question` | string | the lens's declared question | The one line the appraisal fork answers to score this lens against the others and "none" on each exchange. One line, non-empty: a blank, multi-line or non-string override fails startup naming the key; at reload it logs a warning and the lens uses its own question. Static config, so `set_settings` can't reword the critic it is scored for; reloaded on the next stage-2 call. |
+| `critique.lens.<name>.appraisal_question` | string | the lens's declared question | The one line the appraisal fork answers to score this lens against the others and "none" on each exchange. One line, non-empty: a blank, multi-line or non-string override fails startup naming the key; at reload it logs a warning and the lens uses its own question. Static config, so `set_settings` can't reword the critic it is scored for; reloaded on the next appraisal fork, before send or after the exchange. |
 | `critique.lens.<name>.fork_prompt` | string | the lens's declared brief | Replaces the brief. Critique still appends the objections reply format. Static config, reloaded on the next fork. |
 
-The same two keys configure the built-in lenses `predictive`, `constrained`, `adversarial`, `retention` and `proactivity`. Selection is the critique vector (#1078): the stage-2 appraisal fork scores each offered lens's question and "none", the top share runs, and "none" wins ties. When "none" wins, or there is no vector, `critique.sample_below_rate` runs one random offered lens. See [cognition.md](cognition.md#how-a-lens-is-chosen-the-critique-vector-1078).
+The same two keys configure the built-in lenses `predictive`, `constrained`, `adversarial`, `retention` and `proactivity`. Selection is the critique vector (#1078): the appraisal fork scores each offered lens's question and "none", the top share runs, and "none" wins ties. When "none" wins, or there is no vector, `critique.sample_below_rate` runs one random offered lens. See [cognition.md](cognition.md#how-a-lens-is-chosen-the-critique-vector-1078).
+
+Lenses are chosen at two points, before the reply is sent (on the draft) and after the exchange. `critique.sample_below_rate` applies at both when appraisal is loaded. Without an appraisal plugin there is no vector, and `critique.fallback_rate` (runtime-tunable per channel; default `0.25`) is the chance that one random lens, offered for that point, runs at each point of an exchange. It has no effect when appraisal is loaded. Before send, retention is not offered, and a plugin lens is offered only when it declares `before_send=True`. Before-send objections queue for the channel's next turn and never wake it.
 
 Removed in #1078, each now failing startup with an error naming the replacement: `critique.fork_prompt.<name>` (moved to `critique.lens.<name>.fork_prompt`, or `critique.provenance.fork_prompt`); the scalars `critique.lens.<dimension>` (`ambiguity`, `commitment`, `disagreement`, `neg_valence`, `novelty`, `retention`); `critique.lens.<name>.<dimension>`; and `critique.lens.<name>.sample_rate`. Any key under `critique.lens.<name>` other than `appraisal_question` and `fork_prompt` (and `enabled`, for proactivity only) is refused, and so is `critique.lens.provenance.fork_prompt` (set `critique.provenance.fork_prompt`). A reload that still carries one logs a warning and keeps the previous fork prompts. An empty `critique.lens.<name>:` block sets nothing and is accepted.
 
@@ -1195,7 +1200,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.mid_conversation_system_role` | `Agent` re-reads the role; takes effect on the next prompt build. The changed rendering of earlier turns costs one full prompt-cache miss. |
 | `agent.compaction_fork_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
 | `agent.forks.*` | `Agent` re-reads the section; takes effect on the next fork. A reload with an invalid section is rejected whole. |
-| `appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `critique.lens.<lens>.appraisal_question`, `critique.lens.proactivity.enabled` | Read from the reloaded config on the next appraisal/critique fork. A removed key (`critique.fork_prompt.*`, `critique.proactivity.*`, lens thresholds, `sample_rate`) at reload logs a warning and keeps the previous fork prompts. A malformed `appraisal_question` or `critique.lens.proactivity.enabled` at reload logs a warning and falls back to its default; the fork prompts still reload. The set of plugin lenses, and whether a waking plugin lens adds its sentence to the wake stub, are fixed at startup. |
+| `appraisal.stage2_fork_prompt`, `appraisal.before_send_fork_prompt`, `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `critique.lens.<lens>.appraisal_question`, `critique.lens.proactivity.enabled` | Read from the reloaded config on the next appraisal/critique fork. A removed key (`critique.fork_prompt.*`, `critique.proactivity.*`, lens thresholds, `sample_rate`) at reload logs a warning and keeps the previous fork prompts. A malformed `appraisal_question` or `critique.lens.proactivity.enabled` at reload logs a warning and falls back to its default; the fork prompts still reload. The set of plugin lenses, and whether a waking plugin lens adds its sentence to the wake stub, are fixed at startup. |
 | `scheduler.*` | `SchedulerPlugin` re-reads its settings and re-syncs `jobs` by name (insert, update, disable removed), then wakes its timer so the change takes effect immediately. |
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |

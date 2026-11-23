@@ -36,9 +36,6 @@ DYNAMIC = "<dynamic>"
 # -> (how many calls, the issue that removes them). Lower a count, or delete
 # the entry, in the change that removes a call.
 ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
-    "packages/corvidae-cognition/corvidae_cognition/critique.py": {
-        "appraisal": (2, "#1169"),
-    },
     "packages/corvidae-planning/corvidae_planning/__init__.py": {
         "goals": (1, "#1181"),
     },

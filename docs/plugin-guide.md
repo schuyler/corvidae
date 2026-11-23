@@ -1328,7 +1328,7 @@ two peers points is a design choice that a string lookup hides.
 `get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
 list does not cover, and on an entry that covers more calls than remain.
 The list holds the calls that predate the rule, each with the issue that
-removes it: `appraisal` (#1169), `goals` (#1181) and the funnel (#1176,
+removes it: `goals` (#1181) and the funnel (#1176,
 below). A missing kernel plugin is not something a plugin works around:
 `get_dependency` raises naming it, and a test that builds a plugin manager
 by hand registers the kernel plugins its plugin uses (`add_kernel_registry`
@@ -1336,6 +1336,13 @@ in `tests/helpers.py`, `install_kernel_clock` in `tests/fake_clock.py`;
 #1180). When you remove
 a call, lower its count or delete its entry in the same change. New work
 never adds an entry: the list only shrinks.
+
+**Choosing a fallback.** A plugin may call `pm.has_plugin(name)` for a name
+in its own `optional_depends_on`, once (at `on_start` is the usual place), to
+decide which fallback to run when that peer is not loaded; it does not call
+`get_plugin` on a peer for this. Critique does it for `appraisal`: with
+appraisal registered it acts only through appraisal's hooks, and without it
+logs one INFO line and samples lenses itself (see "When nobody answers").
 
 ### Firing a hook depends on its owner
 
@@ -1381,6 +1388,15 @@ Something one plugin wants from another has one of two shapes:
 
 A protocol plugin that declares both is a service interface written as
 hooks.
+
+An event or service can also be a *contribution* hook, where the asker owns
+the spec and the peers supply the content. Appraisal's three hooks are the
+example (cognition.md, "AppraisalPlugin"): `on_appraisal_prompts(channel,
+trigger)` collects `(lens, question)` offers from whoever implements it,
+and `on_appraisal_before_send` and `on_appraisal_idle` hand the scores back.
+Critique implements them and appraisal never names critique. Treat what a
+contribution hook returns as untrusted input: appraisal drops a malformed
+or duplicate offer with a warning.
 
 **No plugin reads another plugin's tables.** Table and column names are not
 a contract; raw SQL on a peer's table is a service call with no interface.
@@ -1636,12 +1652,18 @@ class MyPlugin(CorvidaePlugin):
 
 A plugin adds a critique lens by implementing CritiquePlugin's
 `on_critique_init(config, add_lens)` and calling
-`add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False))`.
+`add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False,
+before_send=False))`.
 `fork_prompt` is the brief (critique appends the objections reply format);
-`appraisal_question` is one line the stage-2 appraisal fork answers to
+`appraisal_question` is one line the appraisal fork answers to
 decide whether this lens is the one worth running on an exchange; `wakes`
 says whether its non-empty objections wake the channel (default no: they
-wait as CONTEXT for the next turn). There are no thresholds, reply
+wait as CONTEXT for the next turn). `before_send` (default `False`) also
+offers the lens on a final draft before it is sent, scored by the same
+`appraisal_question`; leave it off unless the lens makes sense on text not
+yet sent. A before-send lens runs inline in the send check, and its
+objections queue for the next turn and never wake (#1192). Built-ins other
+than retention are always offered there. There are no thresholds, reply
 patterns or sample rate (#1078); a lens without a question is rejected with
 a warning.
 
