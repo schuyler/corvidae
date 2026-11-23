@@ -1806,7 +1806,7 @@ agent stayed silent and there is no response to appraise, so no task is
 enqueued. The test is
 `silence.is_decline`, the rule `SilencePlugin` records declines by; it
 doesn't need that plugin loaded. A final another gate withheld has content
-and still gets stage 2. If the test raises, stage 2 runs anyway and a
+and still gets stage 2; a draft held for revision gets none (its revision does). If the test raises, stage 2 runs anyway and a
 warning names the channel and trace. On a miss (forks off, the exchange left the window,
 the fork failed or its reply was unusable) it is skipped with a warning
 naming the stage, channel, trace and reason: the exchange gets no stage 2
@@ -1918,10 +1918,10 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   one warning names the channel and says the revision may have gone out
   without them.
 - **Failures.** If storing the held objections raises, one warning names the
-  channel and trace, the objections are lost and no turn is woken; the next
-  draft is checked as usual.
+  channel and trace, the objections are lost, no held record is written and
+  no turn is woken; the next draft is checked as usual.
 
-Known behaviours (the design's Deferred list):
+Known behaviours:
 
 - A stub turn the kernel defers while a tool call is outstanding still makes
   its LLM call, with no objections in its window, before the turn that pops
@@ -2204,7 +2204,9 @@ wake the channel; the other built-ins wait.
   in offer order wins. A winner no longer offered (a reload changed the
   offer in between) counts as `none`, with a warning. No usable vector also
   counts as `none`: when the scoring produced nothing, a warning names the
-  trace; when stage 2 is present but its `lenses` field is unusable,
+  trace (before send with appraisal loaded, that warning is appraisal's own
+  skip warning and critique does not warn again; with forks off on the
+  before-send path it is DEBUG); when stage 2 is present but its `lenses` field is unusable,
   appraisal has already warned, so critique logs at debug.
 - **The sampled path.** When `none` wins, or there is no vector, with
   probability `critique.sample_below_rate` (runtime-tunable per channel) one

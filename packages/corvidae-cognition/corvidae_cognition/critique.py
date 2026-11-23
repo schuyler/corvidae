@@ -47,7 +47,8 @@ Two independent paths:
     judges language on this path. Confident phrasing is never evidence; the
     generator's confidence never substitutes for a record.
 
-Every main-loop turn that has a trace is judged, whatever started it
+Every main-loop turn that has a trace is judged (except a draft held for
+revision, #1149: the revision is judged, the draft is not), whatever started it
 (#1031; PRD §3.7 Critique 3): user, reminder, heartbeat, notification,
 note-woken and subagent-result turns, and corrections (``critique``-origin
 turns, which a waking finding woke). Stage forks never
@@ -56,7 +57,7 @@ delivery, not eligibility (Critique 4): non-empty findings on a
 ``critique``-origin turn never wake a turn; they wait as CONTEXT for the
 channel's next turn, so no chain of corrections forms. The origin propagates
 through tool cycles and onto notes (§3.5.10), so tool use can't bypass it. A
-response another gate withheld stays eligible — the agent thought it, so
+response another gate withheld stays eligible (a hold for revision is not such a gate) — the agent thought it, so
 critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
