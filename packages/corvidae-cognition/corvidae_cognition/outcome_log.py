@@ -1,348 +1,222 @@
-"""Outcome log — the per-exchange record table and its writer API.
+"""Outcome log — the per-trace record log and the trace-origin index.
 
-``OutcomeLogPlugin`` owns the ``exchange_log`` schema and writes the
-identity row (origin, channel, originating message rowid) via its
-message-lifecycle hookimpls. The retrieval-profile, appraisal, and
-provenance/outcomes columns are filled in by ``MemoryPlugin``,
-``AppraisalPlugin``, and ``CritiquePlugin`` through the writer API below.
+``OutcomeLogPlugin`` listens on ``on_trace_record`` (owned by the ``trace``
+protocol plugin) and appends one JSON line per record to
+``<session db stem>.outcomes.jsonl``, beside the session DB. It writes its
+own records the same way from the message lifecycle: admitted, rejected,
+persisted (with the originating message rowid). Reporters (appraisal,
+critique, gates, memory, silence) never call it; they fire the hook.
 
-The table accumulates one row per exchange so retrieval quality,
-appraisal, and critique and gate outcomes can be correlated — the
-calibration data for the memory system's evals.
+It also answers ``resolve_trace_origin`` from a bounded in-memory index fed
+by those records, first origin per trace winning. The index is lost on
+restart.
+
+The log accumulates every record about an exchange so retrieval quality,
+lens scores, critique and gate outcomes can be correlated offline, and is
+training data for a lens-selection head (#141). A trace has many lines;
+readers group by ``trace_id`` and take the last line per top-level key of a
+source's records.
+
+``exchange_log``, the table this plugin wrote before #1179, is no longer
+created or written. Old rows stay in old databases as history, and the
+``exchange_log`` redact scrubber below still reaches them.
 """
 
+import collections
 import json
 import logging
+import os
 import time
+from pathlib import Path
 
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
-from corvidae.persistence import add_column_if_missing
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.outcome_log.
 logger = logging.getLogger("corvidae.outcome_log")
 
-# Columns whose values are JSON envelopes merged via SQLite's json_patch()
-# rather than overwritten. Concurrent fire-and-forget writers touch these
-# columns with disjoint or overlapping top-level keys; the merge must be a
-# single atomic SQL statement (no read-then-write) so no writer's key is
-# lost to a lost update.
-MERGE_COLUMNS = frozenset({"outcomes", "appraisal"})
+# How many traces the origin index remembers; the oldest is evicted first.
+# A trace older than this resolves to None (gates then treats it as "task").
+ORIGIN_INDEX_MAX = 65536
 
-# probe_score is no longer written: stage-1 appraisal was removed (#1185). The
-# column stays, with old rows' values, until schema migrations exist (#14).
-EXCHANGE_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS exchange_log (
-    trace_id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    origin TEXT,
-    message_rowid INTEGER,
-    created_at REAL NOT NULL,
-    retrieval_top_score REAL,
-    retrieval_top_similarity REAL,
-    retrieval_hit_count INTEGER,
-    probe_score REAL,
-    appraisal TEXT,
-    outcomes TEXT
-)
-"""
-EXCHANGE_LOG_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS idx_exchange_channel "
-    "ON exchange_log (channel_id, created_at)"
-)
+# The source name outcome_log's own lifecycle records carry.
+SOURCE = "outcome_log"
 
-# Columns update_exchange may touch. The identity columns (trace_id,
-# channel_id, created_at) are immutable after record_exchange; everything
-# else is a nullable profile/outcome column filled in by other plugins.
-UPDATABLE_COLUMNS = frozenset(
-    {
-        "origin",
-        "message_rowid",
-        "retrieval_top_score",
-        "retrieval_top_similarity",
-        "retrieval_hit_count",
-        "probe_score",
-        "appraisal",
-        "outcomes",
-    }
-)
+
+async def outcomes_path(db: aiosqlite.Connection) -> Path | None:
+    """The outcomes JSONL file for ``db``: beside the main database file,
+    named ``<stem>.outcomes.jsonl``. None for a database with no file
+    (``:memory:`` or a temporary DB).
+
+    Used by outcome_log and by the redact scrubber, which only has the
+    connection, so both find the same file.
+    """
+    # PRAGMA database_list rows are (seq, name, file); "main" is ours.
+    async with db.execute("PRAGMA database_list") as cursor:
+        rows = await cursor.fetchall()
+    for _seq, name, file in rows:
+        if name == "main":
+            return Path(file).with_suffix(".outcomes.jsonl") if file else None
+    return None
 
 
 class OutcomeLogPlugin(CorvidaePlugin):
-    """Owns the exchange_log table and its guarded writer API."""
+    """Appends trace records to JSONL and remembers each trace's origin."""
 
-    depends_on = frozenset({"persistence"})
+    depends_on = frozenset({"persistence", "trace"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
-        self._table_ready = False
-        # Remember the configured DB path and whether on_start has run, so a
-        # missing DB can be diagnosed as startup ordering or a real failure.
+        # trace_id -> origin, oldest first, bounded by ORIGIN_INDEX_MAX.
+        self._origins: collections.OrderedDict[str, str] = collections.OrderedDict()
+        # The connection the cached path was resolved from, and the path
+        # (None for a DB with no file). Keyed on the connection so a
+        # reopened DB is resolved again.
+        self._path_for: tuple[aiosqlite.Connection, Path | None] | None = None
+        # The "nowhere to write" warning is said once.
+        self._warned_no_file = False
         self._db_path = "sessions.db"
-        self._started = False
 
-    def _resolve_db(self) -> aiosqlite.Connection | None:
-        """Return the persistence plugin's DB connection, or None if not open yet."""
-        from corvidae.persistence import PersistencePlugin
-        persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
-        return persistence.db
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        # Remember the configured path so the "nowhere to write" warning
+        # can name it.
+        self._db_path = config.get("daemon", {}).get("session_db", "sessions.db")
 
     def _channel_is_known(self, channel_id: str, trace_id: str) -> bool:
         """Return False when the registry never held channel_id (#261).
 
         A transport gate refuses strangers on a transient channel the
-        registry never held. A row keyed on that id would grow exchange_log
+        registry never held. A record keyed on that id would grow the log
         without bound and keep a trace of a refused sender, and it feeds no
-        calibration. Every insert path (record_exchange, upsert_exchange)
-        asks this, so no writer (appraisal, gates, hooks) can leak one.
-        With no registry plugin, fail open and record, so a calibration row
-        is never lost.
+        calibration. With no registry plugin, fail open and record.
         """
         registry = self.pm.get_plugin("registry")
         if registry is not None and registry.get(channel_id) is None:
             logger.debug(
-                "exchange_log: no row for unregistered channel %s (trace %s)",
+                "outcome_log: no record for unregistered channel %s (trace %s)",
                 channel_id, trace_id,
             )
             return False
         return True
 
-    async def _ensure_table(self) -> aiosqlite.Connection:
-        """Create the exchange_log table on first use and return the DB.
+    def _index(self, trace_id: str, origin: str | None) -> str | None:
+        """Record ``origin`` for ``trace_id`` unless one is already known
+        (first wins, as the table's INSERT OR IGNORE did); return the
+        trace's origin after this step."""
+        known = self._origins.get(trace_id)
+        if known is not None:
+            self._origins.move_to_end(trace_id)
+            return known
+        if origin is None:
+            return None
+        self._origins[trace_id] = origin
+        # Evict the least recently used traces past the bound.
+        while len(self._origins) > ORIGIN_INDEX_MAX:
+            self._origins.popitem(last=False)
+        return origin
 
-        on_start hook ordering is LIFO across plugins, so the persistence
-        DB may not exist yet during our on_start — creation is retried
-        lazily on first write. Raises RuntimeError if the DB is missing at
-        write time (writer calls are explicit API, not fail-soft hooks).
+    async def _path(self) -> Path | None:
+        """The file to append to, or None when there is nowhere to write.
+
+        Caches only a result read from an open DB; while persistence has not
+        opened its DB yet nothing is cached, so a later record retries.
         """
-        db = self._resolve_db()
-        if db is None:
-            raise RuntimeError(
-                "persistence DB not available for exchange_log: "
-                f"daemon.session_db={self._db_path!r}, "
-                f"on_start completed: {self._started}"
-            )
-        if not self._table_ready:
-            await db.execute(EXCHANGE_LOG_DDL)
-            # Schema upgrade: exchange_log tables from before #66 gain
-            # retrieval_top_similarity as a nullable column.
-            await add_column_if_missing(
-                db, "exchange_log", "retrieval_top_similarity", "REAL"
-            )
-            await db.execute(EXCHANGE_LOG_INDEX_DDL)
-            await db.commit()
-            self._table_ready = True
-        return db
+        from corvidae.persistence import PersistencePlugin
 
-    @hookimpl
-    async def on_start(self, config: dict) -> None:
-        # Record the configured path before attempting the early DDL so the
-        # guard message can name it even if the persistence DB is not open.
-        self._db_path = config.get("daemon", {}).get("session_db", "sessions.db")
-        # Best-effort early DDL; falls back to lazy creation on first write
-        # if the persistence DB hasn't opened yet (hook-ordering dependent).
-        try:
-            # The usual case at boot: persistence starts after us (on_start
-            # is LIFO). Expected, so one plain line, no traceback (#163).
-            if self._resolve_db() is None:
+        db = get_dependency(self.pm, "persistence", PersistencePlugin).db
+        if db is None:
+            return None
+        if self._path_for is None or self._path_for[0] is not db:
+            self._path_for = (db, await outcomes_path(db))
+        return self._path_for[1]
+
+    async def _append(
+        self, trace_id: str, channel_id: str, source: str,
+        origin: str | None, record: dict,
+    ) -> None:
+        """Index the origin and append one line, unless the channel is a
+        refused stranger's. A failed write is logged, never raised: the
+        reporter's turn is not the place to fail."""
+        if not self._channel_is_known(channel_id, trace_id):
+            return
+        origin = self._index(trace_id, origin)
+        path = await self._path()
+        if path is None:
+            # Nowhere to write: an in-memory session DB, or persistence not
+            # open yet. Say so once; the origin index still works.
+            if not self._warned_no_file:
+                self._warned_no_file = True
                 logger.warning(
-                    "exchange_log table creation deferred until the first "
-                    "write: persistence DB not open yet (daemon.session_db=%r)",
+                    "outcome_log: trace records are not written: the session "
+                    "DB has no file to write beside (daemon.session_db=%r); "
+                    "set daemon.session_db to a file path to keep them",
                     self._db_path,
                 )
-                return
-            await self._ensure_table()
-        except Exception:
-            logger.warning("exchange_log table creation deferred", exc_info=True)
-        finally:
-            self._started = True
+            return
+        line = json.dumps({
+            "ts": time.time(), "trace_id": trace_id, "channel_id": channel_id,
+            "source": source, "origin": origin, "record": record,
+        })
+        try:
+            # Opened per line, so a redact rewrite (os.replace) never leaves
+            # the daemon appending to the replaced file.
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:
+            logger.warning(
+                "outcome_log: could not append the %s record for trace %s to "
+                "%s (%s); check disk space and permissions on that path",
+                source, trace_id, path, type(exc).__name__,
+                exc_info=True, extra={"trace_id": trace_id, "channel": channel_id},
+            )
 
     # ------------------------------------------------------------------
-    # Hook consumers — all fail-soft (log + continue), since these are
-    # hooks, not explicit writer calls; exceptions must not propagate
-    # into the turn.
+    # The trace hooks
+    # ------------------------------------------------------------------
+
+    @hookimpl
+    async def on_trace_record(
+        self, trace_id: str, channel_id: str, source: str,
+        origin: str | None, record: dict,
+    ) -> None:
+        """Append a reporter's record."""
+        await self._append(trace_id, channel_id, source, origin, record)
+
+    @hookimpl
+    async def resolve_trace_origin(self, trace_id: str) -> str | None:
+        """The first origin recorded for ``trace_id``, or None."""
+        return self._origins.get(trace_id)
+
+    # ------------------------------------------------------------------
+    # Lifecycle records. Observe hooks fail soft in dispatch, so these
+    # need no try/except of their own.
     # ------------------------------------------------------------------
 
     @hookimpl
     async def on_message_admitted(self, channel, trace_id: str, sender: str, text: str) -> None:
-        try:
-            await self.record_exchange(trace_id, channel.id, origin="user")
-        except Exception:
-            logger.warning("on_message_admitted: record_exchange failed", exc_info=True)
+        await self._append(trace_id, channel.id, SOURCE, "user", {"event": "admitted"})
 
     @hookimpl
     async def on_message_rejected(self, channel, trace_id: str, sender: str, text: str) -> None:
-        # Unregistered (transport-refused) channels are skipped by the
-        # writers themselves; the update below is a no-op without a row.
-        try:
-            await self.record_exchange(trace_id, channel.id, origin="user")
-            await self.update_exchange(trace_id, outcomes={"gate": "rejected"})
-        except Exception:
-            logger.warning("on_message_rejected: record_exchange failed", exc_info=True)
+        # Unregistered (transport-refused) channels are skipped in _append.
+        await self._append(trace_id, channel.id, SOURCE, "user", {"event": "rejected"})
 
     @hookimpl
     async def on_message_persisted(
         self, channel, trace_id: str, rowid: int | None, text: str, annotations: dict,
     ) -> None:
-        try:
-            # INSERT OR IGNORE covers notification-born exchanges (no prior
-            # on_message_admitted for those) — origin lands on first insert.
-            # annotations["origin"] normalizes to "task" for the background-origin
-            # default (reproduces core's old dequeue-mint default); the
-            # admitted-time INSERT OR IGNORE row (origin="user") already
-            # exists for user messages by the time this hook fires.
-            origin = annotations.get("origin") or "task"
-            await self.record_exchange(trace_id, channel.id, origin=origin)
-            if rowid is not None:
-                await self.update_exchange(trace_id, message_rowid=rowid)
-        except Exception:
-            logger.warning("on_message_persisted: record_exchange failed", exc_info=True)
-
-    async def record_exchange(
-        self,
-        trace_id: str,
-        channel_id: str,
-        origin: str | None = None,
-        message_rowid: int | None = None,
-    ) -> None:
-        """Insert a new exchange row. Idempotent (INSERT OR IGNORE).
-
-        Args:
-            trace_id: The trace id minted for this exchange.
-            channel_id: The channel the exchange happened on.
-            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task', or
-                None if the producer didn't stamp one.
-            message_rowid: message_log.id of the originating message; None
-                for gate-rejected exchanges.
-        """
-        if not self._channel_is_known(channel_id, trace_id):
-            return
-        db = await self._ensure_table()
-        await db.execute(
-            "INSERT OR IGNORE INTO exchange_log "
-            "(trace_id, channel_id, origin, message_rowid, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (trace_id, channel_id, origin, message_rowid, time.time()),
+        # A notification-born exchange has no admission record, so its
+        # origin lands here; annotations["origin"] defaults to "task" for
+        # background work. A user trace already holds "user" (first wins).
+        origin = annotations.get("origin") or "task"
+        await self._append(
+            trace_id, channel.id, SOURCE, origin,
+            {"event": "persisted", "message_rowid": rowid},
         )
-        await db.commit()
-
-    def _validate_columns(self, columns: dict) -> None:
-        """Shared validation for update_exchange/upsert_exchange column kwargs.
-
-        Raises:
-            ValueError: If a kwarg is not an updatable column, if a
-                merge-column (outcomes/appraisal) value is not a dict, or
-                if a plain-set column value is a dict.
-        """
-        unknown = set(columns) - UPDATABLE_COLUMNS
-        if unknown:
-            raise ValueError(
-                f"unknown or immutable column(s): {sorted(unknown)}"
-            )
-        for name, value in columns.items():
-            if name in MERGE_COLUMNS:
-                if not isinstance(value, dict):
-                    raise ValueError(
-                        f"{name!r} is a merge column (JSON envelope) and "
-                        f"requires a dict fragment, got {type(value).__name__}"
-                    )
-            elif isinstance(value, dict):
-                raise ValueError(
-                    f"{name!r} is a plain-set column and cannot take a "
-                    f"dict value (only outcomes/appraisal merge)"
-                )
-
-    def _build_set_clause(self, columns: dict) -> tuple[str, list]:
-        """Build the SET clause and bound params for an UPDATE over columns.
-
-        Merge columns (outcomes/appraisal) are patched atomically via
-        SQLite's json_patch() in a single statement — never read into
-        Python first. Plain-set columns bind normally. Column names are
-        validated against the frozen allowlist by _validate_columns, so
-        interpolating them into the SET clause is safe.
-        """
-        set_parts = []
-        params: list = []
-        for name, value in columns.items():
-            if name in MERGE_COLUMNS:
-                set_parts.append(f"{name} = json_patch(COALESCE({name}, '{{}}'), ?)")
-                params.append(json.dumps(value))
-            else:
-                set_parts.append(f"{name} = ?")
-                params.append(value)
-        return ", ".join(set_parts), params
-
-    async def update_exchange(self, trace_id: str, **columns) -> None:
-        """Update named nullable columns of an existing exchange row.
-
-        Only the columns in UPDATABLE_COLUMNS are accepted — SQL is never
-        built from arbitrary kwargs. Merge-columns (outcomes, appraisal)
-        are dicts merged atomically in-database via json_patch — a single
-        UPDATE statement, no SELECT (RFC 7386 deep-merge: disjoint keys
-        from concurrent writers all survive; same-key writers deep-merge).
-
-        Raises:
-            ValueError: If a kwarg is not an updatable column, a merge
-                column is given a scalar, or a plain-set column is given
-                a dict.
-        """
-        self._validate_columns(columns)
-        if not columns:
-            return
-        db = await self._ensure_table()
-        set_clause, params = self._build_set_clause(columns)
-        await db.execute(
-            f"UPDATE exchange_log SET {set_clause} WHERE trace_id = ?",
-            (*params, trace_id),
-        )
-        await db.commit()
-
-    async def upsert_exchange(
-        self,
-        trace_id: str,
-        channel_id: str,
-        origin: str | None = None,
-        **columns,
-    ) -> None:
-        """Create-or-update an exchange row in one call.
-
-        Semantics: INSERT OR IGNORE the identity row (like record_exchange),
-        then a single guarded UPDATE applying **columns (same atomic
-        json_patch merge as update_exchange for outcomes/appraisal). For
-        gate-time writers that run before or race on_message_admitted /
-        on_message_persisted's inserts — without the upsert, those inserts'
-        INSERT OR IGNORE would silently no-op against a row that doesn't
-        exist yet, and a plain UPDATE would no-op too, losing the gate-path
-        columns. Idempotent and write-order independent: the hook-driven
-        INSERT OR IGNORE that runs later stays correct against a row this
-        upsert already created.
-
-        Raises:
-            ValueError: Same as update_exchange.
-        """
-        self._validate_columns(columns)
-        if not self._channel_is_known(channel_id, trace_id):
-            return
-        db = await self._ensure_table()
-        await db.execute(
-            "INSERT OR IGNORE INTO exchange_log "
-            "(trace_id, channel_id, origin, message_rowid, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (trace_id, channel_id, origin, None, time.time()),
-        )
-        merged_columns = dict(columns)
-        if origin is not None:
-            merged_columns.setdefault("origin", origin)
-        if merged_columns:
-            set_clause, params = self._build_set_clause(merged_columns)
-            await db.execute(
-                f"UPDATE exchange_log SET {set_clause} WHERE trace_id = ?",
-                (*params, trace_id),
-            )
-        await db.commit()
 
 
 # ------------------------------------------------------------------
@@ -529,4 +403,98 @@ async def redact_exchange_log(
     # Persist the scrubbed rows in one transaction.
     if not dry_run:
         await db.commit()
+    return len(changed)
+
+
+async def redact_outcomes_jsonl(
+    db: aiosqlite.Connection,
+    channel_id: str,
+    msg_ids: list[int],
+    dry_run: bool,
+    tombstone: str,
+) -> int | None:
+    """Scrub text derived from redacted messages out of the outcomes JSONL.
+
+    For each redacted id X: the trace that owns X (on the channel, the
+    largest persisted ``message_rowid`` <= X, as for exchange_log) gets the
+    claim text in its appraisal records (``stage2.past_claims``) and the
+    objection text in its critique records (``provenance``/``critique``
+    ``detail``) tombstoned; counts survive. The file is rewritten through a
+    temporary file and ``os.replace``; a dry run counts and writes nothing.
+
+    Registered as the ``outcome_log_jsonl`` scrubber in the
+    ``corvidae.redact`` entry-point group. Returns the number of traces
+    changed (or that would be), or None when there is no file for this DB.
+    """
+    path = await outcomes_path(db)
+    if path is None or not path.exists():
+        return None
+    if not msg_ids:
+        return 0
+    raw_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    # Parse every line once. A line that does not parse is kept as it is,
+    # with one WARNING naming where it is (the corrupt-row rule, #311).
+    parsed: list[dict | None] = []
+    for number, raw in enumerate(raw_lines, start=1):
+        try:
+            entry = json.loads(raw)
+            if not isinstance(entry, dict):
+                raise ValueError("not a JSON object")
+        except (ValueError, RecursionError):
+            logger.warning(
+                "skipping unparseable line %d of %s during redaction; it is "
+                "left as-is — inspect or delete it by hand",
+                number, path, exc_info=True, extra={"channel": channel_id},
+            )
+            entry = None
+        parsed.append(entry)
+
+    # The persisted message rowid of each trace on this channel.
+    rowids = {
+        e["trace_id"]: e["record"]["message_rowid"]
+        for e in parsed
+        if e is not None and e.get("channel_id") == channel_id
+        and e.get("source") == SOURCE
+        and isinstance(e.get("record"), dict)
+        and e["record"].get("event") == "persisted"
+        and e["record"].get("message_rowid") is not None
+    }
+    # Each redacted id's owner: the trace with the largest rowid <= the id.
+    owners: set[str] = set()
+    for msg_id in msg_ids:
+        candidates = [(rowid, t) for t, rowid in rowids.items() if rowid <= msg_id]
+        if candidates:
+            owners.add(max(candidates)[1])
+
+    # Tombstone the owners' claim and objection text, line by line.
+    changed: set[str] = set()
+    for index, entry in enumerate(parsed):
+        if entry is None or entry.get("trace_id") not in owners:
+            continue
+        scrub = {"appraisal": _scrub_past_claims,
+                 "critique": _scrub_outcomes_detail}.get(entry.get("source"))
+        if scrub is None:
+            continue
+        try:
+            scrubbed = scrub(json.dumps(entry.get("record")), tombstone)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            logger.warning(
+                "skipping malformed %s record on line %d of %s for trace %s; "
+                "its text is left unscrubbed — inspect or correct the line",
+                entry.get("source"), index + 1, path, entry.get("trace_id"),
+                exc_info=True, extra={"channel": channel_id},
+            )
+            continue
+        if scrubbed is None:
+            continue
+        changed.add(entry["trace_id"])
+        entry["record"] = json.loads(scrubbed)
+        raw_lines[index] = json.dumps(entry) + "\n"
+
+    # Rewrite the file in one step so a reader never sees half of it.
+    if changed and not dry_run:
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text("".join(raw_lines), encoding="utf-8")
+        os.replace(temp, path)
     return len(changed)

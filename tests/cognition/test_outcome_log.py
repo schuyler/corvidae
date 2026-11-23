@@ -13,7 +13,6 @@ import pytest
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
-
 from tests.cognition.trace_helpers import add_trace, outcomes_file, read_outcomes
 
 CH = Channel(transport="irc", scope="#a")
@@ -22,6 +21,7 @@ CH = Channel(transport="irc", scope="#a")
 async def _setup(db, *, registry: ChannelRegistry | None = None):
     """outcome_log on a pm with persistence (on ``db``) and the trace plugin."""
     from corvidae_cognition.outcome_log import OutcomeLogPlugin
+
     from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()
@@ -115,7 +115,7 @@ class TestOwnRecords:
             channel=CH, trace_id="t1", rowid=7, text="hi", annotations={},
         )
         lines = read_outcomes(outcomes_file(path))
-        assert [(l["source"], l["origin"], l["record"]) for l in lines] == [
+        assert [(line["source"], line["origin"], line["record"]) for line in lines] == [
             ("outcome_log", "user", {"event": "admitted"}),
             # First origin wins: a user trace's persisted line says "user".
             ("outcome_log", "user", {"event": "persisted", "message_rowid": 7}),
@@ -131,7 +131,7 @@ class TestOwnRecords:
         await plugin.on_message_persisted(
             channel=CH, trace_id="tk", rowid=None, text="note", annotations={},
         )
-        lines = {l["trace_id"]: l for l in read_outcomes(outcomes_file(path))}
+        lines = {line["trace_id"]: line for line in read_outcomes(outcomes_file(path))}
         assert lines["hb"]["origin"] == "heartbeat"
         assert lines["tk"]["origin"] == "task"
         assert lines["tk"]["record"] == {"event": "persisted", "message_rowid": None}

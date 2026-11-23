@@ -352,7 +352,8 @@ class AppraisalPlugin(CorvidaePlugin):
     Soft-uses the outcome-log writer; fail-soft when it is absent.
     """
 
-    depends_on = frozenset({"persistence"})
+    # trace owns the hook stage 2 is reported on (#1179).
+    depends_on = frozenset({"persistence", "trace"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -436,11 +437,6 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
     # Readers
     # ------------------------------------------------------------------
-
-    async def get_stage2(self, trace_id: str) -> dict | None:
-        """Pure reader for the exchange's stored stage 2 (past claims and
-        lens scores), or None."""
-        return await self._read_vector(trace_id, "stage2")
 
     def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
         """Register a coroutine function to hear each completed stage 2.
@@ -577,23 +573,17 @@ class AppraisalPlugin(CorvidaePlugin):
             if stage2 is None:
                 return None
 
-            # Merge, never overwrite: a full-column write would erase the
-            # envelope's other keys (a row written before #1185 also holds
-            # stage1/stage1_out). Absent entropy is omitted, never nulled
-            # (RFC 7386).
-            merge: dict = {"stage2": stage2}
+            # Report stage 2 on the trace (lens scores are #141's labels).
+            # Absent entropy is omitted, never nulled. Observe dispatch logs
+            # a listener's failure, naming the hook and the plugin.
+            record: dict = {"stage2": stage2}
             entropy = entropy_summary(logprobs)
             if entropy is not None:
-                merge["entropy"] = entropy
-            outcome_log = self.pm.get_plugin("outcome_log")
-            if outcome_log is not None:
-                try:
-                    await outcome_log.update_exchange(trace_id, appraisal=merge)
-                except Exception:
-                    logger.warning(
-                        "stage-2 appraisal persist failed", exc_info=True,
-                        extra={"trace_id": trace_id},
-                    )
+                record["entropy"] = entropy
+            await self.pm.ahook.on_trace_record(
+                trace_id=trace_id, channel_id=channel.id, source="appraisal",
+                origin=None, record=record,
+            )
             return stage2
         finally:
             reset_attribution(token)
@@ -702,38 +692,3 @@ class AppraisalPlugin(CorvidaePlugin):
                 trace_id, exc_info=True, extra={"trace_id": trace_id},
             )
             return []
-
-    def _exchange_db(self):
-        """Return the persistence connection, which can read exchange_log,
-        or None when there is none."""
-        persistence = self.pm.get_plugin("persistence") if hasattr(self, "pm") else None
-        return getattr(persistence, "db", None)
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    async def _read_vector(self, trace_id: str, envelope_key: str) -> dict | None:
-        """Read one key of the exchange's appraisal envelope in exchange_log.
-        Returns None when there is none."""
-        db = self._exchange_db()
-        if db is None:
-            return None
-        try:
-            async with db.execute(
-                "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-                (trace_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-        except Exception:
-            # Table may not exist yet (no exchange recorded) — not an error.
-            return None
-        if row is None or row[0] is None:
-            return None
-        try:
-            return json.loads(row[0]).get(envelope_key)
-        except (json.JSONDecodeError, AttributeError):
-            logger.warning(
-                "malformed appraisal envelope for exchange %s", trace_id
-            )
-            return None

@@ -23,12 +23,12 @@ This plugin withholds no final from an origin that is not quiet.
 
 Origin is a plugin-side convention (R1): ``annotations["origin"]`` when a
 producer stamped it, else ``user`` for a trace admitted through
-``on_message_admitted``, else the origin ``exchange_log`` holds, else
-``task`` (outcome_log's default for background exchanges).
+``on_message_admitted``, else the origin ``resolve_trace_origin`` answers
+(outcome_log's index), else ``task`` (outcome_log's default for background
+exchanges).
 
-Every veto is recorded into ``exchange_log.outcomes`` through
-``upsert_exchange`` from a fire-and-forget task, so the gate path never
-waits on the shared write connection. Every tunable resolves through
+Every veto is reported through ``on_trace_record`` (source ``gates``) from
+a fire-and-forget task, so the gate path never waits on a listener. Every tunable resolves through
 ``resolve_tunable`` at decision time, so both runtime tuning surfaces
 apply on the next exchange without a restart.
 """
@@ -113,8 +113,8 @@ def _bool_tunable(channel, config: dict, key: str, default: bool) -> bool:
 class GatePlugin(CorvidaePlugin):
     """The decide gate: the quiet veto and the progress/thinking switches."""
 
-    # Reads outcome_log and persistence fail-soft; neither is required.
-    depends_on = frozenset()
+    # The trace protocol plugin owns the hooks gates fires (#1179).
+    depends_on = frozenset({"trace"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -324,8 +324,8 @@ class GatePlugin(CorvidaePlugin):
 
         ``annotations["origin"]`` first, then the admitted-trace LRU. A trace the
         LRU has evicted (a long tool cycle under heavy traffic) falls back
-        to the exchange_log row's origin, so an old user exchange is never
-        mistaken for background traffic.
+        to the origin ``resolve_trace_origin`` answers, so an old user
+        exchange is never mistaken for background traffic.
         """
         origin = (annotations or {}).get("origin")
         if origin:
@@ -334,46 +334,23 @@ class GatePlugin(CorvidaePlugin):
             return "task"
         if trace_id in self._admitted:
             return "user"
-        recorded = await self._recorded_origin(trace_id)
+        recorded = await self.pm.ahook.resolve_trace_origin(trace_id=trace_id)
         return recorded or "task"
 
-    async def _recorded_origin(self, trace_id: str) -> str | None:
-        """The origin exchange_log holds for ``trace_id``, or None."""
-        persistence = self.pm.get_plugin("persistence")
-        db = getattr(persistence, "db", None)
-        if db is None or self.pm.get_plugin("outcome_log") is None:
-            return None
-        try:
-            async with db.execute(
-                "SELECT origin FROM exchange_log WHERE trace_id = ?", (trace_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-        except Exception:
-            logger.warning(
-                "gate: could not read the recorded origin for %s; treating it as task",
-                trace_id, exc_info=True, extra={"trace_id": trace_id},
-            )
-            return None
-        return row[0] if row else None
-
     def _record(self, trace_id, channel, outcomes: dict) -> None:
-        """Fire-and-forget merge of ``outcomes`` into the exchange row.
+        """Report ``outcomes`` on the trace from a fire-and-forget task, so
+        the gate path never waits on a listener.
 
-        No origin is passed: upsert_exchange patches origin onto an existing
-        row, so a derived origin passed here could relabel it (2B review A-4).
+        No origin is passed: a derived origin could mislabel the trace for
+        every listener (2B review A-4). Observe dispatch logs a listener's
+        failure, naming the hook and the plugin.
         """
-        outcome_log = self.pm.get_plugin("outcome_log")
-        if outcome_log is None:
-            return
 
         async def _write() -> None:
-            try:
-                await outcome_log.upsert_exchange(trace_id, channel.id, None, outcomes=outcomes)
-            except Exception:
-                logger.warning(
-                    "gate outcome write failed for %s", trace_id, exc_info=True,
-                    extra={"trace_id": trace_id, "channel": channel.id},
-                )
+            await self.pm.ahook.on_trace_record(
+                trace_id=trace_id, channel_id=channel.id, source="gates",
+                origin=None, record=outcomes,
+            )
 
         task = asyncio.create_task(_write())
         self._record_tasks.add(task)

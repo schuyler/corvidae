@@ -12,7 +12,6 @@ from importlib.metadata import entry_points
 import pytest
 
 from corvidae.hooks import create_plugin_manager, install_plugin_hookspecs, validate_dependencies
-
 from tests.cognition.trace_helpers import TraceRecorder
 
 

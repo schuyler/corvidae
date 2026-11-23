@@ -744,7 +744,8 @@ class CritiqueSpec:
 class CritiquePlugin(CorvidaePlugin):
     """Deferred, salience-gated self-critique plus the provenance check."""
 
-    depends_on = frozenset({"task", "llm"})
+    # trace owns the hook critique reports its outcomes on (#1179).
+    depends_on = frozenset({"task", "llm", "trace"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
 
@@ -1483,18 +1484,10 @@ class CritiquePlugin(CorvidaePlugin):
         selection: dict = {"sampled": sampled, "basis": basis}
         if lens is not None:
             selection["lens"] = lens
-        outcome_log = self.pm.get_plugin("outcome_log")
-        if outcome_log is not None:
-            try:
-                await outcome_log.update_exchange(
-                    trace_id, outcomes={"lens_selection": selection})
-            except Exception:
-                logger.warning(
-                    "critique lens selection persist failed for trace %s; the choice "
-                    "still ran but is missing from exchange_log - check the outcome_log plugin",
-                    trace_id, exc_info=True,
-                    extra={"channel": channel.id, "trace_id": trace_id},
-                )
+        await self.pm.ahook.on_trace_record(
+            trace_id=trace_id, channel_id=channel.id, source="critique",
+            origin=None, record={"lens_selection": selection},
+        )
         if lens is not None:
             await self._enqueue_lens(
                 channel, trace_id, annotations, None, response_text, lens,
@@ -1817,10 +1810,10 @@ class CritiquePlugin(CorvidaePlugin):
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
-        The outcome goes in via the ATOMIC merge (never read-merge-write):
-        it can interleave with WP2.9's send-gate record and WP2.1's
-        {"gate":"rejected"} merge on the same row. Provenance records under
-        its own key, so it never overwrites the stylistic run's ``critique``.
+        The outcome is reported on ``on_trace_record`` (source
+        ``critique``) as its own record. Provenance records under its own
+        key, so a reader merging a trace's critique records never loses the
+        stylistic run's ``critique``.
         Non-empty objections re-enter via the funnel as budgeted CONTEXT.
         With ``wake`` (provenance) they register under
         origin="critique" and fire the critique wake stub; without it
@@ -1834,15 +1827,10 @@ class CritiquePlugin(CorvidaePlugin):
         finding waits for the channel's next turn, so a correction can never
         start another one (the recursion brake, PRD §3.7 Critique 4).
         """
-        outcome_log = self.pm.get_plugin("outcome_log")
-        if outcome_log is not None:
-            try:
-                await outcome_log.update_exchange(trace_id, outcomes=outcome)
-            except Exception:
-                logger.warning(
-                    "critique outcome persist failed", exc_info=True,
-                    extra={"trace_id": trace_id},
-                )
+        await self.pm.ahook.on_trace_record(
+            trace_id=trace_id, channel_id=channel.id, source="critique",
+            origin=None, record=outcome,
+        )
 
         if not objections:
             return  # silent: nothing re-enters the window

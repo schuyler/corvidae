@@ -18,6 +18,7 @@ vec = ["sqlite-vec>=0.1.9"]
 
 [project.entry-points."corvidae.redact"]
 exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+outcome_log_jsonl = "corvidae_cognition.outcome_log:redact_outcomes_jsonl"
 retrieval_candidate = "corvidae_cognition.memory:redact_retrieval_candidates"
 
 [project.entry-points."corvidae.commands"]
@@ -29,6 +30,7 @@ memory = "corvidae_cognition.memory:MemoryPlugin"
 memory_tools = "corvidae_cognition.memory_tools:MemoryToolsPlugin"
 funnel = "corvidae_cognition.funnel:FunnelPlugin"
 outcome_log = "corvidae_cognition.outcome_log:OutcomeLogPlugin"
+trace = "corvidae_cognition.trace:TracePlugin"
 appraisal = "corvidae_cognition.appraisal:AppraisalPlugin"
 critique = "corvidae_cognition.critique:CritiquePlugin"
 gates = "corvidae_cognition.gates:GatePlugin"

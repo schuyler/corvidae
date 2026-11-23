@@ -1678,7 +1678,7 @@ END
 
 # The per-retrieval raw profile stream (§3.7 wants this accumulating from
 # day one). Each row is keyed by the turn's trace id, and the profile is
-# copied into exchange_log under the same id.
+# reported on the trace through on_trace_record (source "memory").
 RETRIEVAL_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1874,7 +1874,8 @@ class MemoryPlugin(CorvidaePlugin):
             our on_start; schema creation retries lazily on first use.
     """
 
-    depends_on = frozenset({"persistence", "llm", "clock", "idle"})
+    # trace owns the hook the retrieval profile is reported on (#1179).
+    depends_on = frozenset({"persistence", "llm", "clock", "idle", "trace"})
     # The heartbeat owns the hook spec memory's beat section implements; it
     # is optional so a config without a heartbeat starts quietly (#1079).
     optional_depends_on = frozenset({"heartbeat"})
@@ -3610,8 +3611,8 @@ class MemoryPlugin(CorvidaePlugin):
         here is fail-soft: retrieval trouble must never break the turn.
 
         ``trace_id``: when present, the retrieval profile is written
-        into retrieval_log.trace_id and copied into exchange_log via
-        the OutcomeLogPlugin's update_exchange (retrieval_top_score,
+        into retrieval_log.trace_id and reported on the trace through
+        on_trace_record, source "memory" (retrieval_top_score,
         retrieval_top_similarity, retrieval_hit_count).
         """
         try:
@@ -3775,24 +3776,17 @@ class MemoryPlugin(CorvidaePlugin):
                 )
             await db.commit()
 
-            # Copy the retrieval profile into exchange_log under the key —
-            # best-effort; OutcomeLogPlugin may not be registered, or the
-            # row may not exist yet.
+            # Report the retrieval profile on the trace; observe dispatch
+            # logs a listener's failure, naming the hook and the plugin.
             if trace_id is not None:
-                outcome_log = self.pm.get_plugin("outcome_log")
-                if outcome_log is not None:
-                    try:
-                        await outcome_log.update_exchange(
-                            trace_id,
-                            retrieval_top_score=top_score,
-                            retrieval_top_similarity=top_similarity,
-                            retrieval_hit_count=hit_count,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "retrieval profile -> exchange_log copy failed",
-                            exc_info=True, extra={"channel_id": channel.id},
-                        )
+                await self.pm.ahook.on_trace_record(
+                    trace_id=trace_id, channel_id=channel.id, source="memory",
+                    origin=None, record={
+                        "retrieval_top_score": top_score,
+                        "retrieval_top_similarity": top_similarity,
+                        "retrieval_hit_count": hit_count,
+                    },
+                )
         except Exception:
             logger.warning(
                 "memory retrieval failed; turn proceeds without it",

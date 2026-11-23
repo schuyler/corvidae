@@ -13,9 +13,9 @@ import json
 import time
 from importlib.metadata import entry_points
 
-from corvidae.commands.redact import redact_messages
-
 from cognition.test_redact_cascade import insert_message, make_full_db
+
+from corvidae.commands.redact import redact_messages
 from tests.cognition.trace_helpers import outcomes_file
 
 CLAIMS = [
