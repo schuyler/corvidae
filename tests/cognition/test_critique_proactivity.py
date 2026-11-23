@@ -27,7 +27,7 @@ from tests.cognition.test_critique_vector import (
     _env,
     _offer,
     _warnings,
-    _watch_funnel,
+    _watch_held,
 )
 
 # The marker every proactivity fork instruction opens with.
@@ -114,12 +114,12 @@ class TestWakes:
     async def test_a_finding_wakes_with_the_proactivity_sentence(self, tmp_path):
         """R2/R6: a proactivity finding fires one wake on the critique
         origin, and the stub carries the proactivity sentence."""
-        env = await _env(tmp_path, chat_text=VERDICT, with_funnel=True)
+        env = await _env(tmp_path, chat_text=VERDICT, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp3", {"proactivity": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+            env.held.hold_and_wake.assert_awaited_once()
+            kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert OBJECTION in "\n".join(kwargs["entries"])
             assert SENTENCE in kwargs["stub_text"]
@@ -128,13 +128,13 @@ class TestWakes:
 
     async def test_a_finding_on_a_correction_waits(self, tmp_path):
         """R2: on a critique-origin turn the finding waits for the next turn."""
-        env = await _env(tmp_path, chat_text=VERDICT, with_funnel=True)
+        env = await _env(tmp_path, chat_text=VERDICT, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp4", {"proactivity": 1.0}, origin="critique",
                         response_text=PLAIN)
-            env.funnel.ingest_and_wake.assert_not_awaited()
-            entries = [e for c in env.funnel.ingest.call_args_list
+            env.held.hold_and_wake.assert_not_awaited()
+            entries = [e for c in env.held.hold.call_args_list
                        for e in c.kwargs["entries"]]
             assert any(OBJECTION in e for e in entries), entries
         finally:
@@ -144,11 +144,11 @@ class TestWakes:
         """R9: no severity filter, like every other lens."""
         low = json.dumps({"objections": [
             {"claim": "restart the indexer", "objection": OBJECTION, "severity": 0.2}]})
-        env = await _env(tmp_path, chat_text=low, with_funnel=True)
+        env = await _env(tmp_path, chat_text=low, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp5", {"proactivity": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
+            env.held.hold_and_wake.assert_awaited_once()
         finally:
             await _teardown(env)
 

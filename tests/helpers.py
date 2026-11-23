@@ -539,3 +539,22 @@ def add_kernel_registry(pm, registry=None):
     registry = registry if registry is not None else ChannelRegistry({})
     pm.register(registry, name="registry")
     return registry
+
+
+async def memory_turn(memory, channel, trace_id=None, annotations=None):
+    """One turn's passive memory retrieval, end to end (#1176).
+
+    Memory contributes through ``before_compose``; the kernel's held store
+    admits what it contributed, through whatever policy is registered, and
+    announces the outcome on ``on_held_admitted``. This runs those two steps as
+    the agent loop does on a turn that can append: gather memory's answer,
+    then ``admit_for_turn`` with it. The test's plugin manager must register
+    the held store (``add_kernel_held``) and a registry and clock.
+    """
+    contribution = await memory.before_compose(
+        channel=channel, trace_id=trace_id, annotations=annotations or {}
+    )
+    await memory.pm.get_plugin("held").admit_for_turn(
+        channel, channel.conversation, trace_id=trace_id, origin=None,
+        contributions=[contribution] if contribution is not None else [],
+    )

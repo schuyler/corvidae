@@ -1,8 +1,9 @@
 """Catch-up raw-transcript fallback split into admissible records (issue #626).
 
 After two unusable consolidation replies the segment's transcript is stored
-as records that each fit the memory admission budget (``funnel.budgets.memory``,
-else ``funnel.default_budget``), stamped ``mode = 'raw'``.
+as records that each fit the entry size target (``memory.entry_target_tokens``,
+#1176), stamped ``mode = 'raw'``. That the pieces follow the target and not the
+funnel's budgets is pinned by ``test_memory_contribution.py``.
 """
 
 import copy
@@ -20,10 +21,10 @@ from .test_memory_consolidation import (
     seed_dialog,
 )
 
-#: The smallest budget the tests use, small enough to force several pieces.
+#: The entry target the test uses, small enough to force several pieces.
 BUDGET = 40
 
-#: A dialog well over BUDGET, with one message that alone exceeds it.
+#: A dialog well over the target, with one message that alone exceeds it.
 LONG_DIALOG = [
     ("user", "the weather station keeps dropping off wifi every night"),
     ("assistant", "try WIFI_PS_NONE and check the brownout detector"),
@@ -35,25 +36,20 @@ LONG_DIALOG = [
 WORST_PREFIX = WORST_MEMORY_LINE_PREFIX
 
 
-def config_with(funnel: dict) -> dict:
-    """EMBED_CONFIG plus a funnel block."""
+def config_with_target(target: int) -> dict:
+    """EMBED_CONFIG with ``memory.entry_target_tokens`` set."""
     config = copy.deepcopy(EMBED_CONFIG)
-    config["funnel"] = funnel
+    config["memory"]["entry_target_tokens"] = target
     return config
 
 
-@pytest.mark.parametrize("funnel", [
-    {"budgets": {"memory": BUDGET}},
-    {"default_budget": BUDGET},
-    {"default_budget": 4096, "budgets": {"memory": BUDGET}},
-], ids=["budgets.memory", "default_budget", "memory-over-default"])
-async def test_raw_fallback_splits_to_the_memory_budget(funnel):
-    """Two unusable replies on a segment larger than the budget: several
+async def test_raw_fallback_splits_to_the_entry_target():
+    """Two unusable replies on a segment larger than the target: several
     records, each admissible as a memory line, together covering the
     transcript, sharing the range, stamped raw with the failed call's
     prompt and model."""
     memory, persistence, _stub, channel, db = await build_consolidation_env(
-        config_with(funnel)
+        config_with_target(BUDGET)
     )
     try:
         memory._llm()._clients["main"] = _SequenceChatClient(["nope", "still not json"])
@@ -65,7 +61,7 @@ async def test_raw_fallback_splits_to_the_memory_budget(funnel):
 
         rows = await fetch_stamped_memories(db)
         assert len(rows) > 1
-        # Each fits the budget as the line the funnel would be offered.
+        # Each fits the target as the line the store would be offered.
         for r in rows:
             assert count_tokens(WORST_PREFIX + r["summary"]) <= BUDGET, r["summary"]
         # Together they are the transcript, in order, nothing repeated or

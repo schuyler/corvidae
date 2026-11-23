@@ -20,7 +20,6 @@ import pytest
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from fake_clock import install_kernel_clock
 from corvidae.llm_plugin import LLMPlugin
@@ -91,9 +90,6 @@ async def build_benchmark_env(config=None):
     llm._clients["embedding"] = embedder
     stub_llm_config(llm, config.get("llm"))
 
-    funnel = FunnelPlugin()
-    pm.register(funnel, name="funnel")
-    await funnel.on_init(pm=pm, config=config)
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")

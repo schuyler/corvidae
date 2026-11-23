@@ -10,14 +10,14 @@ covers it):
 - R1  a plugin outside critique.py contributes a lens through the
       critique-owned ``on_critique_init`` hook; it runs when its vector wins,
       its outcome is recorded under its name and its objections reach the
-      funnel;
+      held store;
 - R2  contributions go through ``add_lens``; every problem is rejected with a
       WARNING naming the plugin and the lens, and the other lenses load;
 - R3  a lens is pure data; ``critique.lens.<name>.fork_prompt`` replaces the
       brief;
 - R6  same turns, same machinery: declined turns, forks off and an exchange
       out of the window all skip;
-- R7  an added lens only waits: ``funnel.ingest``, never ``ingest_and_wake``
+- R7  an added lens only waits: ``held.hold``, never ``hold_and_wake``
       (unless it declares ``wakes``, tests/cognition/test_critique_vector.py).
 
 The hook is driven the way the daemon drives it: a separate test plugin is
@@ -100,7 +100,7 @@ class Contributor(CorvidaePlugin):
 @contextlib.asynccontextmanager
 async def lens_env(
     tmp_path, *lenses, contributors=None, appraisal=..., chat_text=LENS_VERDICT,
-    with_funnel=False, config=None, rng=0.99,
+    with_held=False, config=None, rng=0.99,
 ):
     """critique's real wiring (``build_critique``) with the lenses held by one
     ``kb`` contributor, or ``contributors`` (name -> plugin), registered
@@ -111,7 +111,7 @@ async def lens_env(
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
-        tmp_path, appraisal, chat_text, with_funnel=with_funnel, config=config,
+        tmp_path, appraisal, chat_text, with_held=with_held, config=config,
         extra_plugins=contributors,
     )
     env.plugin._rng = FixedRng(value=rng)
@@ -171,16 +171,16 @@ def _logged(caplog, *needles):
     ]
 
 
-def _watch_funnel(env):
-    """Spy on funnel.ingest and replace ingest_and_wake with a mock."""
-    env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-    env.funnel.ingest_and_wake = AsyncMock()
+def _watch_held(env):
+    """Spy on held.hold and replace hold_and_wake with a mock."""
+    env.held.hold = AsyncMock(wraps=env.held.hold)
+    env.held.hold_and_wake = AsyncMock()
 
 
 def _ingested(env):
-    """Every entry the funnel was handed through ``ingest``, joined."""
+    """Every entry the store was handed through ``hold``, joined."""
     return "\n".join(
-        e for c in env.funnel.ingest.call_args_list for e in c.kwargs["entries"])
+        e for c in env.held.hold.call_args_list for e in c.kwargs["entries"])
 
 
 async def _no_outcome_for(env, trace_id, lens):
@@ -197,9 +197,9 @@ async def _no_outcome_for(env, trace_id, lens):
 class TestContribution:
     async def test_contributed_lens_runs_records_and_delivers(self, tmp_path):
         """R1: a separate plugin's lens runs, is recorded under its name and
-        its objections reach the funnel."""
-        async with lens_env(tmp_path, _lens("mine"), with_funnel=True) as env:
-            _watch_funnel(env)
+        its objections reach the held store."""
+        async with lens_env(tmp_path, _lens("mine"), with_held=True) as env:
+            _watch_held(env)
             await _judged_turn(env, "kr1", stage2=_wins("mine"))
             # The lens's own brief went out as a fork, attributed to critique.
             _assert_ran(env, mine=1)
@@ -210,7 +210,7 @@ class TestContribution:
             outcomes = await _read_outcomes(env.recorder, "kr1")
             assert outcomes["critique"]["mine"]["objections"] == 1
             assert outcomes["critique"]["mine"]["sampled"] is False
-            # The objection was delivered to the funnel.
+            # The objection was delivered to the held store.
             assert LENS_OBJECTION in _ingested(env)
 
 
@@ -508,15 +508,15 @@ class TestSameMachinery:
 
 class TestOnlyWaits:
     @pytest.mark.parametrize("origin", ["user", "reminder"])
-    async def test_objections_go_through_ingest_never_ingest_and_wake(
+    async def test_objections_go_through_hold_never_hold_and_wake(
         self, tmp_path, origin,
     ):
         """R7: a non-empty added-lens objection (a lens without ``wakes``)
-        goes through funnel.ingest and never ingest_and_wake, on every origin."""
+        goes through held.hold and never hold_and_wake, on every origin."""
         lens = _lens("mine")
-        async with lens_env(tmp_path, lens, with_funnel=True) as env:
-            _watch_funnel(env)
+        async with lens_env(tmp_path, lens, with_held=True) as env:
+            _watch_held(env)
             await _judged_turn(env, "kr7", origin=origin, stage2=_wins("mine"))
             _assert_ran(env, mine=1)
             assert LENS_OBJECTION in _ingested(env)
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold_and_wake.assert_not_awaited()

@@ -131,7 +131,7 @@ class Misbuilder(CorvidaePlugin):
 
 async def _env(
     tmp_path, *lenses, contributors=None, chat_text=LENS_VERDICT, config=None,
-    with_funnel=False, rng=0.99, appraisal=None,
+    with_held=False, rng=0.99, appraisal=None,
 ):
     """critique's real wiring with an offer-recording appraisal and the
     lenses held by one ``kb`` contributor (or ``contributors``, name ->
@@ -140,7 +140,7 @@ async def _env(
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
         tmp_path, appraisal or FakeAppraisal(),
-        chat_text, with_funnel=with_funnel, config=config,
+        chat_text, with_held=with_held, config=config,
         extra_plugins=contributors,
     )
     env.plugin._rng = FixedRng(value=rng)
@@ -181,10 +181,10 @@ def _warnings(caplog, *needles):
     ]
 
 
-def _watch_funnel(env):
-    """Spy on funnel.ingest and replace ingest_and_wake with a mock."""
-    env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-    env.funnel.ingest_and_wake = AsyncMock()
+def _watch_held(env):
+    """Spy on held.hold and replace hold_and_wake with a mock."""
+    env.held.hold = AsyncMock(wraps=env.held.hold)
+    env.held.hold_and_wake = AsyncMock()
 
 
 # ---------------------------------------------------------------------------
@@ -414,14 +414,14 @@ class TestConfigKeys:
 
 class TestWake:
     async def test_a_waking_plugin_lens_wakes_the_channel(self, tmp_path):
-        """T5: a wakes=True plugin lens's objection fires ingest_and_wake on
+        """T5: a wakes=True plugin lens's objection fires hold_and_wake on
         the critique origin."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5a", {"mine": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+            env.held.hold_and_wake.assert_awaited_once()
+            kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert LENS_OBJECTION in "\n".join(kwargs["entries"])
         finally:
@@ -429,24 +429,24 @@ class TestWake:
 
     async def test_a_plugin_lens_without_wakes_waits(self, tmp_path):
         """T5: without wakes the objection waits for the next turn."""
-        env = await _env(tmp_path, _lens("mine"), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine"), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5b", {"mine": 1.0})
-            env.funnel.ingest.assert_called_once()
-            assert LENS_OBJECTION in "\n".join(env.funnel.ingest.call_args.kwargs["entries"])
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold.assert_called_once()
+            assert LENS_OBJECTION in "\n".join(env.held.hold.call_args.kwargs["entries"])
+            env.held.hold_and_wake.assert_not_awaited()
         finally:
             await _teardown(env)
 
     async def test_a_waking_plugin_lens_waits_on_a_critique_origin_turn(self, tmp_path):
         """T5: the critique-origin brake holds for a waking plugin lens."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5c", {"mine": 1.0}, origin="critique")
-            env.funnel.ingest.assert_called_once()
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold.assert_called_once()
+            env.held.hold_and_wake.assert_not_awaited()
         finally:
             await _teardown(env)
 
@@ -456,12 +456,12 @@ class TestWake:
         """T5: with a root set, the stub is RETENTION_WAKE_NOTE plus the
         appended sentence, even when the plugin lens's wake fires first."""
         env = await _env(
-            tmp_path, _lens("mine", wakes=True), with_funnel=True,
+            tmp_path, _lens("mine", wakes=True), with_held=True,
             config={"critique": {"retention": {"root": ROOT}}})
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5d", {"mine": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             base = RETENTION_WAKE_NOTE.format(root=quote(ROOT), marker=NO_REPLY_MARKER)
             assert stub.startswith(base)
             assert stub.endswith(WAKE_SENTENCE)
@@ -473,11 +473,11 @@ class TestWake:
     ):
         """T5 (Revision 3): no root and a waking plugin lens loaded: the
         stub is PROVENANCE_NOTE plus the appended sentence."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5e", {"mine": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             assert stub.startswith(PROVENANCE_NOTE)
             assert stub.endswith(WAKE_SENTENCE)
         finally:
@@ -490,13 +490,13 @@ class TestWake:
         which wakes, switched off), retention (selected by the vector) wakes
         with today's note, byte for byte."""
         env = await _env(
-            tmp_path, _lens("mine"), with_funnel=True, chat_text=RETENTION_VERDICT,
+            tmp_path, _lens("mine"), with_held=True, chat_text=RETENTION_VERDICT,
             config={"critique": {"retention": {"root": ROOT},
                                  "lens": {"proactivity": {"enabled": False}}}})
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5f", {"retention": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             assert stub == RETENTION_WAKE_NOTE.format(
                 root=quote(ROOT), marker=NO_REPLY_MARKER)
         finally:

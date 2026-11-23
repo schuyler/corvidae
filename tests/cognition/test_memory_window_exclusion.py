@@ -11,6 +11,7 @@ no ids are retrieved as before. The exclusion acts before the cut to k.
 import time
 
 import pytest
+from helpers import memory_turn
 from corvidae_cognition.memory import VEC_OVERFETCH
 
 from tests.cognition.test_memory_retrieval import (
@@ -78,7 +79,7 @@ async def ask(memory, channel, conv, text: str, db_id: int | None) -> None:
     if db_id is not None:
         message["_db_id"] = db_id
     conv.append(message)
-    await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+    await memory_turn(memory, channel=channel, trace_id=None)
 
 
 def admitted_text(conv) -> str:

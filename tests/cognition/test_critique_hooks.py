@@ -147,14 +147,14 @@ async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_p
     """Item 9: on_appraisal_before_send runs the winning lens inline (the
     fork has happened when the hook returns, nothing was queued) with the
     whole draft in the instruction; its objections, proactivity's included,
-    go through funnel.ingest and never ingest_and_wake; the outcomes carry
+    go through held.hold and never hold_and_wake; the outcomes carry
     critique_before_send and lens_selection_before_send; the hook returns
     None."""
     env = await build_critique(
-        tmp_path, PresentAppraisal(), chat_text=VERDICT, with_funnel=True)
+        tmp_path, PresentAppraisal(), chat_text=VERDICT, with_held=True)
     try:
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         await _begin(env, "kb9")
         result = await env.plugin.on_appraisal_before_send(
             channel=env.channel, trace_id="kb9", text=DRAFT, annotations={},
@@ -170,9 +170,9 @@ async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_p
         assert " ".join(DRAFT.split()) in call["instruction"]
         # Queued, not waking: proactivity wakes after the exchange but not
         # before the send.
-        env.funnel.ingest_and_wake.assert_not_awaited()
-        env.funnel.ingest.assert_called_once()
-        entries = env.funnel.ingest.call_args.kwargs["entries"]
+        env.held.hold_and_wake.assert_not_awaited()
+        env.held.hold.assert_called_once()
+        entries = env.held.hold.call_args.kwargs["entries"]
         assert len(entries) == 1 and OBJECTION_TEXT in entries[0]
         # Both records, under their own keys.
         outcomes = await _read_outcomes(env.recorder, "kb9")
@@ -199,19 +199,19 @@ async def test_fallback_rate_one_runs_one_lens_at_each_point(tmp_path):
     The drawn lens is proactivity, which wakes after the exchange: before
     the send its finding still only waits (#1192)."""
     env = await build_critique(
-        tmp_path, None, chat_text=VERDICT, with_funnel=True,
+        tmp_path, None, chat_text=VERDICT, with_held=True,
         config={"critique": {"fallback_rate": 1.0}})
     try:
         env.plugin._rng = FixedRng(value=0.5, choice_value="proactivity")
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         await _begin(env, "kf1")
         assert await _gate(env, trace_id="kf1") is None
         [call] = env.fork_agent.calls
         assert ABOUT_TO_SEND in call["instruction"]
         assert "[Self-critique: proactivity]" in call["instruction"]
-        env.funnel.ingest.assert_called_once()
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold.assert_called_once()
+        env.held.hold_and_wake.assert_not_awaited()
         # A fallback run is not a sample below threshold, at either point.
         outcomes = await _read_outcomes(env.recorder, "kf1")
         assert outcomes["critique_before_send"]["sampled"] is False

@@ -27,7 +27,6 @@ from corvidae.hooks import (
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
 from corvidae_cognition import heartbeat
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition import goals as goals_mod
 from corvidae_cognition.goals import GoalsPlugin
 from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
@@ -123,9 +122,6 @@ async def make_env(tmp_path, monkeypatch):
         agent = AgentStub(pm, tracker)
         pm.register(agent, name="agent")
 
-        funnel = FunnelPlugin()
-        pm.register(funnel, name="funnel")
-        await funnel.on_init(pm=pm, config=config)
 
         # Memory reports on the trace protocol plugin's hook; Runtime's
         # install_plugin_hookspecs below installs its specs.

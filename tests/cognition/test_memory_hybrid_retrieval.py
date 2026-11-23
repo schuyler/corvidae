@@ -14,6 +14,7 @@ import time
 
 import aiosqlite
 import pytest
+from helpers import memory_turn
 from corvidae_cognition.memory import (
     CANDIDATES_CHOICES,
     FTS_SIMILARITY_PROXY,
@@ -176,7 +177,7 @@ class TestNoKeywordFloor:
         await seed_named_and_distractors(db, channel.id)
 
         conv.append({"role": "user", "content": QUERY})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         recalled = " ".join(m["content"] for m in context_messages(conv))
         assert NAMED not in recalled
@@ -226,7 +227,7 @@ class TestCandidateLog:
         named = await seed_named_and_distractors(db, channel.id)
 
         conv.append({"role": "user", "content": QUERY})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         async with db.execute(
             "SELECT memory_id, source, rank FROM retrieval_candidate ORDER BY rank"
@@ -242,7 +243,7 @@ class TestCandidateLog:
         embedder.fail = True
 
         conv.append({"role": "user", "content": QUERY})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         async with db.execute("SELECT DISTINCT source FROM retrieval_candidate") as cursor:
             assert await cursor.fetchall() == [("fts",)]
@@ -290,7 +291,7 @@ class TestWindowExclusion:
         fill_window(conv)
 
         conv.append({"role": "user", "content": QUERY, "_db_id": WINDOW_START + 5})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         async with db.execute(
             "SELECT memory_id, outcome, rank, source FROM retrieval_candidate"
@@ -319,7 +320,7 @@ class TestWindowExclusion:
         fill_window(conv)
 
         conv.append({"role": "user", "content": QUERY, "_db_id": WINDOW_START + 5})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         async with db.execute(
             "SELECT memory_id, outcome, rank FROM retrieval_candidate"
@@ -364,7 +365,7 @@ class TestUnmeasuredDoesNotTakeASlot:
         fresh = await seed_memory(db, channel.id, NAMED, embedded=False)
 
         conv.append({"role": "user", "content": QUERY})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         recalled = " ".join(m["content"] for m in context_messages(conv))
         assert measured_text in recalled

@@ -21,7 +21,6 @@ from corvidae.context import ContextWindow
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.goals import GoalsPlugin, goals_command
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
@@ -81,7 +80,7 @@ def day(ts: float) -> str:
 
 @pytest.fixture
 async def env(tmp_path, monkeypatch):
-    """persistence (WAL file DB) + stub llm + clock + funnel + memory + goals."""
+    """persistence (WAL file DB) + stub llm + clock + memory + goals."""
     db_path = str(tmp_path / "sessions.db")
     config = {**CONFIG, "_base_dir": str(tmp_path)}
 
@@ -98,9 +97,6 @@ async def env(tmp_path, monkeypatch):
 
     clock, idle = install_kernel_clock(pm)
 
-    funnel = FunnelPlugin()
-    pm.register(funnel, name="funnel")
-    await funnel.on_init(pm=pm, config=CONFIG)
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
