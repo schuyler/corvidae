@@ -902,17 +902,21 @@ class AppraisalPlugin(CorvidaePlugin):
             if not isinstance(result, list):
                 logger.warning(
                     "appraisal: on_appraisal_before_send result for trace %s on "
-                    "channel %s is a %s, not a list of objection strings; dropped",
+                    "channel %s is a %s, not a list of objection strings; dropped. "
+                    "Return a list of str (or None) from on_appraisal_before_send",
                     trace_id, channel.id, type(result).__name__)
                 continue
             for item in result:
                 if not isinstance(item, str):
                     logger.warning(
                         "appraisal: on_appraisal_before_send item for trace %s on "
-                        "channel %s is a %s, not a string; dropped",
+                        "channel %s is a %s, not a string; dropped. "
+                        "Return a list of str from on_appraisal_before_send",
                         trace_id, channel.id, type(item).__name__)
                     continue
-                objections.append(item)
+                # A blank objection says nothing and would refuse with no reason.
+                if item.strip():
+                    objections.append(item)
         return objections
 
     async def _fork_before_send(

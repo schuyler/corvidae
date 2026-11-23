@@ -237,3 +237,11 @@ class PreSendHold:
 - Cosmetic 3: a case-insensitive warning match. **Fixed.**
 - Edge (forks-off per final at DEBUG): the design now says this covers the before-send path only; stage 2 keeps its warning.
 - Cosmetics 1, 2 and 4: left as they are, with reasons in the review.
+
+### Green round 1: PASS
+- Cosmetic 2 (no remedy in the hook-result warnings): **fixed**.
+- Cosmetic 3 (undocumented ordering in critique's `on_agent_response`): **fixed** with a comment.
+- E4 (a blank objection refuses with no reason): **fixed now**, one line (blank items are skipped).
+- Cosmetic 1 (critique's module docstring) goes to the docs phase. Cosmetics 4–6 are left as they are.
+- E1 and E2 (critique's per-final forks-off warning when critique forks are off): **Deferred**; R10 covers appraisal only.
+- E3: already Deferred.

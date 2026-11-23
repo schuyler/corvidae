@@ -1308,6 +1308,8 @@ class CritiquePlugin(CorvidaePlugin):
         held trace is not judged (#1149 R8).
         """
         # Hold outcome first (fallback only): True means this trace was held.
+        # on_final does not suspend on its False paths, so _declined and
+        # _record_reply below still run before this hook's first real await.
         if not self._appraisal and await self._hold.on_final(
             channel, trace_id, response_text, annotations
         ):
