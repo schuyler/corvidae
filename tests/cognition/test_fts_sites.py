@@ -64,7 +64,8 @@ async def test_fts_candidates_run_a_common_words_query():
     memory, _e, channel, _conv, db = await build_retrieval_env()
     dinner = await seed_retrieval_memory(db, channel.id, DINNER, embedded=False)
 
-    rows = await memory._fts_candidates(db, COMMON, 8)
+    # The hybrid branch, where the old stopword filter lived.
+    rows = await memory._fts_candidates(db, COMMON, 8, flag_window=True)
 
     assert [r[0] for r in rows] == [dinner]
     await db.close()

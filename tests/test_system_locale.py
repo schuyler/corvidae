@@ -53,6 +53,8 @@ def test_time_locale_strips_encoding_and_treats_c_as_none(monkeypatch, name, exp
 
 @pytest.mark.parametrize("name,region", [
     (None, "wt-wt"), ("de_DE", "de-de"),
+    # Asymmetric: country first, so a language-first swap would fail here.
+    ("en_US", "us-en"),
     # A locale with no country part has no region to give.
     ("de", "wt-wt"),
 ])

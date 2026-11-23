@@ -2272,7 +2272,7 @@ from the original content (before tombstoning) and runs FTS `MATCH` queries
 against `message_fts` and `memory_fts`. It prints `"verified: 0 hits for
 '<token>' in <tables>"` when clean or `"WARNING: FTS still contains hits for
 '<token>': <table>: <N> hits"` when the cascade left searchable content. It
-checks those two indexes for one term (3 or more characters, containing a letter, outside the tombstone text) and nothing else, so a clean result
+checks those two indexes for one word and nothing else, so a clean result
 doesn't mean the text is gone: it finds neither copies elsewhere nor a
 paraphrase ([redaction.md](redaction.md)). Skipped when `--dry-run` is in effect or when no suitable
 sample token can be extracted.
