@@ -117,13 +117,12 @@ confirms on a real server before merge.
 `Agent.fork` gains one keyword-only parameter:
 
 ```python
-yield_point: Callable[[], Awaitable[None]] | None = None
+yield_to_caller: Callable[[], Awaitable[None]] | None = None
 ```
 
 a cooperative yield: the fork hands control to its caller at each round
 boundary of the tool loop (after tool results, before the next model
-request), outside `lease_scope`, and continues when it returns. The name
-follows PRD §3.13.5's "every call boundary is a yield point". (The first request follows the render with no await between;
+request), outside `lease_scope`, and continues when it returns. (The first request follows the render with no await between;
 the caller waits before calling `fork`, I3.) If it raises, the exception propagates out of `fork` (the
 `finally` still logs "stage done", `ok=False`). It is a caller callback, not a
 hook: the fork still fires no hooks (PRD §3.8 item 1).
@@ -188,7 +187,7 @@ already carries `trace_id`).
 
 ## Open (for the owner at the design gate)
 
-- **Kernel contract:** `Agent.fork` gains `yield_point` (§4), a cooperative yield at each round of the tool loop; owner accepted the change (2026-11-23); name pending owner confirmation. R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
+- **Kernel contract:** `Agent.fork` gains `yield_to_caller` (§4), a cooperative yield at each round of the tool loop; owner accepted the change and the name (2026-11-23). R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
 - **I1:** the provenance fork gets no deadline (R7 leaves it alone; its provider timeout defaults to none).
 
 ## Review log
