@@ -493,3 +493,21 @@ def skip_warnings(caplog, row_id: int, channel_id: str) -> list[str]:
         and re.search(rf"\b{row_id}\b", r.getMessage())
         and channel_id in r.getMessage()
     ]
+
+
+def add_kernel_registry(pm, registry=None):
+    """Register a ChannelRegistry as "registry" and return it (#1180).
+
+    A plugin resolves the kernel registry with ``get_dependency``, which
+    raises when none is registered, so a test that builds its plugin manager
+    by hand registers one here. When ``pm`` already has a "registry", that one
+    is returned and nothing new is registered.
+    """
+    from corvidae.channel import ChannelRegistry
+
+    existing = pm.get_plugin("registry")
+    if existing is not None:
+        return existing
+    registry = registry if registry is not None else ChannelRegistry({})
+    pm.register(registry, name="registry")
+    return registry

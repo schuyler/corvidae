@@ -1757,8 +1757,8 @@ traces an evicted trace resolves to `None`; the gate treats that as `task`.
 
 A message refused by a transport gate (an allowlist refusing a stranger) is
 not recorded: a channel the `ChannelRegistry` does not hold is skipped, so
-no refused sender's channel id lands in the file. With no registry plugin
-the guard fails open and records. Rejections on known channels (the
+no refused sender's channel id lands in the file. The registry is a declared
+dependency, so it is always there. Rejections on known channels (the
 `limits` plugin's, say) are recorded, with no `message_rowid`.
 
 **When it cannot write.** An in-memory session database has no file to sit
