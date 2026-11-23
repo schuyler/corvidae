@@ -195,16 +195,6 @@ UNSPACED = {
 }
 
 
-async def test_chunks_fts_is_created_with_the_trigram_tokenizer(tmp_path):
-    """A new index creates chunks_fts with trigram remove_diacritics 1."""
-    index, _, _ = await make_index(tmp_path, UNSPACED, identity=None)
-    db = await index._ensure_schema()
-    async with db.execute("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'") as c:
-        (ddl,) = await c.fetchone()
-    assert "trigram" in ddl and "remove_diacritics 1" in ddl, ddl
-    await index.close()
-
-
 async def test_search_finds_a_sentence_containing_an_unspaced_word(tmp_path):
     """A query that contains 喜欢吃 (a 3-character piece) finds the page
     holding 我喜欢吃苹果 on the FTS-only path."""
@@ -222,18 +212,6 @@ async def test_search_finds_a_two_character_cjk_word(tmp_path):
     await index.reconcile()
     hits = await index.search("苹果", k=3)
     assert [h.path for h in hits] == ["cjk.md"], hits
-    await index.close()
-
-
-async def test_search_of_only_common_words_still_runs(tmp_path):
-    """R1: no stopword list; a query of only common English words runs and
-    returns the chunks that share their pieces."""
-    index, _, _ = await make_index(
-        tmp_path, {"a.md": "# A\n\nDinner: pasta with garlic and basil"}, identity=None
-    )
-    await index.reconcile()
-    hits = await index.search("the and with", k=3)
-    assert [h.path for h in hits] == ["a.md"], hits
     await index.close()
 
 

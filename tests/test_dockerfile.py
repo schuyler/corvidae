@@ -170,30 +170,25 @@ def test_tiktoken_encoding_is_baked_into_the_image(dockerfile, runtime):
 # ---------------------------------------------------------------------------
 
 
-def test_runtime_declares_locale_build_arg_defaulting_to_c_utf8(runtime):
-    """The build argument is LOCALE (not LANG: the base image's ENV LANG
-    would shadow an ARG LANG), and the default stays C.UTF-8."""
-    assert "LOCALE=C.UTF-8" in _instructions(runtime, "ARG")
-
-
-def test_runtime_installs_the_locales_package(runtime):
-    """The locale definitions come from the `locales` package, installed
-    without recommends as the file's other apt steps do."""
-    runs = " ".join(_instructions(runtime, "RUN"))
-    assert re.search(r"apt-get[^&;]*--no-install-recommends[^&;]*\blocales\b", runs), runs
-
-
-def test_runtime_compiles_the_named_locale_with_localedef(runtime):
-    """A non-default LOCALE is compiled with localedef, and the default
-    C.UTF-8 skips that step (the base image already provides it)."""
-    runs = [r for r in _instructions(runtime, "RUN") if "localedef" in r]
-    assert runs, "no localedef step: a --build-arg LOCALE would not install anything"
-    assert "LOCALE" in runs[0] and "C.UTF-8" in runs[0], runs[0]
+def test_runtime_installs_and_compiles_the_named_locale(runtime):
+    """The locale definitions come from the `locales` package (installed
+    without recommends, as the file's other apt steps do), and a non-default
+    LOCALE is compiled with localedef while the default C.UTF-8 skips it."""
+    runs = _instructions(runtime, "RUN")
+    assert re.search(
+        r"apt-get[^&;]*--no-install-recommends[^&;]*\blocales\b", " ".join(runs)
+    ), runs
+    compiled = [r for r in runs if "localedef" in r]
+    assert compiled, "no localedef step: a --build-arg LOCALE would not install anything"
+    assert "LOCALE" in compiled[0] and "C.UTF-8" in compiled[0], compiled[0]
 
 
 def test_lang_is_set_from_locale_after_the_arg(runtime):
-    """ENV LANG=$LOCALE comes after ARG LOCALE, so the running container
-    sees the built locale without `-e LANG=...`."""
+    """The build argument is LOCALE (not LANG: the base image's ENV LANG
+    would shadow an ARG LANG) defaulting to C.UTF-8, and ENV LANG=$LOCALE
+    comes after it, so the running container sees the built locale without
+    `-e LANG=...`."""
+    assert "LOCALE=C.UTF-8" in _instructions(runtime, "ARG")
     arg_at = next((i for i, ln in enumerate(runtime) if ln.startswith("ARG LOCALE")), None)
     assert arg_at is not None, "no ARG LOCALE in the runtime stage"
     env_at = next(

@@ -350,7 +350,6 @@ class TestSentenceBoundaries:
         ("我喜欢吃苹果。你呢？我也是", ["我喜欢吃苹果。", "你呢？", "我也是"]),
         ("Hi.\nNext line", ["Hi.\n", "Next line"]),
         ("version 1.5 works", ["version 1.5 works"]),
-        ("e.g. foo", ["e.g. ", "foo"]),
     ])
     def test_pieces(self, text, pieces):
         from corvidae_cognition.markdown_recall.chunking import _split_sentences

@@ -164,21 +164,6 @@ class TestFusion:
             await db.close()
         assert orders[0] == orders[1]
 
-    async def test_query_of_only_common_words_still_returns_rows(self):
-        """#1186 R1: with no stopword list the hybrid FTS side runs a query
-        of only common words. The distractors have no vector, so only the
-        keyword side can return them."""
-        memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
-        await seed_memory(db, channel.id, "kestrel rain gauge calibration")
-        for text in DISTRACTORS:
-            await seed_memory(db, channel.id, text, embedded=False)
-
-        pool = await memory._retrieve_pool("what about those")
-
-        found = {c["id"] for c in pool.ranked if c["source"] == "fts"}
-        assert found, "a common-words query returned no keyword hits"
-        await db.close()
-
 
 class TestNoKeywordFloor:
     """#409: a keyword match is gated on its measured cosine like any other

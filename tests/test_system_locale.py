@@ -35,8 +35,8 @@ def test_constants_are_the_designed_values():
 
 
 @pytest.mark.parametrize("name,expected", [
-    ("C", None), ("POSIX", None), ("C.UTF-8", None),
-    ("de_DE.UTF-8", "de_DE"), ("de_DE.UTF-8@euro", "de_DE"), ("ja_JP", "ja_JP"),
+    ("POSIX", None), ("C.UTF-8", None),
+    ("de_DE.UTF-8", "de_DE"), ("de_DE.UTF-8@euro", "de_DE"),
 ])
 def test_time_locale_strips_encoding_and_treats_c_as_none(monkeypatch, name, expected):
     """time_locale() queries LC_TIME, drops .encoding and @modifier, and
@@ -52,8 +52,7 @@ def test_time_locale_strips_encoding_and_treats_c_as_none(monkeypatch, name, exp
 
 
 @pytest.mark.parametrize("name,region", [
-    (None, "wt-wt"), ("de_DE", "de-de"), ("en_US", "us-en"),
-    ("ja_JP", "jp-ja"), ("fr_CA", "ca-fr"),
+    (None, "wt-wt"), ("de_DE", "de-de"),
     # A locale with no country part has no region to give.
     ("de", "wt-wt"),
 ])

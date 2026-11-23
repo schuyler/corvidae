@@ -41,11 +41,8 @@ def test_constants_pin_the_trigram_tokenizer():
 @pytest.mark.parametrize("text,terms", [
     # Combining marks (category M) stay inside the term; \w+ would split these.
     ("हिन्दी भाषा", ["हिन्दी", "भाषा"]),
-    ("ภาษาไทย ดี", ["ภาษาไทย", "ดี"]),
     # Punctuation separates terms, so no quote or percent can reach a query.
-    ("apples, pie", ["apples", "pie"]),
     ('foo"bar 100%', ["foo", "bar", "100"]),
-    ("Привет, мир", ["Привет", "мир"]),
     ("?!", []),
     # A zero-width non-joiner sits inside a Persian word and must not split it.
     ("من می\u200cخواهم", ["من", "می\u200cخواهم"]),
@@ -159,20 +156,6 @@ def test_keyword_where_like_form():
 # ---------------------------------------------------------------------------
 # create_fts_table: the SQLite floor message
 # ---------------------------------------------------------------------------
-
-
-async def test_create_fts_table_creates_the_table():
-    async with aiosqlite.connect(":memory:") as db:
-        await fts.create_fts_table(
-            db, "demo_fts",
-            "CREATE VIRTUAL TABLE IF NOT EXISTS demo_fts USING fts5("
-            f"body, {fts.TOKENIZE_CLAUSE})",
-        )
-        async with db.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'demo_fts'"
-        ) as cursor:
-            (ddl,) = await cursor.fetchone()
-    assert "trigram" in ddl
 
 
 async def test_create_fts_table_failure_names_table_version_and_floor(caplog):

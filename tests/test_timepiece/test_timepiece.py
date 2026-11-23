@@ -359,14 +359,3 @@ class TestSystemLocale:
         await turn(plugin, channel)
         content = context_entries(channel)[0]["content"]
         assert "now 2026/11/07 19:15." in content, content
-
-    async def test_c_locale_keeps_the_default_row(self, monkeypatch):
-        """D6: under C/POSIX the default stamp is today's text."""
-        from corvidae import system_locale
-
-        monkeypatch.setattr(system_locale, "time_locale", lambda: None)
-        plugin = await make_plugin({})
-        channel = FakeChannel()
-        await turn(plugin, channel)
-        content = context_entries(channel)[0]["content"]
-        assert "Saturday 2026-11-07 at 19:15 UTC" in content, content

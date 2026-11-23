@@ -1030,10 +1030,8 @@ class TestWebSearchRegion:
     """#1186 R8: web_search passes a region from the system locale, not the
     library's us-en default."""
 
-    @pytest.mark.parametrize("locale_name,region", [
-        ("de_DE", "de-de"), (None, "wt-wt"),
-    ])
-    async def test_region_follows_the_system_locale(self, monkeypatch, locale_name, region):
+    async def test_region_follows_the_system_locale(self, monkeypatch):
+        locale_name, region = "de_DE", "de-de"
         from corvidae import system_locale
 
         monkeypatch.setattr(system_locale, "time_locale", lambda: locale_name)

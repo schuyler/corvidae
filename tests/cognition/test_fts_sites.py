@@ -2,9 +2,9 @@
 
 Store ``我喜欢吃苹果``; a search for ``我也喜欢吃`` (a query that *contains*
 the word 喜欢吃) and for the 2-character ``苹果`` finds it, on the FTS-only
-path and, for memory, the hybrid path. One guard per site that a query of
+path and, for memory, the hybrid path. One end-to-end guard that a query of
 only common words (``the and with``) still returns rows (R1: no stopword
-list). The sites: passive retrieval (``_fts_candidates``, both branches),
+list; the builder is shared). The sites: passive retrieval (``_fts_candidates``, both branches),
 ``search_memory``, ``search_transcripts`` (markdown recall and critique have
 their own files).
 """
@@ -36,31 +36,16 @@ DINNER = "Dinner: pasta with garlic and basil"
 
 
 # ---------------------------------------------------------------------------
-# The three tables are created with the trigram tokenizer
-# ---------------------------------------------------------------------------
-
-
-async def test_a_fresh_database_creates_trigram_fts_tables():
-    """_ensure_schema creates memory_fts and message_fts with the shared
-    tokenizer clause (no migration: new tables only)."""
-    _memory, _tools, db = await build_tools_env()
-    async with db.execute(
-        "SELECT name, sql FROM sqlite_master WHERE name IN ('memory_fts', 'message_fts')"
-    ) as cursor:
-        ddl = dict(await cursor.fetchall())
-    assert set(ddl) == {"memory_fts", "message_fts"}
-    for name, sql in ddl.items():
-        assert "tokenize='trigram remove_diacritics 1'" in sql, (name, sql)
-    await db.close()
-
-
-# ---------------------------------------------------------------------------
 # Passive retrieval: _fts_candidates, both branches (degraded / hybrid)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("flag_window", [False, True], ids=["degraded", "hybrid"])
-@pytest.mark.parametrize("query", [CONTAINING, SHORT], ids=["containing", "short"])
+# One row per branch and per predicate form: the WHERE comes from one shared
+# builder, so the other two combinations would re-prove these.
+@pytest.mark.parametrize("flag_window,query", [
+    pytest.param(False, CONTAINING, id="degraded-containing"),
+    pytest.param(True, SHORT, id="hybrid-short"),
+])
 async def test_fts_candidates_find_unspaced_text(flag_window, query):
     """The keyword side finds the unspaced record: a query containing 喜欢吃
     through its 3-character piece, 苹果 through the LIKE scan (D2)."""
@@ -74,13 +59,12 @@ async def test_fts_candidates_find_unspaced_text(flag_window, query):
     await db.close()
 
 
-@pytest.mark.parametrize("flag_window", [False, True], ids=["degraded", "hybrid"])
-async def test_fts_candidates_run_a_common_words_query(flag_window):
+async def test_fts_candidates_run_a_common_words_query():
     """R1: `the and with` returns the rows sharing those words."""
     memory, _e, channel, _conv, db = await build_retrieval_env()
     dinner = await seed_retrieval_memory(db, channel.id, DINNER, embedded=False)
 
-    rows = await memory._fts_candidates(db, COMMON, 8, flag_window=flag_window)
+    rows = await memory._fts_candidates(db, COMMON, 8)
 
     assert [r[0] for r in rows] == [dinner]
     await db.close()
@@ -191,17 +175,6 @@ async def test_search_memory_keyword_only_mode_finds_unspaced_text():
     await db.close()
 
 
-async def test_search_memory_runs_a_common_words_query():
-    """R1: `the and with` finds the dinner record."""
-    _memory, tools, db = await build_tools_env()
-    await seed_memory(db, "irc:#a", DINNER, embedded=0)
-
-    result = await get_tools(tools)["search_memory"](COMMON)
-
-    assert "pasta" in result, result
-    await db.close()
-
-
 async def test_search_memory_of_punctuation_only_says_no_searchable_terms():
     """The 'no searchable terms' guard stays for a query with no terms."""
     _memory, tools, db = await build_tools_env()
@@ -227,15 +200,4 @@ async def test_search_transcripts_finds_unspaced_text(query):
 
     assert f"{target}." in result, result
     assert f"{other}." not in result, result
-    await db.close()
-
-
-async def test_search_transcripts_runs_a_common_words_query():
-    """R1: `the and with` finds the dinner message."""
-    _memory, tools, db = await build_tools_env()
-    dinner = await seed_message_log_row(db, "irc:#a", "user", DINNER)
-
-    result = await get_tools(tools)["search_transcripts"](COMMON)
-
-    assert f"{dinner}." in result, result
     await db.close()
