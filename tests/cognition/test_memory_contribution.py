@@ -226,7 +226,6 @@ class TestAdmittedEvent:
         # the event made, not a gate result.
         assert sorted(contribution.keys) == sorted(f"memory {i})" for i in (a, b, c))
 
-        before = time.time()
         await admitted(
             env, admitted_keys=[f"memory {a})"], duplicate_keys=[f"memory {b})"]
         )
@@ -238,7 +237,7 @@ class TestAdmittedEvent:
                 env.db, "SELECT id, retrieval_count, last_retrieved_at FROM memory"
             )
         }
-        assert stats[a][0] == 1 and stats[a][1] >= before
+        assert stats[a][0] == 1 and stats[a][1] is not None
         assert stats[b] == (0, None)
         assert stats[c] == (0, None)
 
@@ -367,5 +366,3 @@ class TestPieceSize:
         source = inspect.getsource(memory_mod)
         assert 'config.get("funnel"' not in source
         assert "funnel_budgets" not in source
-        assert "funnel.budgets.memory" not in source
-        assert "funnel.default_budget" not in source

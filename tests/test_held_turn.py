@@ -338,7 +338,6 @@ class TestLateRefusalIsFramed:
         place a late refusal waits."""
         plugin, channel, db, clock = env
         assert not hasattr(plugin, "_late_checks")
-        assert not hasattr(plugin, "_drain_late_checks")
 
 
 # ---------------------------------------------------------------------------

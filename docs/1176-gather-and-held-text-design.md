@@ -275,8 +275,8 @@ The frame label and the budget key are `Contribution.source` (or the
   (webhook-notify's payload default, `webhook_notify/__init__.py:66`; to be
   re-checked at Green). It is validated in `corvidae/channel.py` alongside
   `check_allowance_min`, in characters to match the spill's limits. `held`
-  reads it from `ChannelRegistry.agent_defaults`, so it declares `registry`
-  in `depends_on`. An entry over it keeps its first N characters.
+  reads it from `ChannelRegistry.agent_defaults` each time an entry is held
+  (not cached at `on_init`), so it declares `registry` in `depends_on`. An entry over it keeps its first N characters.
   The rest goes through `NotificationSpill.cut(..., can_read=spill.can_read(channel))`,
   and the entry gets `provenance.cut_text`'s line. `held` names `spill` in
   `depends_on`, alongside `registry` (above) and `clock` (for `created`). A spill write failure is already logged by the spill. A cut
@@ -307,7 +307,8 @@ The new order:
      late (R2.2), and R3.3 holds.
    - If this item is one of `held`'s stubs, the agent calls
      `held.stub_deferred(channel, origin)` (§2). The item is recognized by a
-     kernel-owned annotation key that `held` stamps on every stub it fires;
+     kernel-owned annotation key, `corvidae.held.STUB_ANNOTATION`, that
+     `held` stamps on every stub it fires;
      it is never recognized by its origin, which task completions and
      cross-channel notes also carry. The turn then runs its model call as
      usual, with the stub's origin, so critique's NO_REPLY veto applies.
@@ -358,6 +359,7 @@ remains on the channel and the item was not buffered.
     already waited the allowance, so a longer ponder buys little). Its reply
     texts drop "funnel's admission" for "the next turn".
 - **Declarations.** The funnel declares `depends_on = {"held", "clock"}`.
+  It resolves `held` when it first needs it, not in `on_init`.
 - **Budget meaning.** The budget changes from "per `admit()` call" to "per
   batch offered", and a batch is what one call or one contribution produced,
   so the effect is the same. The documented key text is reworded.
@@ -819,3 +821,18 @@ landed, with no recurrence. Non-blocking follow-ups:
   substring matches in H12/H14.
 
 The Red gate passed.
+
+Round 3 (fresh cold reviewer at `55ab400`, run at the owner's request
+before Green): **PASS**, with no critical or important findings, and every
+criterion covered. Cosmetic findings and their dispositions:
+
+| Finding | Disposition |
+|---|---|
+| F tests register `held` after the funnel's `on_init` | resolved in the design: §5 says the funnel resolves `held` lazily |
+| H10 sets the ceiling after `held.on_init` | resolved in the design: §3 says the ceiling is read at hold time |
+| M3 compares `last_retrieved_at` against wall time | fixed: asserts it is set |
+| H1 pins `_drain_late_checks` | fixed: the line is dropped (H1 names only `_late_checks`) |
+| `STUB_ANNOTATION` named only by the tests | resolved in the design: §4 names it |
+| M5's string ban could trip on a comment | fixed: the dotted-path bans are dropped, and the config-read bans stay |
+| Kernel files error in fixture setup | kept: the missing module is the intended red reason |
+| Edge: markdown recall test with no `llm`; G4's exact counts | kept: a correct Green passes both |
