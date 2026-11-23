@@ -559,20 +559,29 @@ class MarkdownIndex:
         else:
             await db.execute("DROP TABLE IF EXISTS chunks_vec")
             self._vec_available = False
-        # Reindex every file from scratch.
-        async with db.execute("DELETE FROM chunks") as _c:
-            pass
-        async with db.execute("DELETE FROM manifest") as _c:
-            pass
-        # Commit before any model call. This interpreter opens a write
-        # transaction on the first DML (aiosqlite keeps sqlite3's legacy
-        # isolation_level=""), so without this the whole corpus's embedding
-        # I/O sits inside one write transaction and every other writer to
-        # this database times out at its busy deadline -- a single slow
-        # embedding call measured 646 s while the lock was held
-        # (corvidae#1211). The index is a rebuildable cache, so an
-        # interrupted rebuild between here and the per-file commits costs a
-        # re-walk, not consistency.
+        # Commit the DDL before any embedding call. With no implicit BEGIN for
+        # DDL, aiosqlite's autocommit is off, so the DROP/CREATE above opens a
+        # transaction that would otherwise stay open until the first file's
+        # commit -- i.e. across this rebuild's first embedding call, which is
+        # the hold this change is about (corvidae#1211).
+        await db.commit()
+        # Reindex every file. No global DELETE FROM chunks / manifest here:
+        # this interpreter opens a write transaction on the first DML, so a
+        # wipe-then-commit would leave readers on an empty index for the length
+        # of the rebuild -- in WAL mode a read-only transaction keeps seeing the
+        # pre-transaction snapshot, which is what the uncommitted wipe used to
+        # give them -- and _embed() swallows provider failures, so wiping first
+        # can empty the index with a broken model and nothing to rebuild from.
+        # Each file's rows are dropped and replaced inside its own short
+        # transaction by _replace_file_chunks instead.
+        for path, (size, mtime_ns) in files.items():
+            await self._reconcile_file(db, path, size, mtime_ns, None)
+        # Rows for paths the walk no longer yields: the manifest is rewritten
+        # per file above, so this is the only place a stale row can still hide.
+        kept = list(files)
+        marks = ",".join("?" * len(kept))
+        await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
+        await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
         for path, (size, mtime_ns) in files.items():
             await self._reconcile_file(db, path, size, mtime_ns, None)

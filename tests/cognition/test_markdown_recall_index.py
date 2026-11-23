@@ -557,3 +557,70 @@ async def test_reconcile_does_not_hold_write_lock_across_embedding(tmp_path):
         f"embedding held the write lock (mtime-touch path) in "
         f"{sum(1 for p in probe if p == 'locked')} of {len(probe)} calls: {probe}"
     )
+
+
+async def test_rebuild_keeps_existing_chunks_readable(tmp_path):
+    """A rebuild must not leave readers on an empty index (corvidae#1211).
+
+    The first shape of the fix committed ``DELETE FROM chunks`` before
+    re-embedding, which is worse than the lock it removed: in WAL mode a
+    read-only transaction keeps seeing the pre-transaction snapshot, so the old
+    uncommitted wipe let readers see the whole previous index for the length of
+    a rebuild, while a committed wipe shows them nothing. And ``_embed``
+    swallows provider failures, so wiping first can empty the index with a
+    broken model and nothing to rebuild from. Rows are now replaced per file by
+    ``_replace_file_chunks``, so this asserts the previous index is still there
+    mid-rebuild, counted from a second connection.
+    """
+    import aiosqlite
+
+    db_path = tmp_path / "index.db"
+    root = tmp_path / "notes"
+    root.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (root / name).write_text(f"# {name}\n\n{name} content words here")
+
+    state = {"identity": _EncoderIdentity(
+        model="fake-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )}
+    seen: list[int] = []
+
+    class ReadingEmbed(FakeEmbed):
+        async def embed(self, texts: list[str], kind: str = "document"):
+            outcome = await super().embed(texts, kind)
+            other = await aiosqlite.connect(str(db_path))
+            try:
+                async with other.execute("SELECT count(*) FROM chunks") as cursor:
+                    seen.append((await cursor.fetchone())[0])
+            finally:
+                await other.close()
+            return outcome
+
+    embed = ReadingEmbed()
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: state["identity"],
+    )
+    await index.reconcile()
+    await index.close()
+    before = len(seen)
+    assert before >= 3, f"pass 1 should have indexed every file, probes={seen}"
+
+    seen.clear()
+    state["identity"] = _EncoderIdentity(
+        model="other-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: state["identity"],
+    )
+    await index.reconcile()
+    await index.close()
+    assert seen and all(count >= 3 for count in seen), (
+        f"a reader saw the index partly or fully wiped mid-rebuild: "
+        f"{seen} (pass-1 probes={before})"
+    )
