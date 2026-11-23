@@ -257,8 +257,10 @@ The frame label and the budget key are `Contribution.source` (or the
   admitted as offered rather than lost (fail soft, loud).
 - **`on_stop` (R3.7).** One WARNING per channel that still holds entries,
   naming the channel, the count and the sources, with the reason ("held text
-  is in memory only; a restart drops it, #318"). It also cancels nothing:
-  stragglers belong to the clock, and `Clock.close` cancels them.
+  is in memory only; a restart drops it, #318"). It also cancels nothing.
+  A straggler's `on_late` delivery runs in its own task, not one the clock
+  owns, because G5 requires the future to settle only after `on_late` has
+  returned, and the fake clock's `settle()` cannot wait on it.
 
 ### 3. Framing and the ceiling
 
@@ -341,8 +343,9 @@ remains on the channel and the item was not buffered.
   - The config reads and validation for the four keys, unchanged (R5.3).
   - `transform_held_admission`, which takes the batches in the order
     offered (today's order) and runs today's admission steps over each,
-    counting the entries it admitted from earlier batches in the same call
-    as already in the window for dedupe and the window cap: keyed or text dedupe against window CONTEXT, the per-source budget
+    counting the entries it admitted from earlier batches of the same source
+    in the same call as already in the window for dedupe and the window cap
+    (same source only: F5 admits one text under four sources in one call): keyed or text dedupe against window CONTEXT, the per-source budget
     and window cap, and dropping unadmittable entries with today's WARNINGs.
     Budget skips are listed in `drop` on a `once` batch (logged at INFO, as
     today's immediate path does) and left unlisted on a push batch, so they
@@ -836,3 +839,25 @@ criterion covered. Cosmetic findings and their dispositions:
 | M5's string ban could trip on a comment | fixed: the dotted-path bans are dropped, and the config-read bans stay |
 | Kernel files error in fixture setup | kept: the missing module is the intended red reason |
 | Edge: markdown recall test with no `llm`; G4's exact counts | kept: a correct Green passes both |
+
+## Green review log
+
+Round 1 (cold reviewer, at `6588159`): **FAIL**, 0 critical and 2 important.
+Every gated Red test passes, and Green changed no Red assertion.
+
+| Finding | Disposition |
+|---|---|
+| I-1. Store behaviour lost its only tests when the funnel test files were deleted: re-fire/wedge, failed-stub marking, key-count mismatch, count text, policy-raise fallback, leftovers keeping `created` and keys (seven mutations pass) | fix: port to `tests/test_held.py` (R3.2's acceptance: funnel's deferred and next-turn tests pass when moved to the store) |
+| I-2. `TestSearchGate` deleted; `SearchGate` unchanged | fix: restore it |
+| Cosmetic: `LATE_CHECK_SOURCE` duplicates `context.LATE_CHECK_LABEL` | fix |
+| Cosmetic: missing block comments; held's policy WARNINGs lack a remedy | fix |
+| Cosmetic: in-time non-`Contribution` answers logged without the plugin name | deferred: needs `gather` to return names |
+| Cosmetic: stale `run_checks`/funnel references in other packages | docs phase |
+| Deviation (a): in-call dedupe is same-source | accepted: forced by F5; §5 amended |
+| Deviation (b): memory stash on `trace_id` None | accepted: already deferred, and the loop always has a trace |
+| `on_late` delivery off the clock's tasks | accepted: forced by G5; §2 amended |
+| Edge: a late contribution replaces a fresher held batch from the same source | deferred: filed as a proposed requirement |
+| Edge: deliveries outlive `Clock.close` | dropped: held text is in-memory and lost at stop anyway |
+| Edge: same text from two sources in one call | dropped: conflicts with F5 |
+| Edge: `_stub_info` / `_in_flight` growth | deferred: bounded by pairs and turns |
+| Test-order artifact (`unregistered llm stage`) | pre-existing on main; not this change |
