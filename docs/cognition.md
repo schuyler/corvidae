@@ -1745,7 +1745,10 @@ Writer API (used by other plugins, not hooks):
   — idempotent insert (`INSERT OR IGNORE`).
 - `update_exchange(trace_id, **columns)` — guarded update of the
   nullable profile columns only; unknown or immutable column names raise
-  `ValueError` (SQL is never built from arbitrary kwargs).
+  `ValueError` (SQL is never built from arbitrary kwargs). The JSON
+  columns `outcomes` and `appraisal` merge rather than overwrite, through
+  SQLite's `json_patch()` in a single statement, so concurrent writers
+  never lose each other's keys (PRD §3.7 Outcome log).
 - `upsert_exchange(trace_id, channel_id, origin=None, **columns)` —
   create-or-update in one call: `INSERT OR IGNORE` the identity row, then
   a guarded update applying `**columns`. For gate-time writers (e.g.

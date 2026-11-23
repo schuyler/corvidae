@@ -364,8 +364,8 @@ one is a bug even if its tests pass.
    over with the message; the Agent mints at dequeue for a notification
    that inherits none. The id and an opaque set of plugin annotations ride
    every hook, every task, every completion notification, and every
-   per-call usage record. An empty id is rejected with an error; omitting
-   it is an error. The annotations belong to the plugins: their
+   per-call usage record. An empty or null id is rejected with an error;
+   omitting it is an error. The annotations belong to the plugins: their
    conventions (the origin among them) are theirs, and core never stamps
    meaning into them. What the kernel certifies goes in the item's
    kernel metadata instead: kind, origin scope, cause, sender, and whether
@@ -409,9 +409,9 @@ one is a bug even if its tests pass.
     initialization and start hooks are the exceptions and propagate, so a
     plugin that cannot start stops the daemon. A wrapper implementation on
     a fail-soft hook fails startup. A test holds the kernel's own hooks to
-    these names. A hook only one plugin calls is owned by that plugin, not
+    this naming rule. A hook only one plugin calls is owned by that plugin, not
     added to the kernel's hook set. Its name carries the owner's plugin
-    name right after the prefix, it uses a prefixed name (bare imperatives
+    name right after its semantic prefix, it uses a prefixed name (bare imperatives
     are kernel-only), and it has exactly one owner. Startup checks all of
     this and fails naming the hook, the plugin and the fix.
 11. A new hook, kernel or plugin-owned, is admitted only when it is a
@@ -576,7 +576,7 @@ Per transport:
   application/* (pdf, json, xml); attachments that are not downloaded use
   the sanitized subtype (svg, html, ...), so the agent can see why nothing
   was fetched; with no MIME type, the legacy protobuf type name applies.
-  Attachments are fetched by id only. Backlog that arrives late is prefixed
+  Attachments are fetched by id only. Backlog that arrives after a delay is prefixed
   with its send time. Typing starts on the first outstanding message and
   keeps refreshing while it is outstanding; the read receipt is sent at
   processing start, not arrival. Notifications are never handled inline in
@@ -610,7 +610,7 @@ Per transport:
   the same token and die when it changes. Every route needs the cookie; the
   WebSocket also needs an allowed `Origin`; every request needs an allowed
   `Host`. A strict content-security policy confines the page to its own
-  origin and to WebSockets on allowed origins; responses forbid content
+  origin, inline `data:` images, and WebSockets on allowed origins; responses forbid content
   sniffing, referrers and caching; the access log is off; a 500 never logs
   the URL. Model output reaches the DOM only as rendered markdown that has
   then been sanitized, with `style`, `class`, `id` and `data-*` forbidden.
