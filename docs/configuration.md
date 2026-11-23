@@ -365,7 +365,7 @@ after it, #346.)
 
 ### Runtime-tunable gate parameters
 
-The appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `appraisal.prior.w_stakes`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
+The critique and gate parameters use dotted keys (e.g. `critique.sample_below_rate`, `gate.send.quiet_origins`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
 
 1. **`set_settings` tool** (agent-facing, per-channel) — writes `channel.runtime_overrides`; highest precedence.
 2. **Hot config reload** (operator, global) — edit `agent.yaml`; `ConfigWatcherPlugin` dispatches `on_config_reload` and plugins re-read the dotted path on the next decision.
@@ -389,7 +389,6 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
-- `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`
 - `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.quiet_origins`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
@@ -398,9 +397,11 @@ The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.lens.<lens>
 
 Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Two dotted keys are read at neither: `appraisal.stage2_prompt` and `critique.prompt.<lens>`, because the stages that owned them run only as forks (#320, #1129). Setting either in `agent.yaml` neither fails nor warns, and a `set_settings` write to either succeeds and changes nothing. Undotted keys are allowlisted in code: `set_settings` accepts only the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, which go into the LLM request body, and the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`. `max_turns` and `max_context_tokens` must be positive integers (a string, a float, a boolean, zero or a negative number rejects the whole call, naming the key and the value). Any other undotted key (`messages`, `model`, `tools`, `tool_choice`, …) rejects the whole call; see [threat-model.md](threat-model.md), finding 1. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
-#### `appraisal.*` — stage-1 keys removed
+#### `appraisal.*` — removed keys
 
-Stage-1 appraisal, which scored every inbound message and every final from English word lists and a word-match probe of memory's full-text index, was removed (#1185), and its keys with it: `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.novelty.no_probe_default` and `appraisal.weights.*` (`novelty`, `question`, `disagreement`, `commitment`, `imperative`). A config that still sets one logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored. Stage 2 keeps `appraisal.stage2_fork_prompt` (above) and the importance-prior weights `appraisal.prior.w_stakes`, `appraisal.prior.w_valence` and `appraisal.prior.w_novelty`.
+Stage-1 appraisal, which scored every inbound message and every final from English word lists and a word-match probe of memory's full-text index, was removed (#1185), and its keys with it: `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.novelty.no_probe_default` and `appraisal.weights.*` (`novelty`, `question`, `disagreement`, `commitment`, `imperative`). A config that still sets one logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored.
+
+The importance-prior weights `appraisal.prior.w_stakes`, `appraisal.prior.w_valence` and `appraisal.prior.w_novelty` were removed with the appraisal vector they weighted (#1189): memory scores a record's importance itself, from the consolidation reply's rating or else the rubric. They are warned the same way and otherwise ignored; a `set_settings` write to one succeeds and changes nothing. Stage 2 keeps `appraisal.stage2_fork_prompt` (above).
 
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.provenance.fork_prompt`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
@@ -510,7 +511,7 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `memory.retention.grace_days` | float | `14` | Records younger than this many days are exempt from demotion regardless of score. Ensures newly consolidated records are not immediately demoted because they have not yet been retrieved. |
-| `memory.retention.importance_floor` | float | `0.8` | Records with `importance ≥ importance_floor` are never demoted for lack of retrieval traffic. The importance prior ranges 0.0–1.0 (`AppraisalPlugin` wraps the default `RubricPrior` in `AppraisalPrior` when appraisal is enabled). |
+| `memory.retention.importance_floor` | float | `0.8` | Records with `importance ≥ importance_floor` are never demoted for lack of retrieval traffic. The importance prior ranges 0.0–1.0 (the consolidation reply's own rating, else the default `RubricPrior`). |
 | `memory.retention.demote_below` | float | `0.15` | Retention score threshold. An indexed record whose score falls below this value (and which passes the grace-period and importance-floor checks) is demoted: `indexed=0`, `embedded=0`, vec row deleted. The `memory` row and its FTS entry are preserved. Re-promotion requires the score to rise back to or above this threshold, which happens when the record is accessed via `recall_raw`. |
 | `memory.retention.half_life_days` | float | `90` | Recency half-life for the retention score. Distinct from `memory.half_life_days` (retrieval scoring, default 30). The longer retention half-life gives passive retrieval time to re-warm a record before it demotes. |
 | `memory.retention.interval` | float | `21600` | Seconds between retention job runs (default 6 hours); the period of the clock timer. The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). Takes effect at restart. |

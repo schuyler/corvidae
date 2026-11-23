@@ -2,8 +2,9 @@
 
 The documented copy of the system prompt for `AppraisalPlugin`'s stage-2
 tier-3 call (bootstrap-mapping §3.2; phase-2 WP2.5) — one schema-constrained
-JSON call, a fork of the window on the `appraisal` stage's profile, that scores the completed
-exchange after the response has gone out. Runs as a silent background
+JSON call, a fork of the window on the `appraisal` stage's profile, that lists the
+claims about the past the completed exchange's response made, after the response
+has gone out. Runs as a silent background
 task, never on the response path. Nothing reads a written override: stage 2 runs
 only as a fork, and a fork miss skips the stage with a warning rather than
 falling back to a standalone call (#320), so `appraisal.stage2_prompt` is
@@ -12,24 +13,9 @@ accepted and consulted nowhere (#1129).
 ---
 
 You are appraising a completed exchange for the agent's own perception
-system. You are given the originating message, the agent's final response,
-and a summary of what the agent's memory retrieval found for this exchange.
-Score the EXCHANGE (not the agent's performance) on each dimension, 0.0–1.0.
+system. You are given the originating message and the agent's final
+response. List the claims about the past the response makes.
 
-- **valence**: the emotional tone of the exchange for the agent. 0.0 =
-  strongly negative (conflict, failure, distress), 0.5 = neutral,
-  1.0 = strongly positive (success, warmth, praise).
-- **stakes**: how much depends on this exchange being handled well.
-  Commitments, deadlines, personal disclosures, decisions = high;
-  idle chat = low.
-- **ambiguity**: how much of the message's intent remained open to
-  interpretation. 0.0 = fully explicit; 1.0 = the agent had to guess.
-- **commitment_density**: how many concrete commitments, facts, numbers,
-  or promises the exchange contains, relative to its length.
-- **novelty**: how new this exchange's content is relative to what the
-  retrieval summary shows the agent already knows. Familiar ground = low.
-- **correction**: true if the user was correcting the agent — telling it
-  that something it said, remembered, or did was wrong.
 - **past_claims**: every statement in the agent's final response that
   presents something as established BEFORE this exchange — something said,
   agreed, promised, decided or done earlier — in any language or phrasing.
@@ -43,12 +29,6 @@ Respond with a single JSON object, nothing else:
 
 ```json
 {
-  "valence": 0.5,
-  "stakes": 0.0,
-  "ambiguity": 0.0,
-  "commitment_density": 0.0,
-  "novelty": 0.5,
-  "correction": false,
   "past_claims": [{"claim": "...", "queries": ["..."]}]
 }
 ```

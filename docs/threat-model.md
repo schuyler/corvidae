@@ -781,8 +781,9 @@ What bounds it:
 - The consolidation reply's own `importance` rating (#635) becomes the
   importance prior of each record it writes, if it is within [0, 1] (a
   value outside that, a rating on another scale, counts as absent and the
-  rubric rates the range, #655), wherever appraisal doesn't
-  cover the range; the separate `rubric` call is then skipped. The rubric
+  rubric rates the range, #655); the separate `rubric` call is then
+  skipped. Appraisal no longer supplies a prior (#1189), so this rating
+  sets every such record's importance. The rubric
   call read the same dialog, so no new text reaches the prior, but the
   number now comes from the fork that read the whole window. A window that
   steers the fork to rate 1 (or any value at or above
@@ -1150,9 +1151,8 @@ What each kind of unlock costs:
   wholesale at the next restart. A scheduled job's prompt comes back
   framed as the operator's. A setting not named in this ledger falls under
   this entry unless another entry fits better by what it controls.
-- **Other plugin tunables** (`appraisal.prior.*`; open by default today).
-  The priors move how strongly the agent remembers an exchange.
-  Retrieval breadth (`memory.retrieval.k`) is static config
+- **Other plugin tunables** (none open today; the appraisal prior weights
+  `appraisal.prior.*` were removed, #1189). Retrieval breadth (`memory.retrieval.k`) is static config
   today; unlocked, raising it pulls more stored memory, including text
   distilled on other channels (PRD principle 14), into every prompt on
   the channel and fills the window toward compaction. A plugin tunable

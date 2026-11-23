@@ -8,13 +8,12 @@ render of the whole window, followed by this text as a `user` turn (GitHub
 issue #51). It runs on the `appraisal` stage's profile with the stage's `response_format` and
 `tool_choice: "none"`.
 
-`AppraisalPlugin` appends two lines: the exchange's opening message and
+`AppraisalPlugin` appends one line: the exchange's opening message and
 the response the user was sent, each quoted to its first 120 characters
 ("The exchange began with the message «…», and the response you sent
-began «…»."), and the retrieval profile ("Memory retrieval for this
-exchange: …").
+began «…».").
 
-When critique has lenses on offer (#1078), a third block follows,
+When critique has lenses on offer (#1078), a block follows,
 appended after the configured prompt whether it is this default or an
 `appraisal.stage2_fork_prompt` override, and the reply schema gains a
 required `lenses` object. Each offered lens is one `- <name>: <question>`
@@ -48,24 +47,9 @@ override. (The retired
 
 [Appraisal] Pause the conversation here and appraise, for your own
 perception system, the exchange you just completed: from the message quoted
-below through your final response. Score the EXCHANGE (not your
-performance) on each dimension, 0.0–1.0.
+below through your final response. List the claims about the past your
+final response makes.
 
-- **valence**: the emotional tone of the exchange for you. 0.0 = strongly
-  negative (conflict, failure, distress), 0.5 = neutral, 1.0 = strongly
-  positive (success, warmth, praise).
-- **stakes**: how much depends on this exchange being handled well.
-  Commitments, deadlines, personal disclosures, decisions = high; idle
-  chat = low.
-- **ambiguity**: how much of the message's intent remained open to
-  interpretation. 0.0 = fully explicit; 1.0 = you had to guess.
-- **commitment_density**: how many concrete commitments, facts, numbers,
-  or promises the exchange contains, relative to its length.
-- **novelty**: how new this exchange's content is relative to what you
-  already knew, going by the memory retrieval note below. Familiar
-  ground = low.
-- **correction**: true if the user was correcting you, telling you that
-  something you said, remembered, or did was wrong.
 - **past_claims**: every statement in your final response that presents
   something as established BEFORE this exchange — something said, agreed,
   promised, decided or done earlier — in any language or phrasing. Leave
@@ -79,12 +63,6 @@ Do not call tools. Respond with a single JSON object, nothing else:
 
 ```json
 {
-  "valence": 0.5,
-  "stakes": 0.0,
-  "ambiguity": 0.0,
-  "commitment_density": 0.0,
-  "novelty": 0.5,
-  "correction": false,
   "past_claims": [{"claim": "...", "queries": ["..."]}]
 }
 ```

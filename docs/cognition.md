@@ -32,7 +32,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
-| `AppraisalPlugin` | `appraisal` | Appraises each exchange once the agent has answered, in a fork of the window (valence, stakes, ambiguity, commitment density, novelty, the reply's claims about the past, and the critique vector) |
+| `AppraisalPlugin` | `appraisal` | Appraises each exchange once the agent has answered, in a fork of the window: the reply's claims about the past and the critique vector |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
@@ -203,19 +203,13 @@ reply's `importance` as `hint` (default: cheap-model `RubricPrior`,
 which returns the hint clamped to [0, 1] with no model call, and
 otherwise asks the model, schema-constrained to `{"importance": number}`,
 0.5 on failure, and that call carries `mode="rubric"` in its `usage_log` row so
-it is distinguishable from a pre-stamp row (#929); `AppraisalPlugin` wraps it in `AppraisalPrior` when
-appraisal is enabled, which scores the range as the highest stage-2
-composite among its exchanges, ignoring the hint, and passes the hint to the
-rubric fallback where no stage 2 covers the range (a stage-1 score on a row
-written before #1185 counts for nothing); the prior and
-the mean stage-2 valence read only
-the consolidating channel's own exchanges, and a failed `exchange_log` lookup is logged
-and falls back to the rubric prior and NULL valence), embeds every entry's
+it is distinguishable from a pre-stamp row (#929); appraisal no longer
+supplies a prior, #1189), embeds every entry's
 narrative in one call on the `embedding` stage's profile (`llm.profiles.embedding` by default), and
 commits one memory row per entry (each with its vec row and any near-duplicate
 merge) together with the watermark advance in one compare-and-set
 section. At insert the rows share the message range, `created_at`, importance,
-valence, participants and [record stamp](#record-stamps); each has its own
+participants and [record stamp](#record-stamps); each has its own
 narrative (stored as `summary`), `topic_tags` and embedding. A lost
 compare-and-set stores none of them. (A row that then merges with an older
 near-duplicate takes the wider range, the later date and the higher
@@ -348,11 +342,9 @@ forks run under the channel id. The key lands in `usage_log.lease_key`.
 ### Corrupt `exchange_log` rows
 
 A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
-is not an envelope object) can only come from an out-of-band write. The range
-readers (`importance_over_range`, `mean_valence`) and `corvidae redact`'s
-scrubber skip such a row with one WARNING naming the trace id and channel
-(#311). The prior and mean valence are computed over the remaining exchanges,
-and redact finishes over the others. A row the scrubber skips keeps its
+is not an envelope object) can only come from an out-of-band write.
+`corvidae redact`'s scrubber skips such a row with one WARNING naming the
+trace id and channel (#311) and finishes over the others. A row the scrubber skips keeps its
 `past_claims`, and redact still exits 0, so check the log for the warning
 after a redact run on a database you suspect is damaged.
 
@@ -1125,12 +1117,11 @@ Changes to `memory.idle_consolidate_after`,
 `memory.retention.*` take effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
-default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
-when appraisal is enabled. `score(messages, msg_id_range=None, channel=None, *,
+default `RubricPrior`). `score(messages, msg_id_range=None, channel=None, *,
 hint=None)` takes the consolidation reply's own rating as the keyword-only
-`hint`; a replacement prior must accept it; it reads only the consolidating channel's own
-exchanges (message ids are global), logging a failed lookup and falling back to
-the rubric prior and NULL valence. Configuration is documented in
+`hint`; a replacement prior must accept it. Memory no longer writes the
+`valence` column (#1189): new rows hold NULL, and older rows keep the mean
+stage-2 valence they were written with. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.profiles.embedding`).
 
 The cognition distribution registers the `retrieval_candidate` scrubber
@@ -1766,8 +1757,10 @@ memory's `memory_fts`, with no model call, and fed the engagement gate and
 the decide gate's salience floor, both removed with it. `AppraisalPlugin`
 now implements neither `should_process_message` nor `should_send_response`.
 A config that still
-sets `appraisal.probe.*`, `appraisal.weights.*` or `appraisal.novelty.*`
-gets one WARNING per key at startup and at reload, naming it and saying to
+sets `appraisal.probe.*`, `appraisal.weights.*` or `appraisal.novelty.*`,
+or one of the importance-prior weights removed with the appraisal vector
+(`appraisal.prior.w_stakes`, `appraisal.prior.w_valence`,
+`appraisal.prior.w_novelty`, #1189), gets one WARNING per key at startup and at reload, naming it and saying to
 delete it; the key is otherwise ignored.
 
 **Stage 2** (`on_agent_response`) is a silent fork of the live window over
@@ -1780,23 +1773,24 @@ doesn't need that plugin loaded. A final another gate withheld has content
 and still gets stage 2. If the test raises, stage 2 runs anyway and a
 warning names the channel and trace. On a miss (forks off, the exchange left the window,
 the fork failed or its reply was unusable) it is skipped with a warning
-naming the stage, channel, trace and reason: the exchange gets no stage-2 vector
-and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
-correction, and `past_claims`. The five numeric dimensions, by name, are a
-`valence`, `stakes`, `ambiguity`, `commitment_density` and `novelty`, each a
-float in [0, 1], all five present in every vector stage 2 produces (no
-other plugin selects on them any more: critique's lenses are chosen by the
-`lenses` field below, #1078). `past_claims` is a list of `{claim,
+naming the stage, channel, trace and reason: the exchange gets no stage 2
+and no standalone call is made. It produces `past_claims` and, when critique
+offers lenses, `lenses`. The five-dimension appraisal vector (valence,
+stakes, ambiguity, commitment density, novelty), the correction flag and the
+memory-retrieval note the fork prompt carried were removed as unused
+(#1189); `stage2` envelopes written before then still hold them, and nothing
+reads them. `past_claims` is a list of `{claim,
 queries}`: each statement in the reply that presents something as
 established before the exchange, with up to 3 short search phrases. A
 missing or malformed field reads as no claims; malformed entries are
 dropped with a warning; it's capped at 5 claims. When critique has lenses on
 offer, stage 2 also returns `lenses`, the critique vector (see "How a lens is
-chosen" under CritiquePlugin below). The vector is merged into
-the `appraisal` envelope's `stage2` key. Then every listener registered with
+chosen" under CritiquePlugin below). The result is merged into
+the `appraisal` envelope's `stage2` key; the lens scores kept there are
+the labels a trained readout head for lens selection would learn from (#141). Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
 annotations, stage2`, outside the appraisal attribution. Every enqueued stage
-2 notifies each listener exactly once: `stage2` is the vector, or `None`
+2 notifies each listener exactly once: `stage2` is the result, or `None`
 when none was produced (a miss above, or an unexpected exception, which is
 logged at warning with the trace). That is how a listener tells "not yet"
 from "never" without a timer. Cancellation (shutdown) notifies no one. A
@@ -2038,11 +2032,11 @@ wake the channel; the other built-ins wait.
   warning and the lens offers its own question until the config is fixed
   (#1127). Each stage-2 call asks the provider
   afresh, so a reload takes effect on the next exchange; a provider that
-  raises costs the exchange its vector, not its dimensions (warning naming
+  raises costs the exchange its vector, not its claims (warning naming
   the trace).
 - **The ask.** The stage-2 fork instruction (the configured
   `appraisal.stage2_fork_prompt` as of the last reload, then the exchange
-  quote and retrieval line) gets a `[Critique selection]` block appended,
+  quote) gets a `[Critique selection]` block appended,
   listing each offered lens as `- <name>: <question>`, and asks for a
   percentage per lens plus `none`, summing to 100, as
   `lenses: {name: percent, ..., none: percent}`. The call's response schema
@@ -2058,7 +2052,7 @@ wake the channel; the other built-ins wait.
   an offered name the reply left out counts 0. A missing or non-object
   field, or one with nothing usable left, gives no vector and a warning
   naming the trace and the reason. A bad `lenses` field never costs the
-  dimensions: the rest of stage 2 still lands. A usable vector is stored
+  claims: the rest of stage 2 still lands. A usable vector is stored
   in the exchange's `appraisal.stage2.lenses` and reaches stage-2
   listeners with the vector.
 - **The choice.** In its stage-2 listener, after the provenance check,
