@@ -1791,8 +1791,8 @@ Stage-1 appraisal is gone (#1185). It scored every inbound message and
 every final at the gates from English word lists and a word-match probe of
 memory's `memory_fts`, with no model call, and fed the engagement gate and
 the decide gate's salience floor, both removed with it. `AppraisalPlugin`
-now implements neither `should_process_message` nor `should_send_response`.
-A config that still
+now implements no `should_process_message`; its only gate is the
+before-send scoring below, which never vetoes. A config that still
 sets `appraisal.probe.*`, `appraisal.weights.*` or `appraisal.novelty.*`,
 or one of the importance-prior weights removed with the appraisal vector
 (`appraisal.prior.w_stakes`, `appraisal.prior.w_valence`,
@@ -1823,16 +1823,58 @@ dropped with a warning; it's capped at 5 claims. When critique has lenses on
 offer, stage 2 also returns `lenses`, the critique vector (see "How a lens is
 chosen" under CritiquePlugin below). The result is reported to
 the outcome log as the `stage2` key of an appraisal record; the lens scores kept there are
-the labels a trained readout head for lens selection would learn from (#141). Then every listener registered with
-`add_stage2_listener` is awaited with `channel, trace_id, response_text,
-annotations, stage2`, outside the appraisal attribution. Every enqueued stage
-2 notifies each listener exactly once: `stage2` is the result, or `None`
-when none was produced (a miss above, or an unexpected exception, which is
-logged at warning with the trace). That is how a listener tells "not yet"
-from "never" without a timer. Cancellation (shutdown) notifies no one. A
-failing listener is logged and doesn't stop the others. It's
-a push rather than a wait because a consumer that awaited stage 2 from a
-queued task would hold a TaskQueue worker the stage-2 task may need.
+the labels a trained readout head for lens selection would learn from (#141). Then `on_appraisal_idle` fires with `channel, trace_id, response_text,
+annotations, lenses, past_claims`, outside the appraisal attribution. Every
+enqueued stage 2 fires it exactly once: `lenses` and `past_claims` are the
+result, or both `None` when none was produced (a miss above, or an
+unexpected exception, which is logged at warning with the trace). That is
+how an implementer tells "not yet" from "never" without a timer.
+Cancellation (shutdown) fires nothing. A failing implementer is logged and
+doesn't stop the others. It's a push rather than a wait because a consumer
+that awaited stage 2 from a queued task would hold a TaskQueue worker the
+stage-2 task may need.
+
+**The hooks appraisal owns** (#1169). `AppraisalPlugin.hookspecs` declares
+three hooks, so peers (critique is the one in the tree) reach appraisal
+through hooks and never call methods on it:
+
+- `on_appraisal_prompts(channel, trigger)` collects the lenses a peer wants
+  scored. `trigger` is `"idle"` (stage 2) or `"before_send"`. An
+  implementer returns a list of `(lens name, one-line question)` pairs, or
+  `None`. Offers merge in hook-result order; a later duplicate name, a
+  non-list result and a malformed pair (not two non-blank strings) are
+  dropped with a warning. With no offers, the fork asks for the claims only
+  (idle) or doesn't run (before send).
+- `on_appraisal_before_send(channel, trace_id, text, annotations, lenses)`
+  tells peers the lens shares of a final draft before it is sent. `lenses`
+  is `None` after a miss. An implementer may return a list of objection
+  dicts, but appraisal discards the result in this version and never holds
+  the send (#1192); a refusal built on it is #1149's.
+- `on_appraisal_idle(channel, trace_id, response_text, annotations, lenses,
+  past_claims)` is the stage-2 push above.
+
+All three are `on_` hooks, so a failing implementer is logged and the others
+still run.
+
+**Before send.** `AppraisalPlugin` implements `should_send_response`. For a
+`final` that is not a decline (`silence.decline_kind`, since the draft isn't
+in the window yet) and has a trace, it collects the `before_send` offers,
+forks the live window once with `DEFAULT_BEFORE_SEND_FORK_PROMPT`, and
+fires `on_appraisal_before_send` with the shares. It always returns `None`:
+appraisal never vetoes a send, and any exception is logged and the send
+goes ahead. The instruction quotes the whole draft on one line, not
+truncated, because the draft is what is being scored and the window doesn't
+hold it yet. The fork asks only for the `lenses` object, with no claims
+(the provenance check runs after the exchange only). No offers fires
+nothing (debug log). A miss (forks off, the exchange out of the window, the
+originating text unknown, the fork failing or unusable) logs a warning
+naming the trace and fires the hook with `lenses=None`. The fork runs under
+the `appraisal` stage and profile. The instruction is replaceable from
+static config with `appraisal.before_send_fork_prompt` (not a runtime
+tunable); the documented copy is `prompts/appraisal_before_send_fork.md`.
+At startup, when forks are not enabled for the appraisal stage, appraisal
+warns once naming `agent.forks.enabled` and `agent.forks.stages`: with no
+fork it scores nothing, at either point.
 
 ### CritiquePlugin: the provenance check (`packages/corvidae-cognition/corvidae_cognition/critique.py`)
 
@@ -1846,8 +1888,8 @@ model makes both language judgments; the code only fetches evidence:
    That works in any language and any phrasing, and it costs no extra model
    call because stage 2 already runs on every answered exchange. A decline
    gets no stage 2, so it gets no provenance check either.
-2. **Evidence.** When stage 2 lands, AppraisalPlugin notifies its listeners.
-   CritiquePlugin registers one in `on_start`. For an exchange with at
+2. **Evidence.** When stage 2 lands, AppraisalPlugin fires
+   `on_appraisal_idle`, which CritiquePlugin implements. For an exchange with at
    least one claim it enqueues a silent task. Every main-loop turn with a
    trace is eligible, whatever started it (#1031; the same rule as the
    stylistic lenses), corrections included, so stage 2 runs on them too. That task searches `message_fts`
@@ -2023,6 +2065,7 @@ and the lenses it added before the raise are kept.
 | `name` | Matches `^[a-z][a-z0-9_]*$`; it names the lens's config keys and its outcome entry |
 | `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.lens.<name>.fork_prompt` replaces the brief (static config, reloaded like the built-ins' prompts) |
 | `appraisal_question` | One non-empty line the appraisal fork answers to score this lens against the others and "none" (see below). `critique.lens.<name>.appraisal_question` replaces it (static config) |
+| `before_send` | Default `False`. `True` also offers the lens on a draft before it is sent (see below); `False` keeps it to the after-the-exchange point. Must be a bool |
 | `wakes` | Default `False`. `True` makes the lens's non-empty objections wake the channel (PRD §3.7 Critique 4); `False` queues them as CONTEXT for the next turn |
 
 **Rejections never stop startup** (PRD principle 5, §3.1.17). A lens that
@@ -2031,7 +2074,7 @@ the rejected value, what was expected and the remedy; the other lenses
 load. Rejected: anything that isn't a `Lens`; a bad name; an empty or
 non-string prompt; a missing, blank, non-string or multi-line
 `appraisal_question` (the warning says to declare a one-line question the
-appraisal fork answers to decide whether the lens runs); a `wakes` that
+appraisal fork answers to decide whether the lens runs); a `wakes` or `before_send` that
 isn't a bool; and a reserved name. A lens built with a removed selector
 (`thresholds`, `reply_patterns`, `sample_rate`) raises a `TypeError` in the
 plugin's `on_critique_init`, and the warning for that names
@@ -2049,30 +2092,31 @@ vector, not by a rule the lens carries.
 
 ### How a lens is chosen: the critique vector (#1078)
 
-At most one built-in or plugin lens runs per exchange: the built-ins
-(`predictive`, `constrained`, `adversarial`, `retention` while a
+At most one built-in or plugin lens runs at each of two points per
+exchange: before the reply is sent, on the draft, and after the exchange.
+The built-ins (`predictive`, `constrained`, `adversarial`, `retention` while a
 knowledge base root is known, and `proactivity` while
 `critique.lens.proactivity.enabled`) and every added lens are *offered* to
-the stage-2 appraisal fork, which scores them. Retention and proactivity
+the appraisal fork, which scores them. Retention and proactivity
 wake the channel; the other built-ins wait.
 
-- **The offer.** `CritiquePlugin` hands appraisal a provider with
-  `AppraisalPlugin.set_lens_offer(provider)` in `on_start`, next to
-  `add_stage2_listener` (an appraisal without the method just produces no
-  vector). The provider returns `(name, question)` pairs in a fixed order:
-  built-ins in table order, then added lenses by name. A question is the
-  lens's declared one unless `critique.lens.<name>.appraisal_question`
-  overrides it; it is read from static config, so `set_settings` can't
-  reword the critic it is scored for. An override that is not one
-  non-blank line of text fails startup naming the key; at reload it logs a
-  warning and the lens offers its own question until the config is fixed
-  (#1127). Each stage-2 call asks the provider
-  afresh, so a reload takes effect on the next exchange; a provider that
-  raises costs the exchange its vector, not its claims (warning naming
-  the trace).
+- **The offer.** `CritiquePlugin` implements `on_appraisal_prompts`, and
+  appraisal collects the offer for each trigger at call time. It returns
+  `(name, question)` pairs in a fixed order: built-ins in table order, then
+  added lenses by name. At `"idle"` that is every lens; at `"before_send"`
+  it is the built-ins except retention (a fact filed from a draft may never
+  be sent) and the added lenses that declare `before_send=True`. A lens has
+  one question, used at both points: the declared one unless
+  `critique.lens.<name>.appraisal_question` overrides it; it is read from
+  static config, so `set_settings` can't reword the critic it is scored
+  for. An override that is not one non-blank line of text fails startup
+  naming the key; at reload it logs a warning and the lens offers its own
+  question until the config is fixed (#1127). Each call asks afresh, so a
+  reload takes effect on the next exchange.
 - **The ask.** The stage-2 fork instruction (the configured
   `appraisal.stage2_fork_prompt` as of the last reload, then the exchange
-  quote) gets a `[Critique selection]` block appended,
+  quote) gets a `[Critique selection]` block appended (the before-send fork
+  gets the same block after the draft),
   listing each offered lens as `- <name>: <question>`, and asks for a
   percentage per lens plus `none`, summing to 100, as
   `lenses: {name: percent, ..., none: percent}`. The call's response schema
@@ -2089,14 +2133,15 @@ wake the channel; the other built-ins wait.
   field, or one with nothing usable left, gives no vector and a warning
   naming the trace and the reason. A bad `lenses` field never costs the
   claims: the rest of stage 2 still lands. A usable vector is stored
-  in the exchange's `appraisal.stage2.lenses` and reaches stage-2
-  listeners with the vector.
-- **The choice.** In its stage-2 listener, after the provenance check,
-  critique takes the highest share over the offered lenses and `none` from
+  in the exchange's `appraisal.stage2.lenses` and reaches critique through
+  `on_appraisal_idle` (the before-send vector reaches it through
+  `on_appraisal_before_send` and is not stored by appraisal).
+- **The choice.** In `on_appraisal_idle`, after the provenance check, and
+  in `on_appraisal_before_send` on the draft's scores, critique takes the highest share over the offered lenses and `none` from
   *this* exchange's vector, never another exchange's. `none` wins any tie it is part of; among lenses the earliest
   in offer order wins. A winner no longer offered (a reload changed the
   offer in between) counts as `none`, with a warning. No usable vector also
-  counts as `none`: when stage 2 produced nothing, a warning names the
+  counts as `none`: when the scoring produced nothing, a warning names the
   trace; when stage 2 is present but its `lenses` field is unusable,
   appraisal has already warned, so critique logs at debug.
 - **The sampled path.** When `none` wins, or there is no vector, with
@@ -2108,20 +2153,34 @@ wake the channel; the other built-ins wait.
   frequency `sample_below_rate` × 1/(offered lenses), the vector aside. The
   proactivity brief says to object only to a permission question, so on a
   reply that asks none it should return nothing.
-- **No appraisal plugin.** Without one (or with stage 2 not listening)
-  there is no vector to read, so `on_agent_response` runs one random
-  offered lens per exchange, built-ins and plugin lenses alike, as the
-  degrade-to-spec path (PRD §3.2).
+- **Before send.** The before-send lens runs inline, inside the
+  `should_send_response` check allowance, so the reply waits on it (if the
+  allowance runs out the run still finishes in the background). Its
+  objections never refuse the send and never wake: every one is queued as
+  waiting for the channel's next turn, proactivity included
+  (interim, #1192). The provenance check never runs here; it runs after the
+  exchange only. Critique's own `should_send_response` keeps the `NO_REPLY`
+  veto and nothing else when appraisal is registered.
+- **No appraisal plugin.** Critique asks `pm.has_plugin("appraisal")` once,
+  at `on_start`. Without it there is no vector to read, so one INFO line at
+  startup names the fallback, and at each point (before send, on a final
+  that is not a decline with a trace; and after the exchange) one random
+  lens offered for that point runs on a share of exchanges,
+  `critique.fallback_rate` (runtime-tunable per channel, default 0.25),
+  built-ins and plugin lenses alike. This replaces the older run-every-exchange
+  fallback (PRD §3.2 degrade-to-spec); the rate keeps the cost bounded. The
+  provenance check is off, since it needs appraisal's claims.
 - **Record.** The choice is reported as the `lens_selection` key of a critique record
-  (`on_trace_record`, `source: critique`)
+  (`on_trace_record`, `source: critique`; `lens_selection_before_send` for the
+  before-send point, and `critique_before_send` for the run's outcome)
   whether or not a lens runs, so a `none` is countable:
   `{"lens": "<name>", "sampled": false, "basis": "vector"}`. `lens` is
   omitted when nothing ran. `basis` is `"vector"` when a lens won the vector,
   `"none"` when the vector was usable and `none` won (also after a sampled
   draw), and `"no_vector"` when there was no usable vector.
 
-Two consequences. The stylistic lenses now start after stage 2 lands, not
-at `on_agent_response`, so a stage-2 miss (forks off, the exchange left the
+Two consequences. With appraisal loaded, the stylistic lenses start after
+stage 2 lands (or on the draft's scores), not at `on_agent_response`, so a stage-2 miss (forks off, the exchange left the
 window, an unusable reply) also costs the exchange its lens: fork misses
 are more likely to skip a lens than before. And planning and alignment no
 longer have a 10% rate of their own: they run when their question wins, plus

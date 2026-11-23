@@ -163,10 +163,12 @@ agent:
 # Static config: set_settings can't change these.
 # appraisal:
 #   stage2_fork_prompt: "..."         # prompts/appraisal_fork.md
+#   before_send_fork_prompt: "..."    # prompts/appraisal_before_send_fork.md (scores a final draft before it is sent)
 # critique:
 #   provenance:
 #     fork_prompt: "..."              # prompts/critique_provenance_fork.md
 #   sample_below_rate: 0.05           # chance a random lens runs when "none" wins the critique vector
+#   fallback_rate: 0.25               # without the appraisal plugin: chance one random lens runs at each of the two points (before send, after the exchange)
 #   retention:                        # #742: defaults to markdown_recall's root
 #     root: values/                   # the knowledge base the lens files into; inert with neither
 #   lens:
