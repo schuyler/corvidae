@@ -2176,13 +2176,14 @@ class CritiquePlugin(CorvidaePlugin):
         idle = point == "idle"
         cap = self._bound("critique.max_tool_calls") if idle else 0
         timeout = self._bound("critique.fork_timeout")
-        # Set once the fork is about to render: tells a deadline that hit
-        # while the channel was still busy from one that hit mid-fork.
+        # Set once the pre-render wait is over: tells a deadline that hit
+        # while the channel was still busy from one that hit after it.
         forking = False
         try:
             async with asyncio.timeout(timeout) as deadline:
                 if idle:
                     await self._wait_quiet(agent, channel)
+                forking = True
                 sections = [await self._lens_section(channel, lens, trace_id) for lens in lenses]
                 if idle:
                     reply = f"the response you sent began «{quote(response_text)}»"
@@ -2214,7 +2215,6 @@ class CritiquePlugin(CorvidaePlugin):
                     if self._compactions.get(channel.id, 0) != epoch:
                         raise _ForkStale
 
-                forking = True
                 result = await agent.fork(
                     channel, instruction, stage="critique", cut=cut,
                     extra_body=None if cap > 0 else reply_extra_body(lenses),
