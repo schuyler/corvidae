@@ -80,13 +80,18 @@ class SidecarClient:
         self._pending: dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._read_task: asyncio.Task | None = None
-        #: In-flight notification handlers, kept referenced until they finish.
-        self._tasks: set[asyncio.Task] = set()
+        #: Notifications waiting for the worker, in arrival order.
+        self._queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+        #: The single worker, so notifications are handled in the order they
+        #: arrived (a chat's messages must not overtake each other) while the
+        #: read loop stays free to take the replies those handlers wait for.
+        self._worker: asyncio.Task | None = None
 
     async def connect(self) -> None:
         """Open the socket and start the read loop."""
         self._reader, self._writer = await asyncio.open_unix_connection(self.path)
         self._read_task = asyncio.create_task(self._read_loop())
+        self._worker = asyncio.create_task(self._work_loop())
 
     async def close(self) -> None:
         """Stop the read loop and drop the connection."""
@@ -97,6 +102,21 @@ class SidecarClient:
                 await task
             except asyncio.CancelledError:
                 pass
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+            # Under at-most-once a notification still queued at shutdown is
+            # dropped; say how many rather than letting it vanish.
+            dropped = self._queue.qsize()
+            if dropped:
+                logger.warning(
+                    "whatsapp: shutdown with %d notification(s) unhandled; they are dropped",
+                    dropped,
+                )
         writer, self._writer = self._writer, None
         if writer is not None:
             writer.close()
@@ -127,16 +147,21 @@ class SidecarClient:
             if "id" in payload and ("result" in payload or "error" in payload):
                 self._settle(payload)
             elif "method" in payload:
-                # Handled in its own task: a notification handler that calls
-                # `call()` would otherwise deadlock, because the reply it waits
-                # for is read by this same loop.
-                task = asyncio.create_task(
-                    self._guarded_notification(payload["method"], payload.get("params") or {})
-                )
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
+                # Queued, not awaited: a handler that calls `call()` would
+                # deadlock here, because the reply it waits for is read by this
+                # same loop. One worker keeps arrival order.
+                self._queue.put_nowait((payload["method"], payload.get("params") or {}))
             else:
                 logger.warning("whatsapp: sidecar sent an object that is neither reply nor notification")
+
+    async def _work_loop(self) -> None:
+        """Handle queued notifications one at a time, in arrival order."""
+        while True:
+            method, params = await self._queue.get()
+            try:
+                await self._guarded_notification(method, params)
+            finally:
+                self._queue.task_done()
 
     async def _guarded_notification(self, method: str, params: dict) -> None:
         """Run one handler, logging its failure instead of losing the loop."""

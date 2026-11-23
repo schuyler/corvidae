@@ -252,9 +252,7 @@ class WhatsAppPlugin(TransportPlugin):
         # (hooks.py#guarded) swallows a raising implementation, so this line runs
         # even when the hand-over failed and a replay is then suppressed. That is
         # the deliberate direction -- a duplicate turn is worse than a lost one,
-        # and an implementation that raised has usually seen the message. Each
-        # notification runs in its own task (sidecar.py), so two in flight can
-        # reach here out of order; the id set is per-wamid and order-free.
+        # and an implementation that raised has usually seen the message.
         if wamid:
             self._seen[wamid] = None
             while len(self._seen) > SEEN_LIMIT:
@@ -273,6 +271,11 @@ class WhatsAppPlugin(TransportPlugin):
             return ""
         wamid = message.get("id")
         kind = items[0].get("kind") or "file"
+        if not wamid:
+            # The seam needs the id to name the file. A notification without one
+            # is the sidecar's bug, not ours; name it rather than sending null.
+            logger.warning("whatsapp: media notification without an id; cannot fetch it")
+            return f"[{kind}: unavailable (no id)]"
         extra = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
         try:
             reply = await self._client.call(

@@ -424,3 +424,77 @@ async def test_a_raising_recorder_does_not_kill_the_read_loop(tmp_path, caplog):
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+class SlowSidecar(FakeSidecar):
+    """Delays the get_media reply, so a second notification could overtake it."""
+
+    async def _handle(self, reader, writer):
+        self.writer = writer
+        while line := await reader.readline():
+            request = json.loads(line)
+            self.requests.append(request)
+            if request["method"] == "get_media":
+                await asyncio.sleep(0.3)
+            reply = self.replies.get(request["method"], {})
+            if isinstance(reply, tuple) and reply[0] == "error":
+                payload = {"jsonrpc": "2.0", "id": request["id"], "error": reply[1]}
+            else:
+                payload = {"jsonrpc": "2.0", "id": request["id"], "result": reply}
+            writer.write(json.dumps(payload).encode() + b"\n")
+            await writer.drain()
+
+
+async def test_a_slow_media_fetch_does_not_let_the_next_message_overtake(tmp_path):
+    """One worker: a chat's messages keep arrival order even while a fetch waits."""
+    media_dir = tmp_path / "state" / "whatsapp-media"
+    media_dir.mkdir(parents=True)
+    photo = media_dir / "wamid.O1.jpg"
+    photo.write_bytes(b"x")
+    sidecar = SlowSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["get_media"] = {"path": str(photo), "kind": "image",
+                                    "name": "o.jpg", "size": 1, "mime": "image/jpeg"}
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "media_dir": str(media_dir)}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        await sidecar.notify("message", {
+            "id": "O1", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+            "text": "first", "ts": 5,
+            "media": [{"kind": "image", "name": "o.jpg", "mime": "image/jpeg", "size": 1}],
+        })
+        await sidecar.notify("message", {
+            "id": "O2", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+            "text": "second", "ts": 6,
+        })
+        await _wait_for(lambda: len(recorder.messages) == 2, timeout=10)
+        assert [text.splitlines()[-1] for _cid, _sender, text in recorder.messages] == [
+            "first", "second",
+        ]
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_media_message_without_an_id_is_named_not_sent_as_null(tmp_path, caplog):
+    """No wamid means the seam cannot fetch; say so instead of sending null."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.WARNING, logger="corvidae.whatsapp"):
+            await sidecar.notify("message", {
+                "id": None, "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+                "text": "no id", "ts": 7,
+                "media": [{"kind": "image", "name": "x", "mime": "image/png", "size": 3}],
+            })
+            await _wait_for(lambda: bool(recorder.messages))
+        assert "[image: unavailable (no id)]" in recorder.messages[0][2]
+        assert not any(r["method"] == "get_media" for r in sidecar.requests)
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
