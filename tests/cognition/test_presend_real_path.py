@@ -542,7 +542,9 @@ class TestRevisionIsNeverHeld:
         assert "NO_REPLY" not in stub["text"]
         assert "NO_REPLY" not in P.REVISION_STUB
 
-    async def test_r6_revision_is_sent_unchecked_and_the_next_final_is_checked(self, make_env):
+    async def test_r6_revision_is_sent_unchecked_and_the_next_final_is_checked(
+        self, make_env, caplog
+    ):
         """R6: the revision's final is not checked (even though its text would
         draw objections) and is sent. After the span clears, the channel's next
         final is checked."""
@@ -558,6 +560,9 @@ class TestRevisionIsNeverHeld:
         assert env.checker.checked == ["the draft"]
         assert sent(env) == ["revised"]
         assert len(env.trace.held()) == 1
+        # The objections were admitted, so the not-admitted warning stays quiet.
+        assert not [r for r in caplog.records
+                    if r.levelno >= logging.WARNING and "objection" in r.getMessage()]
 
         # The span ended at the revision's final: the next final is checked.
         await say(env, "another question")

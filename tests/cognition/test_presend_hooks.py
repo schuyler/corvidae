@@ -286,6 +286,13 @@ async def test_r6_appraisal_forwards_the_turn_and_the_offer_and_a_declined_revis
         await env.appraisal.on_held_admitted(
             channel=env.channel, source=SOURCE, trace_id=None,
             admitted_keys=["k1"], duplicate_keys=[])
+        # While the hold is outstanding appraisal checks nothing: the revision's
+        # draft is answered None without a fork, though the peer still objects.
+        asked = len(env.pm.get_plugin("peer").before_send)
+        assert await _send(
+            env, "a revised draft", annotations={"origin": wake["origin"]},
+            trace_id="rev") is None
+        assert len(env.pm.get_plugin("peer").before_send) == asked
         # The revision declines: NO_REPLY, withheld, as the agent leaves it.
         await _final(env, "NO_REPLY", unsent=True, annotations={"origin": "user"}, trace_id="rev")
         # The span ended: the next final on the channel is checked and refused.
