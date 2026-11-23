@@ -105,8 +105,9 @@ one is a bug even if its tests pass.
 3. **Background cognition avoids blocking the main turn.** The point is
    interactivity. The agent loop is single-turn dispatch: one LLM call per
    queue item, tool calls as tasks, results re-entering as notifications.
-   Appraisal, critique, consolidation, and retention run opportunistically
-   as silent tasks or plugin-owned tasks, and shape the *next* turn.
+   Appraisal and critique after the exchange, consolidation, and retention
+   run opportunistically as silent tasks or plugin-owned tasks, and shape
+   the *next* turn.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
    (appraisal, critique) forks the exchange's prefix and runs under
@@ -162,8 +163,9 @@ one is a bug even if its tests pass.
    of band and are tracked as benchmarks, never as gates.
 
 7. **Cheap, always-on perception gates expensive cognition.** Appraisal,
-   a fast first pass, decides which critique lenses an exchange warrants,
-   so the slower critique runs only where appraisal finds it warranted.
+   a fast first pass, scores which critique lenses an exchange warrants,
+   and the slower critique runs the lenses those scores select, plus a
+   small sampled share that measures what selection misses.
    Epistemic checks stay independent of the appraisal scores: the
    provenance check fires on any claim about the past and is judged against
    records, never on generator confidence. Thresholds ship as commented
@@ -512,9 +514,9 @@ one is a bug even if its tests pass.
     the turn, or the reply or call, to plugins and waits for their answers for no longer than the
     channel's check allowance (§3.13.5), counted from when it offers them,
     and goes on as soon as every answer has arrived; before effect, a
-    refusal that arrives in time ends the wait at once. Waiting holds only
-    that channel and costs no work while no answer has arrived. An answer
-    that arrives once the allowance has run out is not discarded: it
+    refusal that arrives in time ends the wait at once. Waiting costs no
+    work while no answer has arrived. An answer that arrives once the
+    allowance has run out is not discarded for being late: it
     reaches the channel at its next turn as framed CONTEXT (item 22) and
     wakes no turn, and the miss is recorded, naming the point.
 22. The kernel holds text bound for a channel's window until a turn
@@ -1275,16 +1277,16 @@ deciding only what to newly append and in what order.
    lens's question, and "none", for the exchange: the critique vector. The top share runs, and "none" wins ties. The
    built-in lenses check for a misread request (predictive), commitments
    the agent cannot keep (constrained) or objections the agent dismissed
-   (adversarial), each when its question wins. When "none" wins, or there is
-   no vector, a tunable, operator-set share of exchanges
+   (adversarial), each when its question wins. When "none" wins, or appraisal
+   ran and gave no vector, a tunable, operator-set share of exchanges
    is checked by one random offered lens, built-ins and plugin lenses
    alike, which bounds and measures what selection misses. With no
    appraisal plugin, one random offered lens checks a tunable,
    operator-set share of replies at each point, one share for both
    points, which the operator can set to every reply and which by default
    is less than every reply. A lens is added without
-   changing critique; it declares its appraisal question, and the
-   question is operator-configurable. Every lens judges the exchange as
+   changing critique; it declares its appraisal questions, and the
+   questions are operator-configurable. Every lens judges the exchange as
    the agent saw it (§3.8).
 2. The provenance check runs on any claim about the past, independent of
    the appraisal scores. Appraisal (a model) lists the claims. The
