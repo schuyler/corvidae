@@ -140,6 +140,42 @@ def warnings(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+class TestSearchGate:
+
+    def test_second_start_is_refused_while_one_is_in_flight(self):
+        gate = recall_mod().SearchGate(cooldown=0, now=Clock())
+        assert gate.try_start("c1") is True
+        assert gate.try_start("c1") is False
+
+    def test_cooldown_blocks_until_it_has_elapsed_then_allows(self):
+        clock = Clock()
+        gate = recall_mod().SearchGate(cooldown=5, now=clock)
+        assert gate.try_start("c1")
+        gate.finish("c1")
+        clock.t = 4.9
+        assert gate.try_start("c1") is False
+        clock.t = 5.0
+        assert gate.try_start("c1") is True
+
+    def test_channels_are_independent(self):
+        gate = recall_mod().SearchGate(cooldown=5, now=Clock())
+        assert gate.try_start("c1")
+        assert gate.try_start("c2")
+
+    def test_refused_start_does_not_restart_the_cooldown(self):
+        clock = Clock()
+        gate = recall_mod().SearchGate(cooldown=5, now=clock)
+        gate.try_start("c1")
+        gate.finish("c1")
+        clock.t = 3.0
+        assert gate.try_start("c1") is False
+        clock.t = 5.0
+        assert gate.try_start("c1") is True
+
+    def test_finish_of_an_unknown_channel_is_harmless(self):
+        recall_mod().SearchGate(cooldown=0, now=Clock()).finish("never-started")
+
+
 class TestSettings:
 
     def test_no_block_gives_the_defaults(self):

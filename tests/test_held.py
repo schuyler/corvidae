@@ -530,3 +530,188 @@ class TestOnStop:
         assert "3" in counts(busy_msg) and small.id not in busy_msg
         assert "1" in counts(small_msg) and busy.id not in small_msg
         assert not [w for w in warnings if idle.id in w]
+
+
+# ---------------------------------------------------------------------------
+# Store behaviour ported from the deleted funnel tests (#1176 Green I-1)
+# ---------------------------------------------------------------------------
+
+
+class RaisesAfterSeed:
+    """A policy plugin whose hook raises once the seed has answered."""
+
+    @hookimpl(wrapper=True)
+    def transform_held_admission(self, channel, conversation, batches):
+        yield
+        raise RuntimeError("policy exploded")
+
+
+class ReturnsMalformed:
+    """A policy plugin that answers with a plan naming a batch that is not there."""
+
+    def __init__(self, H) -> None:
+        self.H = H
+
+    @hookimpl(wrapper=True)
+    def transform_held_admission(self, channel, conversation, batches):
+        yield
+        return [self.H.BatchPlan(batch=99, admit=[0], duplicate=[], drop=[])]
+
+
+class RaisingNotify:
+    """A sibling ``on_notify`` that fails on its first call only."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @hookimpl
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
+        self.calls += 1
+        # Only the first firing fails, so a re-fire can be told from a stuck pair.
+        if self.calls == 1:
+            raise RuntimeError("sibling on_notify exploded")
+
+
+class TestStubLifecycle:
+    async def test_a_stub_refires_after_a_matching_turn_drains_its_batch(self, store):
+        """Once a turn of the origin drains the batch, the pending flag is
+        spent: a new batch fires a fresh stub."""
+        await store.held.hold_and_wake(store.channel, "critique", "critique", ["first"])
+        await store.admit(origin="critique")
+
+        await store.held.hold_and_wake(store.channel, "critique", "critique", ["second"])
+
+        assert store.notify.await_count == 2
+
+    async def test_a_batch_held_mid_drain_still_fires_its_stub(self, store):
+        """A batch held while the drain persists its row (flag already spent)
+        fires its own stub and is not wedged behind a stale flag."""
+        orig = store.pm.ahook.persist_message
+        registered = {"done": False}
+
+        async def holding_persist(**kwargs):
+            # Hold batch B exactly once, in the middle of the drain.
+            if not registered["done"]:
+                registered["done"] = True
+                await store.held.hold_and_wake(
+                    store.channel, "critique", "critique", ["payload B"]
+                )
+            return await orig(**kwargs)
+
+        store.pm.ahook.persist_message = holding_persist
+        await store.held.hold_and_wake(store.channel, "critique", "critique", ["payload A"])
+        assert store.notify.await_count == 1
+
+        await store.admit(origin="critique")
+
+        assert store.notify.await_count == 2
+        await store.admit(origin="critique")
+        assert "payload B" in "\n".join(store.context_rows())
+
+    async def test_a_failed_stub_marks_the_pair_so_it_fires_again(self, store, caplog):
+        """A stub whose firing raises clears its pending flag and marks the
+        pair: the channel's next ``turn_ended`` fires it again."""
+        failing = RaisingNotify()
+        # The real hook, so the failure comes from a sibling hookimpl.
+        del store.pm.ahook_raise.on_notify
+        store.pm.register(failing, name="raising_notify")
+
+        with caplog.at_level(logging.WARNING):
+            await store.held.hold_and_wake(store.channel, "critique", "critique", ["verdict"])
+        assert failing.calls == 1
+        assert any("failed to fire" in r.getMessage() for r in caplog.records)
+
+        await store.held.turn_ended(store.channel)
+
+        assert failing.calls == 2
+
+    async def test_the_stub_text_carries_the_pending_count(self, store):
+        """With no ``stub_text``, the stub says how many entries are held."""
+        await store.held.hold_and_wake(
+            store.channel, "critique", "critique", ["a", "b", "c"]
+        )
+
+        text = store.notify.await_args.kwargs["text"]
+        assert "3" in text and "critique" in text
+
+
+class TestKeysAndLeftovers:
+    async def test_a_mismatched_key_list_is_logged_and_the_batch_held_keyless(
+        self, store, H, caplog
+    ):
+        """Two keys for one entry: the WARNING names the source, both counts
+        and the remedy, and the entry is announced by its text, not a key."""
+        spy = AdmittedSpy()
+        store.pm.register(spy, name="spy")
+        contribution = H.Contribution("markdown_recall", ["entry"], ["one.md", "two.md"])
+
+        with caplog.at_level(logging.WARNING):
+            await store.admit(contributions=[contribution])
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "markdown_recall" in w and "2 keys" in w and "1 entries" in w
+            and "Give one key per entry" in w
+            for w in warnings
+        ), warnings
+        assert "entry" in "\n".join(store.context_rows())
+        assert spy.events[0]["admitted"] == ["entry"]
+
+    async def test_a_leftover_keeps_its_created_time(self, store):
+        """What policy leaves held keeps the time it was first held, for a
+        policy that reads its age."""
+        observe = Observe()
+        store.pm.register(observe, name="observe")
+        store.pm.register(AdmitFirstOnly(), name="policy")
+        created = store.clock.monotonic()
+        await store.held.hold(store.channel, "push", ["p0", "p1"])
+
+        await store.clock.advance(60)
+        await store.admit()
+        await store.admit()
+
+        leftover = observe.offered[-1]
+        assert leftover.entries == ["p1"]
+        assert leftover.created == created
+
+    async def test_a_leftover_keeps_its_keys_paired_with_its_entries(self, store, H):
+        """What policy leaves held keeps each entry's own key."""
+        observe = Observe()
+        store.pm.register(observe, name="observe")
+        store.pm.register(AdmitFirstOnly(), name="policy")
+        # No producer makes a keyed pushed batch, so place one directly.
+        store.held._next_turn[store.channel.id] = [
+            H.HeldBatch(
+                "push", ["p0", "p1"], ["k0", "k1"], store.clock.monotonic(), None, False, None
+            )
+        ]
+
+        await store.admit()
+        await store.admit()
+
+        leftover = observe.offered[-1]
+        assert leftover.entries == ["p1"] and leftover.keys == ["k1"]
+
+
+class TestPolicyFailure:
+    @pytest.mark.parametrize("failure", ["raises", "malformed"])
+    async def test_a_failing_policy_falls_back_to_admitting_everything(
+        self, store, H, caplog, failure
+    ):
+        """A policy that raises, or answers with a malformed plan, is
+        replaced by admit-all, with a WARNING that states the remedy."""
+        policy = RaisesAfterSeed() if failure == "raises" else ReturnsMalformed(H)
+        store.pm.register(policy, name="policy")
+        await store.held.hold(store.channel, "push", ["p0", "p1"])
+
+        with caplog.at_level(logging.WARNING):
+            await store.admit()
+
+        text = "\n".join(store.context_rows())
+        assert "p0" in text and "p1" in text
+        (warning,) = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "transform_held_admission" in r.getMessage()
+        ]
+        assert "Fix the transform_held_admission" in warning
+        assert "every held entry is admitted" in warning

@@ -150,9 +150,10 @@ def unsent_marker_text(emission: str, text: str) -> str:
     )
 
 
-#: Label a late-check row opens with (#1162). The Agent appends one, as a
-#: CONTEXT system row, at the channel's next turn after a veto check on a reply
-#: returned a refusal once its check allowance had run out.
+#: Label a late-check row opens with (#1162). The held store reuses it
+#: as ``LATE_CHECK_SOURCE`` and frames one, as a CONTEXT system row, at the
+#: channel's next turn after a veto check on a reply returned a refusal once
+#: its check allowance had run out.
 LATE_CHECK_LABEL = "late check"
 
 

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.clock import Clock
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import LATE_CHECK_LABEL, ContextWindow, MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, resolve_single_result
 from corvidae.provenance import cut_text
 from corvidae.spill import NotificationSpill
@@ -55,8 +55,8 @@ FRAME_HEADER = (
 )
 FRAME_FOOTER = "[end CONTEXT from {source}]"
 
-#: Source label of a late before-effect refusal.
-LATE_CHECK_SOURCE = "late check"
+#: Source label of a late before-effect refusal; the label ``context`` opens its text with.
+LATE_CHECK_SOURCE = LATE_CHECK_LABEL
 
 
 @dataclass(frozen=True)
@@ -311,10 +311,12 @@ class HeldContext(CorvidaePlugin):
     async def on_stop(self) -> None:
         """Log what is still held, per channel: a restart drops it (#318)."""
         held: dict[str, list[HeldBatch]] = {}
+        # Gather every channel's batches: next-turn ones, then origin-bound ones.
         for cid, batches in self._next_turn.items():
             held.setdefault(cid, []).extend(batches)
         for (cid, _origin), batches in self._deferred.items():
             held.setdefault(cid, []).extend(batches)
+        # One warning per channel, naming the count and sources it will lose.
         for cid, batches in held.items():
             count = sum(len(b.entries) for b in batches)
             # A channel whose batches are all empty holds nothing to lose.
@@ -413,8 +415,9 @@ class HeldContext(CorvidaePlugin):
             )
         except Exception:
             logger.warning(
-                "held: transform_held_admission raised on channel %s; admitting every "
-                "held entry as offered",
+                "held: transform_held_admission raised on channel %s; every held entry "
+                "is admitted as offered. Fix the transform_held_admission implementation "
+                "of the policy plugin the traceback names",
                 channel.id, exc_info=True, extra={"channel": channel.id},
             )
             return admit_all_plans(batches)
@@ -422,7 +425,9 @@ class HeldContext(CorvidaePlugin):
         if problem is not None:
             logger.warning(
                 "held: transform_held_admission returned a malformed plan on channel %s "
-                "(%s); admitting every held entry as offered",
+                "(%s); every held entry is admitted as offered. Fix the "
+                "transform_held_admission implementation of the policy plugin that "
+                "wraps the seed",
                 channel.id, problem, extra={"channel": channel.id},
             )
             return admit_all_plans(batches)
@@ -431,9 +436,11 @@ class HeldContext(CorvidaePlugin):
     @staticmethod
     def _malformed(plans: object, batches: list[HeldBatch]) -> str | None:
         """What is wrong with ``plans``, or None: an index out of range or listed twice."""
+        # A plan list must be a list of BatchPlan, nothing else.
         if not isinstance(plans, list) or not all(isinstance(p, BatchPlan) for p in plans):
             return f"expected a list of BatchPlan, got {type(plans).__name__}"
         seen: set[int] = set()
+        # Each plan must name an offered batch once, and list each of its entries at most once.
         for plan in plans:
             if not 0 <= plan.batch < len(batches) or plan.batch in seen:
                 return f"batch index {plan.batch} is out of range or named twice"
