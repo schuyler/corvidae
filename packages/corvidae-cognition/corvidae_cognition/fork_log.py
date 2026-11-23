@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import zlib
 from typing import Any, Iterable, Sequence
 
 import aiosqlite
+
+logger = logging.getLogger("corvidae.fork_log")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS fork_log (

@@ -31,6 +31,7 @@ import math
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
+from corvidae_cognition.fork_log import ForkLog, digest_of
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
@@ -498,6 +499,57 @@ class AppraisalPlugin(CorvidaePlugin):
         self._before_send_prompt = resolve_prompt(
             config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
         )
+        self._fork_log = ForkLog(
+            config.get("daemon", {}).get("session_db", "sessions.db"),
+            sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+        )
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.close()
+
+    async def _record_fork(
+        self,
+        *,
+        channel,
+        stage: str,
+        blocks: list[dict],
+        instruction: str,
+        trace_id: str | None,
+        result,
+        question: str | None = None,
+        findings: list[dict] | None = None,
+    ) -> None:
+        """Record one fork for #1204; never let a logging failure break it.
+
+        ``blocks`` is the window the fork rendered. v1 hashes the window, not
+        the fully rendered request: the tool schemas and the mid-conversation
+        role are applied inside ``agent.fork`` and are not part of this hash.
+        """
+        log = getattr(self, "_fork_log", None)
+        if log is None or not blocks:
+            return
+        try:
+            await log.record(
+                stage=stage,
+                channel_id=channel.id,
+                messages=blocks,
+                digests=[digest_of(b) for b in blocks],
+                instruction=instruction,
+                question=question,
+                findings=findings,
+                verdict=getattr(result, "text", None),
+                trace_id=trace_id,
+                prompt_tokens=getattr(result, "prompt_tokens", None),
+                completion_tokens=getattr(result, "completion_tokens", None),
+            )
+        except Exception:
+            logger.warning(
+                "appraisal: could not record a %s fork for %s (#1204)",
+                stage, channel.id, exc_info=True,
+            )
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -805,6 +857,15 @@ class AppraisalPlugin(CorvidaePlugin):
         try:
             result = await agent.fork(
                 channel, instruction, stage="appraisal", extra_body=extra_body
+            )
+            conv = channel.conversation
+            await self._record_fork(
+                channel=channel,
+                stage="appraisal",
+                blocks=list(conv.messages) if conv is not None else [],
+                instruction=instruction,
+                trace_id=trace_id,
+                result=result,
             )
             return _stage2_from_text(
                 result.text, [name for name, _ in offer] or None, trace_id)
