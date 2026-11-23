@@ -137,9 +137,13 @@ from corvidae.persistence import (
     view_rows,
 )
 
+from corvidae.channel import ChannelRegistry
+from corvidae.clock import Clock
+from corvidae.idle import IdleTracker
+
 if TYPE_CHECKING:
-    from corvidae.clock import Clock, Timer
-    from corvidae.idle import IdleTracker, IdleWatch
+    from corvidae.clock import Timer
+    from corvidae.idle import IdleWatch
 
 logger = logging.getLogger("corvidae.memory")
 
@@ -1875,7 +1879,7 @@ class MemoryPlugin(CorvidaePlugin):
     """
 
     # trace owns the hook the retrieval profile is reported on (#1179).
-    depends_on = frozenset({"persistence", "llm", "clock", "idle", "trace"})
+    depends_on = frozenset({"persistence", "llm", "clock", "idle", "trace", "registry"})
     # The heartbeat owns the hook spec memory's beat section implements; it
     # is optional so a config without a heartbeat starts quietly (#1079).
     optional_depends_on = frozenset({"heartbeat"})
@@ -2148,22 +2152,12 @@ class MemoryPlugin(CorvidaePlugin):
         Schema creation is deferred to first use when the persistence DB has
         not opened yet (hook-ordering dependent, same pattern as
         UsageLogPlugin). With the schema ready, spawns the message_fts
-        backfill and runs the retention check. Then, when the kernel clock
-        and idle tracker are both registered, registers the per-channel
-        consolidation watch and arms the retention timer.
+        backfill and runs the retention check. Then registers the per-channel
+        consolidation watch and arms the retention timer on the kernel clock
+        and idle tracker.
         """
-        # shortcut: hand-built test plugin managers omit the kernel clock; make it strict if a non-Runtime entry point appears
-        clock = self.pm.get_plugin("clock")
-        idle = self.pm.get_plugin("idle")
-        if clock is None or idle is None:
-            # Memory uses both objects or neither.
-            logger.warning(
-                "memory: no kernel clock/idle tracker registered; idle "
-                "consolidation and periodic retention are off"
-            )
-            clock = idle = None
-        self._clock = clock
-        self._idle = idle
+        self._clock = get_dependency(self.pm, "clock", Clock)
+        self._idle = get_dependency(self.pm, "idle", IdleTracker)
         try:
             db = await self._ensure_schema()
             if db is not None:
@@ -2176,8 +2170,6 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._run_retention_if_due()
         except Exception:
             logger.warning("memory schema creation deferred", exc_info=True)
-        if self._clock is None or self._idle is None:
-            return
         # Consolidate each channel's tail once it has been quiet a period.
         self._idle_watch = self._idle.watch_channels(
             self._idle_consolidate_after,
@@ -2989,8 +2981,7 @@ class MemoryPlugin(CorvidaePlugin):
         # with empty runtime_overrides), as the ImportancePrior protocol takes
         # them; the default RubricPrior ignores both.
         msg_id_range = (rows[0][0], rows[-1][0])
-        registry = self.pm.get_plugin("registry")
-        channel = registry.get(channel_id) if registry is not None else None
+        channel = get_dependency(self.pm, "registry", ChannelRegistry).get(channel_id)
         if channel is None:
             channel = _StubChannel(channel_id)
         # The rubric call is its own kind of model call: without a mode its
@@ -3424,8 +3415,7 @@ class MemoryPlugin(CorvidaePlugin):
             if stashed is not None and stashed[0] == watermark:
                 return "record", stashed[1]
         elif trigger in ("idle", "turn"):
-            registry = self.pm.get_plugin("registry")
-            channel = registry.get(channel_id) if registry is not None else None
+            channel = get_dependency(self.pm, "registry", ChannelRegistry).get(channel_id)
             conv = getattr(channel, "conversation", None)
             # Fork only what the record is stamped with: a message that
             # reached the window after range_end was fixed lies past the cut,

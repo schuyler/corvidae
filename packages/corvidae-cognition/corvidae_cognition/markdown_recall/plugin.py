@@ -130,17 +130,10 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         # is empty), never a block.
         import asyncio
         self._startup_task = asyncio.ensure_future(self._reconcile())
-        # The idle tracker is a kernel component; if it is absent (a hand-built
-        # test manager) the startup reconcile still ran, so the source works —
-        # it just won't pick up out-of-band edits until the next startup.
-        idle = self.pm.get_plugin("idle")
-        if idle is None:
-            logger.debug(
-                "markdown recall: no idle tracker registered; out-of-band file "
-                "changes are picked up at the next startup only"
-            )
-            return
-        idle.watch_system(
+        # Pick up out-of-band edits whenever the system goes quiet.
+        from corvidae.idle import IdleTracker
+
+        get_dependency(self.pm, "idle", IdleTracker).watch_system(
             IDLE_QUIET_SECONDS, self._reconcile, name="markdown_recall.reconcile"
         )
 

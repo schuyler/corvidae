@@ -72,9 +72,9 @@ from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
-from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.persistence import decode_message_row
-from corvidae.task import Task
+from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
@@ -1301,8 +1301,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _enqueue(self, channel, trace_id, annotations, description, work) -> None:
         """Enqueue one silent critique task (deliver=False), fail-soft."""
-        task_plugin = self.pm.get_plugin("task")
-        queue = getattr(task_plugin, "task_queue", None)
+        queue = get_dependency(self.pm, "task", TaskPlugin).task_queue
         if queue is None:
             logger.debug("%s skipped: task queue unavailable", description)
             return
