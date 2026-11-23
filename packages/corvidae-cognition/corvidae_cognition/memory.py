@@ -2416,10 +2416,15 @@ class MemoryPlugin(CorvidaePlugin):
             channel, instruction, stage="consolidation", cut=cut,
             extra_body=CONSOLIDATION_EXTRA_BODY, **fork_kwargs,
         )
+        # A snapshot fork renders the snapshot, not the live window (#628):
+        # recording the live window would describe blocks that were not sent.
         await self._record_fork(
             channel=channel, stage="consolidation", point="consolidation",
-            blocks=window_blocks(channel), instruction=instruction,
-            trace_id=None, result=result,
+            blocks=(
+                list(snapshot.conv.messages) if snapshot is not None
+                else window_blocks(channel)
+            ),
+            instruction=instruction, trace_id=None, result=result,
         )
         # Stamp the fork instruction (not the code-generated range
         # sentence, which quotes conversation text) and the model sent.
