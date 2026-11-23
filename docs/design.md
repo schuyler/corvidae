@@ -3362,7 +3362,7 @@ ships only `C`, `C.UTF-8` and `POSIX`), `adopt_system_locale` logs a WARNING
 naming the variable and value and the remedy, and the process behaves as C.
 The warning is written before logging is configured, so it goes to stderr,
 not to `logging.file`. Durations are input syntax, not locale output, and do
-not change with the locale. `docs/configuration.md` ("Locale") covers it for
+not change with the locale. `docs/configuration.md` ("System locale") covers it for
 the operator, including the container image.
 
 ## Keyword search indexes (cognition)
@@ -3408,7 +3408,7 @@ raise. The content-table triggers are created after the FTS table, so they
 never exist without it and the kernel's `message_log` writes are unaffected.
 The reverse also holds: a database holding trigram tables cannot be written
 by a Python linked to an older SQLite (the `message_log_ai` trigger fails each
-insert), and `corvidae redact` run from one reports `table(error)`.
+insert), and `corvidae redact` run from one fails at its first write (`error in tokenizer constructor`, from the `message_log_au`/`memory_au` trigger) and redacts nothing.
 
 Markdown recall's chunker (`markdown_recall/chunking.py`) sizes in UTF-8 bytes
 (`TARGET_BYTES` 900, `OVERLAP_BYTES` 200, `MIN_CHUNK_BYTES` 1800,
@@ -3416,7 +3416,9 @@ Markdown recall's chunker (`markdown_recall/chunking.py`) sizes in UTF-8 bytes
 `CHUNKER_VERSION` is `otterwiki-3`, which re-chunks every folder once. Sentence
 boundaries are the same as in `split.py` tier 2 plus a newline, with no
 condition on the next letter's case. `search_transcripts` shows a snippet of
-64 trigram tokens around the match.
+64 trigram tokens around the match; on the `LIKE` path (no term of 3+
+characters) there is no match to centre on, so the snippet starts at the
+beginning of the message.
 
 ## SchedulerPlugin
 

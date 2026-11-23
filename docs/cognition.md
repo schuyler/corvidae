@@ -1398,8 +1398,7 @@ ships 3.40) does not. Below the floor:
   finds `running`).
 - A database whose tables are trigram cannot be written by a Python linked to
   an older SQLite: the `message_log_ai` trigger fails every kernel insert.
-  `corvidae redact` run from such a Python reports `table(error)` for those
-  tables in its verification line. Run every tool against the database with a
+  `corvidae redact` run from such a Python fails at its first write (`error in tokenizer constructor`, from the `message_log_au`/`memory_au` trigger) and redacts nothing. Run every tool against the database with a
   SQLite at or above the floor.
 
 **Switching an existing install by hand.** There is no automatic migration:
