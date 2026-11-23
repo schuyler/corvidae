@@ -62,10 +62,6 @@ CREATE TABLE IF NOT EXISTS fork_log (
     chain_from INTEGER NOT NULL DEFAULT 0,
     reconstructable INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX IF NOT EXISTS fork_log_ts ON fork_log (ts);
-CREATE INDEX IF NOT EXISTS fork_log_stage_ts ON fork_log (stage, ts);
-CREATE INDEX IF NOT EXISTS fork_log_label ON fork_log (label, stage);
-
 -- Only the block digests a fork appends to its parent's list: repeating the
 -- whole array per fork costs more than the row (measured, #1204).
 CREATE TABLE IF NOT EXISTS fork_digest (
@@ -82,6 +78,14 @@ CREATE TABLE IF NOT EXISTS fork_block (
     created_at REAL NOT NULL,
     text BLOB NOT NULL
 );
+"""
+
+#: Built after the migration: an index over a late column cannot exist before
+#: that column does.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS fork_log_ts ON fork_log (ts);
+CREATE INDEX IF NOT EXISTS fork_log_stage_ts ON fork_log (stage, ts);
+CREATE INDEX IF NOT EXISTS fork_log_label ON fork_log (label, stage);
 """
 
 #: Labels a finding can carry. ``ignored`` is deliberately absent: no timer
@@ -146,8 +150,49 @@ class ForkLog:
         db = await aiosqlite.connect(self._db_path)
         db.row_factory = aiosqlite.Row
         await db.executescript(SCHEMA)
+        await self._migrate(db)
+        await db.executescript(INDEXES)
         await db.commit()
         self._db = db
+
+    #: Columns added after the first release. ``CREATE TABLE IF NOT EXISTS``
+    #: does nothing to a table that already exists, so a database written by an
+    #: older build never gains them and every write fails with
+    #: "no column named ..." -- silently, because writers swallow errors.
+    LATE_COLUMNS = {
+        "point": "TEXT",
+        "lens_id": "TEXT",
+        "profile": "TEXT",
+        "model": "TEXT",
+        "question_sha256": "BLOB",
+        "question_text": "TEXT",
+        "instruction": "TEXT",
+        "window_first_rowid": "INTEGER",
+        "window_last_rowid": "INTEGER",
+        "window_cut": "INTEGER",
+        "renderer_sha": "TEXT",
+        "findings_json": "TEXT",
+        "verdict": "TEXT",
+        "label": "TEXT",
+        "label_reason": "TEXT",
+        "latency_ms": "REAL",
+        "prompt_tokens": "INTEGER",
+        "completion_tokens": "INTEGER",
+        "cached_tokens": "INTEGER",
+        "snapshot_sha256": "TEXT",
+        "system_sha256": "TEXT",
+        "chain_parent": "INTEGER",
+        "chain_from": "INTEGER NOT NULL DEFAULT 0",
+        "reconstructable": "INTEGER NOT NULL DEFAULT 1",
+    }
+
+    async def _migrate(self, db: aiosqlite.Connection) -> None:
+        async with db.execute("PRAGMA table_info(fork_log)") as cur:
+            have = {row[1] for row in await cur.fetchall()}
+        for name, decl in self.LATE_COLUMNS.items():
+            if name not in have:
+                await db.execute(f"ALTER TABLE fork_log ADD COLUMN {name} {decl}")
+                logger.info("fork_log: added column %s to an existing table", name)
 
     async def close(self) -> None:
         if self._db is not None:

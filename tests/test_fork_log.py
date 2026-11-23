@@ -378,3 +378,35 @@ async def test_a_wrong_length_says_length_not_content(log):
             chain_parent=first,
             chain_from=2,
         )
+
+
+async def test_a_table_from_an_older_build_gains_the_new_columns(tmp_path):
+    """CREATE TABLE IF NOT EXISTS does nothing to an existing table (#1204)."""
+    import aiosqlite
+
+    path = str(tmp_path / "old.db")
+    db = await aiosqlite.connect(path)
+    await db.execute(
+        "CREATE TABLE fork_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts REAL NOT NULL, stage TEXT NOT NULL, channel_id TEXT NOT NULL,"
+        " prompt_sha256 BLOB NOT NULL)"
+    )
+    await db.commit()
+    await db.close()
+
+    from corvidae_cognition.fork_log import digest_of
+
+    log = ForkLog(path)
+    await log.open()
+    try:
+        fork_id = await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=MESSAGES,
+            digests=[digest_of(b) for b in MESSAGES],
+            point="after-send",
+        )
+        row = await _row(log, fork_id)
+        assert row["point"] == "after-send"
+    finally:
+        await log.close()
