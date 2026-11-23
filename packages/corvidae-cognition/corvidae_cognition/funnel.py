@@ -163,7 +163,9 @@ class FunnelPlugin(CorvidaePlugin):
     # clock are kernel plugins that exist by then, but a test registers its own.
     depends_on = frozenset({"held", "clock"})
 
-    def __init__(self) -> None:
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         # funnel.ingest_ttl in seconds; None means held batches never expire.
         self._ttl: float | None = None
         self._default_budget: int = DEFAULT_BUDGET_TOKENS
