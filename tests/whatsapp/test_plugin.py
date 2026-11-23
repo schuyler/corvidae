@@ -284,3 +284,28 @@ async def test_a_sidecar_that_stays_down_warns_once(tmp_path, caplog):
                        for r in caplog.records)
         finally:
             await plugin.on_stop()
+
+
+async def test_a_dropped_message_does_not_consume_its_id(tmp_path):
+    """A media-only message burns no id, so a replay with text still arrives (#1220)."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        await sidecar.notify("message", {
+            "id": "M2", "chat_jid": CHAT, "sender_jid": CHAT,
+            "from_me": False, "text": "", "ts": 3, "media": {"type": "image"},
+        })
+        await asyncio.sleep(0.1)
+        assert recorder.messages == []
+        # The same id with text now: an early insert would call this a duplicate.
+        await sidecar.notify("message", {
+            "id": "M2", "chat_jid": CHAT, "sender_jid": CHAT,
+            "from_me": False, "text": "the caption", "ts": 3,
+        })
+        await _wait_for(lambda: bool(recorder.messages))
+        assert recorder.messages[0][2] == "the caption"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()

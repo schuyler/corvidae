@@ -107,7 +107,10 @@ class WhatsAppPlugin(TransportPlugin):
         """Connect, serve until the socket drops, then retry — never give up.
 
         The sidecar is a separate process the operator starts, so its absence
-        is normal. Each failed attempt logs why, once per attempt, at WARNING.
+        is normal. The first failed attempt warns, naming the socket, the
+        attempt number and the start command; later ones log at DEBUG with the
+        count, and a fresh WARNING comes every RECONNECT_WARN_INTERVAL so a long
+        outage stays visible without burying the log.
         """
         assert self._socket_path is not None
         while True:
@@ -202,10 +205,6 @@ class WhatsAppPlugin(TransportPlugin):
             logger.info("whatsapp: duplicate message %s in %s; ignored", wamid,
                         message.get("chat_jid"))
             return
-        if wamid:
-            self._seen[wamid] = None
-            while len(self._seen) > SEEN_LIMIT:
-                self._seen.popitem(last=False)
         chat_jid = message.get("chat_jid")
         text = message.get("text") or ""
         if not chat_jid:
@@ -224,6 +223,13 @@ class WhatsAppPlugin(TransportPlugin):
             return
         channel = self._registry.get_or_create("whatsapp", chat_jid, config=ChannelConfig())
         sender = message.get("sender_jid") or chat_jid
+        # Remember the id only once the message is actually handed over: a
+        # message dropped above (no text, no registry) must not burn its id,
+        # or a replay of it would be suppressed as a duplicate forever.
+        if wamid:
+            self._seen[wamid] = None
+            while len(self._seen) > SEEN_LIMIT:
+                self._seen.popitem(last=False)
         await self.pm.ahook.on_message(
             channel=channel, sender=sender, text=text, trace_id=mint_trace_id(),
         )
