@@ -246,6 +246,7 @@ owner's plugin name after the prefix.
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
 | `resolve_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
 | `resolve_compaction` | firstresult=True | `_process_queue_item`, step 6; the first non-None return stops the chain (`CompactionPlugin` is `trylast`, so a default-priority replacement runs first); the caller ignores the value |
+| `should_execute_tool` | broadcast / resolve_reject_wins, under the [check allowance](#the-check-allowance) | `dispatch_tool_call`, once a call's arguments parse and validate and before it runs, on every dispatch path (main turn, subagent, fork tool), with the calling channel, the tool name, the validated arguments and the trace id; any `False` or `Refusal` refuses and the [refusal text](#the-tool-veto) is the call's result; a raising implementation is no refusal; no kernel implementation, so with none registered nothing is refused (#148) |
 | `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
@@ -893,7 +894,8 @@ go together (PRD §3.5.3), for the global list too.
   entry disabled is reported under `channels.<wide key>.tools.disabled`)
   and is logged at WARNING with the same keys. Hiding is not access control: the
   model can call a tool it saw earlier or one named in injected text. This
-  is a config list, not the `should_execute_tool` hook (#148).
+  is a config list, not the [`should_execute_tool` hook](#the-tool-veto) (#148);
+  a disabled call is refused before that hook is offered it.
 - **Subagents inherit.** `SubagentPlugin` excludes `disabled_on(channel)`
   as well as itself from the registry it hands the subagent.
 - **Hot reload.** `parse_channel_config` validates every entry before
@@ -1428,8 +1430,10 @@ ask a gate about.
 
 The `final` firing goes through `corvidae.checks.run_checks` (#1162; PRD
 principle 3, §3.7 Output gate 7, §3.13.5), not the plain `pm.ahook` gather the
-other firings use. The helper names no hook, emission or tool, so the tool veto
-(#148) can call it too.
+other firings use. The helper names no hook, emission or tool; the
+[tool veto](#the-tool-veto) (#148) is its second caller. It does not yet end
+the wait on the first in-time refusal, which PRD §3.1.21 asks for: every
+check runs until it answers or the allowance runs out. #1176 tracks that.
 
 - Each non-wrapper implementation runs as its own kernel-clock task
   (`clock.call_soon`), concurrently. The helper waits on plain asyncio events
@@ -1467,6 +1471,43 @@ tools keep running, so the pending set alone would not do. Then nothing
 appended can fall between a tool call and its result. Otherwise the rows wait
 for the first such turn. They are held in memory, so a restart before
 delivery loses them.
+
+#### The tool veto
+
+`should_execute_tool(channel, tool_name, arguments, trace_id)` (#148, PRD
+§3.5.12) lets a plugin refuse one tool call before it runs.
+`dispatch_tool_call` takes a `check: ToolCheck` and a `trace_id`. After the
+arguments parse, the tool is found, and the arguments validate against the
+generated schema, it awaits `check(channel, tool_name, arguments, trace_id)`
+when a channel is set. The check runs before the call's `asyncio.timeout`
+scope, so time spent checking never counts against `tools.call_timeout`.
+
+- **One check, every path.** `Agent.check_tool_call` is the only `ToolCheck`.
+  `_dispatch_tool_calls` passes it with the turn's trace id. `SubagentPlugin`
+  (reaching the Agent through `pm.get_plugin("agent")`) and `ForkToolPlugin`
+  pass it to `run_agent_loop`, which offers each call with the trace from the
+  current attribution: the starting turn's, since `set_attribution` merges.
+  The check is passed explicitly rather than reached through `pm`, so
+  `transform_tool_result` still does not fire in those loops.
+  shortcut: a plugin manager with no `agent` plugin runs subagent calls
+  unchecked; that happens only in hand-built test managers.
+- **Resolution.** `check_tool_call` runs `run_checks(pm, "should_execute_tool",
+  ...)` under `resolve_check_allowance`. Each call, including each call in a
+  batch, gets its own allowance. Then it applies `resolve_reject_wins`. On a
+  refusal the result is `tool_refusal_text(tool_name, reasons)`: `Error: tool
+  '<name>' was refused before it ran: <reasons>. It did not run. Don't retry it
+  unchanged; use another approach, or ask the user.` A bare `False` counts as
+  the reason `no reason given`. The refusal is logged at INFO with the tool,
+  the channel and the reasons. A refused call returns `error=True` and skips
+  `transform_tool_result`, as the other pre-dispatch errors do.
+- **Late.** A refusal that returns after the allowance goes into
+  `Agent._late_checks` as `late_tool_check_text(tool_name, arguments, plugin,
+  reason)`. That is a `[late check: <plugin>]` row saying the call ran
+  unchecked, quoting the arguments as JSON cut to 40 characters. It drains
+  like a reply's late row (above). A subagent or fork-tool call's row goes to
+  the calling channel's next main turn. A late bare `False` gets the reason
+  `no reason given`, as in time (a reply's late bare `False` is still
+  dropped).
 
 **An unsent final releases transport state.** An unsent final never
 reaches `send_message`, where transports end the turn (Discord and Signal

@@ -705,6 +705,7 @@ as existing behaviour to imitate.
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False or a `Refusal(reason)` to withhold, None for no opinion. The `final` firing waits no longer than the channel's check allowance. See [Output gating](#output-gating). |
+| `should_execute_tool(channel, tool_name: str, arguments: dict, trace_id: str \| None)` | async broadcast, reject-wins | Before each tool call runs, on every dispatch path (a subagent's and the fork tool's included). Return a `Refusal(reason)` to refuse, None for no opinion. Waits no longer than the channel's check allowance. See [Refusing a tool call](#refusing-a-tool-call). |
 | `on_message_persisted(channel, trace_id: str, rowid: int \| None, text: str, annotations: dict)` | async broadcast | After the trace-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
 | `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)). A non-transport plugin may implement `send` to observe every channel's events, as the context panel does |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, annotations: dict \| None)` | async broadcast | Notification injected into channel |
@@ -970,6 +971,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| Refusal \| None` | Any `False` or `Refusal` withholds the emission; anything else sends it |
+| `should_execute_tool(channel, tool_name, arguments, trace_id)` | reject-wins (broadcast), under the check allowance | `bool \| Refusal \| None` | Any `False` or `Refusal` refuses the call, and the refusal becomes its result; a raising implementation is no refusal |
 | `should_start_work(channel, kind, source_channel, trace_id, annotations)` | first refusal wins (called by hand) | `WorkRefusal \| None` | The first `WorkRefusal` stops the work and becomes the starting tool's result; anything else is no opinion |
 | `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
@@ -1404,7 +1406,7 @@ else the plugin may do, and what it owes.
 | Phase | Hook today | Its CONTEXT reaches the model | It may also | It must |
 |---|---|---|---|---|
 | Before composition | `before_agent_turn` | in the turn being composed, or a later turn if it is late | nothing more; there is no output yet to judge | not delay the turn |
-| Before effect | `should_send_response` (a tool call's twin, `should_execute_tool`, is #148 and not built) | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse | answer within the channel's check allowance ([Output gating](#output-gating)) |
+| Before effect | `should_send_response`, `should_execute_tool` | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse | answer within the channel's check allowance ([Output gating](#output-gating), [Refusing a tool call](#refusing-a-tool-call)) |
 | Idle | idle watchers, background work | at the channel's next turn, or in a turn it wakes | nothing more; nothing is pending to stop | yield when a message arrives |
 
 Admission gating (`should_process_message`) comes before any of these: no
@@ -2005,6 +2007,26 @@ class QuietHoursPlugin(CorvidaePlugin):
 ```
 
 If you write a transport with history replay, skip `message_type == "unsent"` rows, and use `corvidae.context.unsent_marker_emission(content)` to hold back progress or thinking that a marker says was suppressed. Cognition's `GatePlugin` is the reference implementation ([cognition.md](cognition.md#gateplugin)).
+
+## Refusing a tool call
+
+`should_execute_tool(channel, tool_name, arguments, trace_id)` (#148) is offered every tool call before it runs: the main turn's, a subagent's and the fork tool's. `arguments` has already validated against the tool's schema, so a call with bad arguments never reaches you. `channel` is the calling channel; a subagent's calls carry the channel that started it. Return `corvidae.hooks.Refusal(reason)` to refuse, None for no opinion. A bare `False` refuses too, but the model is told no reason was given.
+
+Any refusal wins. The call does not run, and the model gets `Error: tool '<name>' was refused before it ran: <your reason>. It did not run. Don't retry it unchanged; use another approach, or ask the user.` as its result, so the turn goes on. Write `reason` for the model: say what you found and what would be allowed instead.
+
+- **Fail open.** If your implementation raises, the kernel logs it at WARNING and the call runs. If your check must refuse when it fails, catch your own failure and return a `Refusal`.
+- **Time limit.** Every check runs at once, and the call waits no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance)). After that the call runs unchecked, and the miss is a `check.missed` metric tagged with `hook: should_execute_tool`. A refusal that arrives late refuses nothing. It reaches the agent at the channel's next turn as a `[late check: <plugin>]` row saying the call ran unchecked, so the agent can undo or follow up; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within `agent.check_allowance_min`. The kernel doesn't yet stop waiting at the first refusal (#1176), so a fast refusal still waits for slower sibling checks, up to the allowance.
+- **Calling channel only.** Refuse because of who or what is on the calling channel, never because of a channel the call targets: a policy keyed on the target channel is a channel wall, which PRD principle 14 rules out.
+- **Untrusted input.** `arguments` are model-written and can carry injected text. A check that hands them to a model should frame them as data.
+
+```python
+class NoShellForGuestsPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_execute_tool(self, channel, tool_name, arguments, trace_id):
+        if tool_name == "shell" and self.guest_present(channel):
+            return Refusal("a guest is on this channel; ask the operator to run it")
+        return None
+```
 
 ## Async considerations
 
