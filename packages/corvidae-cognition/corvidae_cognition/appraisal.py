@@ -349,7 +349,7 @@ class AppraisalPlugin(CorvidaePlugin):
     """Stage-2 appraisal: a fork of the window lists each finished
     exchange's past claims and scores the critique lenses on offer.
 
-    Soft-uses the outcome-log writer; fail-soft when it is absent.
+    Reports each stage 2 on ``on_trace_record`` (source ``appraisal``).
     """
 
     # trace owns the hook stage 2 is reported on (#1179).

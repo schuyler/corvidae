@@ -145,9 +145,19 @@ class OutcomeLogPlugin(CorvidaePlugin):
             return
         origin = self._index(trace_id, origin)
         path = await self._path()
+        if path is None and self._path_for is None:
+            # Persistence has not opened its DB yet (records come after
+            # start, so this is rare): this record is lost, the next retries.
+            logger.warning(
+                "outcome_log: the %s record for trace %s is not written: the "
+                "session DB is not open yet (daemon.session_db=%r)",
+                source, trace_id, self._db_path,
+                extra={"trace_id": trace_id, "channel": channel_id},
+            )
+            return
         if path is None:
-            # Nowhere to write: an in-memory session DB, or persistence not
-            # open yet. Say so once; the origin index still works.
+            # Nowhere to write: an in-memory session DB. Say so once; the
+            # origin index still works.
             if not self._warned_no_file:
                 self._warned_no_file = True
                 logger.warning(
@@ -188,8 +198,12 @@ class OutcomeLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def resolve_trace_origin(self, trace_id: str) -> str | None:
-        """The first origin recorded for ``trace_id``, or None."""
-        return self._origins.get(trace_id)
+        """The first origin recorded for ``trace_id``, or None. A lookup
+        keeps the trace in the index, as a record does."""
+        origin = self._origins.get(trace_id)
+        if origin is not None:
+            self._origins.move_to_end(trace_id)
+        return origin
 
     # ------------------------------------------------------------------
     # Lifecycle records. Observe hooks fail soft in dispatch, so these
@@ -233,8 +247,9 @@ def _scrub_past_claims(appraisal_json: str | None, tombstone: str) -> str | None
     No appraisal, no stage 2, or claims already tombstoned → None.
     """
     # NULL is the common case: most exchanges never get a stage-2 appraisal.
-    # The column is written by outcome_log's JSON merge, so it parses, and
-    # appraisal normalizes past_claims to a list of {claim, queries}.
+    # The input is an exchange_log column (history) or an appraisal record
+    # from the JSONL; appraisal normalizes past_claims to a list of
+    # {claim, queries}.
     if appraisal_json is None:
         return None
     appraisal = json.loads(appraisal_json)
@@ -455,10 +470,10 @@ async def redact_outcomes_jsonl(
         e["trace_id"]: e["record"]["message_rowid"]
         for e in parsed
         if e is not None and e.get("channel_id") == channel_id
-        and e.get("source") == SOURCE
+        and e.get("source") == SOURCE and isinstance(e.get("trace_id"), str)
         and isinstance(e.get("record"), dict)
         and e["record"].get("event") == "persisted"
-        and e["record"].get("message_rowid") is not None
+        and isinstance(e["record"].get("message_rowid"), int)
     }
     # Each redacted id's owner: the trace with the largest rowid <= the id.
     owners: set[str] = set()

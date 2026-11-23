@@ -618,17 +618,11 @@ def reminder_verdict(set_row: bool, fired: bool, replied: bool) -> tuple[bool, s
 
 def _outcome_lines(db_path: Path) -> list[dict]:
     """outcome_log's JSONL records beside `db_path` (`<stem>.outcomes.jsonl`);
-    [] when the file is absent. A line that does not parse is skipped."""
+    [] when the file is absent."""
     path = Path(db_path).with_suffix(".outcomes.jsonl")
     if not path.exists():
         return []
-    lines = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        try:
-            lines.append(json.loads(raw))
-        except ValueError:
-            continue
-    return lines
+    return [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines() if raw.strip()]
 
 
 def _heartbeat_traces(lines: list[dict], channel_id: str) -> set[str]:
