@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from corvidae.held import Contribution
-from corvidae.hooks import TransportPlugin
+from corvidae.hooks import owning_transport
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel, ChannelRegistry
@@ -82,10 +82,9 @@ def resolve_check_allowance(pm, registry: "ChannelRegistry", channel: "Channel")
                 break
     # Transport: the default of a loaded transport that owns the channel.
     if value is None:
-        for plugin in pm.get_plugins():
-            if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
-                value = plugin.check_allowance
-                break
+        facts = owning_transport(pm, channel)
+        if facts is not None:
+            value = facts.check_allowance
     # Nothing declared: the minimum; otherwise never below it.
     if value is None:
         return minimum

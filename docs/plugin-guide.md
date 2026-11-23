@@ -571,7 +571,7 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. The result is re-resolved at compaction boundaries, so a plugin's section persists across compactions as long as the wrapper remains registered. To act only on chats, find the transport that owns the channel and read its `conversational` (`SilencePlugin` does this).
+`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. The result is re-resolved at compaction boundaries, so a plugin's section persists across compactions as long as the wrapper remains registered. To act only on chats, read `owning_transport(self.pm, channel)` and its `conversational` (`SilencePlugin` does this; [Plugin boundaries](#plugin-boundaries)).
 
 `before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `persist_message` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
@@ -1160,7 +1160,11 @@ A plugin may hold a reference to another plugin only when all three hold:
 3. it is resolved with `get_dependency(self.pm, name, Type)`.
 
 Everything else goes through a hook, so a bare `pm.get_plugin(name)` has no
-use in a plugin. The two cases differ for a reason. A call such as
+use in a plugin. Walking `pm.get_plugins()` to find one, such as the
+`TransportPlugin` that owns a channel, is the same reach with no name: ask the
+kernel instead (`owning_transport(pm, channel)` from `corvidae.hooks` returns
+the owner's `TransportFacts` — `transport`, `conversational`,
+`check_allowance` — or None; #1193). The two cases differ for a reason. A call such as
 `clock.now()` needs a typed answer at once from a layer that is always
 loaded, and a hook would add broadcast semantics to something with one
 provider. A peer plugin may be absent, and which way a dependency between

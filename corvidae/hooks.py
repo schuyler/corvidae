@@ -964,6 +964,39 @@ class TransportPlugin(CorvidaePlugin):
         """Show intermediate assistant text. Default: no-op."""
 
 
+@dataclass(frozen=True)
+class TransportFacts:
+    """What a plugin may know about the transport that owns a channel (#1193).
+
+    Values only, so no plugin holds a reference to a transport plugin
+    (docs/plugin-guide.md, "Plugin boundaries").
+    """
+
+    #: The transport name, the ``transport`` half of the channel's id.
+    transport: str
+    #: ``TransportPlugin.conversational``: a chat transport.
+    conversational: bool
+    #: ``TransportPlugin.check_allowance``: the transport's default, or None.
+    check_allowance: float | None
+
+
+def owning_transport(pm, channel: Channel) -> TransportFacts | None:
+    """The facts of the loaded transport that owns ``channel``, or None.
+
+    The kernel's one answer to "which transport delivers here" (#1193): the
+    first loaded ``TransportPlugin`` whose ``owns`` is true. None for a
+    channel no transport claims (``internal:*``) or whose transport is not
+    loaded.
+    """
+    # Walk the loaded transports; only the kernel iterates the plugin manager.
+    for plugin in pm.get_plugins():
+        if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
+            return TransportFacts(
+                plugin.transport, bool(plugin.conversational), plugin.check_allowance
+            )
+    return None
+
+
 class AgentSpec:
     """Hook specifications for the agent daemon.
 
