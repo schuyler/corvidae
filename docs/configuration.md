@@ -422,7 +422,7 @@ Validation: `critique.max_tool_calls` must be a whole number ≥ 0 and `critique
 
 ### The proactivity lens (#1126)
 
-A built-in lens that checks whether the reply asked permission ("want me to…", "should I…") for something the agent owns and could simply have done, by the Ownership Boundary in its system prompt. It is offered to the critique vector like the other lenses and runs when its question wins; there is no separate trigger. Its findings wake the channel (on a correction they wait, #1031), and while the lens is offered the wake stub tells the agent to take the action it asked about and send nothing unless the other party would otherwise act on a wrong belief.
+A built-in lens that checks whether the reply asked permission ("want me to…", "should I…") for something the agent owns and could simply have done, by the Ownership Boundary in its system prompt. It is offered to the critique vector like the other lenses and runs when its share beats "none"'s; there is no separate trigger. Its findings wake the channel (on a correction they wait, #1031), and while the lens is offered the wake stub tells the agent to take the action it asked about and send nothing unless the other party would otherwise act on a wrong belief.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -464,9 +464,9 @@ Lenses are chosen at two points, before the reply is sent (on the draft) and aft
 
 Removed in #1078, each now failing startup with an error naming the replacement: `critique.fork_prompt.<name>` (moved to `critique.lens.<name>.fork_prompt`, or `critique.provenance.fork_prompt`); the scalars `critique.lens.<dimension>` (`ambiguity`, `commitment`, `disagreement`, `neg_valence`, `novelty`, `retention`); `critique.lens.<name>.<dimension>`; and `critique.lens.<name>.sample_rate`. Any key under `critique.lens.<name>` other than `appraisal_question` and `fork_prompt` (and `enabled`, for proactivity only) is refused, and so is `critique.lens.provenance.fork_prompt` (set `critique.provenance.fork_prompt`). A reload that still carries one logs a warning and keeps the previous fork prompts. An empty `critique.lens.<name>:` block sets nothing and is accepted.
 
-The planning extra's lens (`corvidae-planning`, #1067; see [design.md](design.md#planning-lens-corvidae-planning-package)) is named `planning`. Its keys are `critique.lens.planning.appraisal_question` and `critique.lens.planning.fork_prompt`. It no longer has its own 10% rate: it runs when its question wins the vector, plus its share of the `critique.sample_below_rate` draw.
+The planning extra's lens (`corvidae-planning`, #1067; see [design.md](design.md#planning-lens-corvidae-planning-package)) is named `planning`. Its keys are `critique.lens.planning.appraisal_question` and `critique.lens.planning.fork_prompt`. It no longer has its own 10% rate: it runs when its share beats "none"'s, plus its share of the `critique.sample_below_rate` draw.
 
-The alignment extra's lens (`corvidae-alignment`, #914) is named `alignment`. Its keys are `critique.lens.alignment.appraisal_question` and `critique.lens.alignment.fork_prompt`. It no longer has its own 10% rate: it runs when its question wins the vector, plus its share of the `critique.sample_below_rate` draw.
+The alignment extra's lens (`corvidae-alignment`, #914) is named `alignment`. Its keys are `critique.lens.alignment.appraisal_question` and `critique.lens.alignment.fork_prompt`. It no longer has its own 10% rate: it runs when its share beats "none"'s, plus its share of the `critique.sample_below_rate` draw.
 
 A malformed lens, including one with no `appraisal_question`, is rejected at startup with a warning naming the plugin, the lens and the fix, and the other lenses load; nothing a lens declares stops the daemon.
 

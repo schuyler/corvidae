@@ -2255,7 +2255,7 @@ Two consequences. With appraisal loaded, the stylistic lenses start after
 stage 2 lands (or on the draft's scores), not at `on_agent_response`, so a stage-2 miss (forks off, the exchange left the
 window, an unusable reply) also costs the exchange its lens: fork misses
 are more likely to skip a lens than before. And planning and alignment no
-longer have a 10% rate of their own: they run when their question wins, plus
+longer have a 10% rate of their own: they run when their share beats "none"'s, plus
 their share of the `sample_below_rate` draw.
 
 **Writing a question.** One line, phrased about the exchange the fork just
@@ -2302,15 +2302,17 @@ A lens that ran reports, in a critique record,
 {"critique": {"<name>": {"objections": 1, "sampled": false, "detail": [...]}}}
 ```
 
-(`detail` only when there are objections), merged beside the built-in
-lenses' record `{"critique": {"lenses": [...], "objections": n, ...}}`.
+(`detail` only when there are objections), in the same `critique`
+record as the built-in lenses' keys (`"lenses": [...], "objections": n, ...`)
+when both ran in one fork: one record per run, so OutcomeLogPlugin's last-line-per-key rule
+loses nothing.
 Its objections, tagged `[<name>]`, re-enter through
 `held.hold` as framed CONTEXT at the channel's next turn and wake
 nothing, unless the lens declares `wakes=True` (PRD §3.7 Critique 4): a
 waking lens's objections re-enter at the turn its stub triggers, under the
 same silence default as provenance's, and still wake nothing on a
 critique-origin turn. Each finding names the reply it judges: it opens
-`on your reply «<start of the reply>»: ` (`on your draft «<the draft>»: ` for a
+`on your reply «<start of the reply>»: ` (`on your draft «<start of the draft>»: ` for a
 before-send finding, since the reply may be sent by the time it lands), so
 the agent can tell which of its replies a late finding is about (PRD §3.7
 Critique 4). Redaction doesn't reach

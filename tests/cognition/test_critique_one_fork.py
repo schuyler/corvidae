@@ -182,8 +182,10 @@ async def test_r1_two_lenses_one_fork_waking_split_from_it(tmp_path):
 
 
 async def test_r1_built_in_and_added_lens_keep_their_own_records(tmp_path):
-    """R1: a built-in lens and an added lens in one fork are recorded as
-    today: ``{"critique": {"lenses": [...]}}`` and ``{"critique": {<name>: ...}}``."""
+    """R1: a built-in lens and an added lens in one fork share ONE
+    ``critique`` record: the built-ins' keys beside the added lens's entry
+    (lens names never collide with them, RESERVED_LENS_NAMES), so a reader
+    keeping the last record per key loses neither."""
     agent = FakeForkAgent({"critique"}, text=_keyed(
         predictive="built-in-objection-2m", mine="added-objection-2m"))
     env = await _env_with(tmp_path, agent, _lens("mine"))
@@ -192,11 +194,10 @@ async def test_r1_built_in_and_added_lens_keep_their_own_records(tmp_path):
         assert len(agent.calls) == 1
         records = [r["record"]["critique"] for r in env.recorder.by_source("critique")
                    if r["trace_id"] == "kr1b" and "critique" in r["record"]]
-        assert len(records) == 2
-        built_in = next(r for r in records if "lenses" in r)
-        added = next(r for r in records if "mine" in r)
-        assert built_in["lenses"] == ["predictive"] and built_in["objections"] == 1
-        assert added["mine"]["objections"] == 1 and added["mine"]["sampled"] is False
+        assert len(records) == 1
+        record = records[0]
+        assert record["lenses"] == ["predictive"] and record["objections"] == 1
+        assert record["mine"]["objections"] == 1 and record["mine"]["sampled"] is False
     finally:
         await _teardown(env)
 

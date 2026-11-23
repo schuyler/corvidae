@@ -2845,7 +2845,7 @@ Stage names are opaque to core (it never names cognition plugins).
 | `consolidation` (turn trigger) | window up to `range_end` (cut just past it, #622) | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger, until three consecutive failures back the trigger off for the channel (one warning) until the watermark moves or `memory.idle_consolidate_after` passes (#620); no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
 | `appraisal` (before send) | full window at run time, plus the draft quoted whole in the instruction | inline in `should_send_response`, on a final that is not a decline and has a trace, unless a hold is outstanding on the channel; refuses the draft when peers object, which holds it for one revision | skip with a warning (forks off, originating text unknown, originating rowid out of the window, fork failed or unusable); `on_appraisal_before_send` still fires, with `lenses=None` |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
-| `critique` (every lens chosen by the critique vector, in one fork) | the window at run time, cut at the reply | silent TaskQueue task, enqueued once stage 2 lands; before send, the lenses appraisal's draft scores chose (or the fallback draw), in one fork with no tools, run inline in the output gate, and its objections go back to appraisal (or, in the fallback, to critique's own refusal), which hold the draft for one revision (`critique_before_send`) | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a fork that misses skips every lens in it, one that lacks a lens's key skips that lens alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
+| `critique` (every lens chosen by the critique vector, in one fork) | after the exchange, the window cut at the reply; before send, the whole window | silent TaskQueue task, enqueued once stage 2 lands; before send, the lenses appraisal's draft scores chose (or the fallback draw), in one fork with no tools, run inline in the output gate, and its objections go back to appraisal (or, in the fallback, to critique's own refusal), which hold the draft for one revision (`critique_before_send`) | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a fork that misses skips every lens in it, one that lacks a lens's key skips that lens alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
 Seeding, imports and the `eval_*` scripts have no live window and always
@@ -5116,7 +5116,7 @@ goals-notify extra to load it, and list `goals_notify` under
 `PlanningLensPlugin` (#1067) adds one critique lens, `planning`, through
 `on_critique_init`. It declares an `appraisal_question`, which the appraisal
 fork scores against the other lenses and "none", so it runs when
-its question wins the exchange's critique vector or the
+its share of the exchange's critique vector beats "none"'s or the
 `critique.sample_below_rate` draw picks it (it has no rate of its own;
 `critique.lens.planning.appraisal_question` rewords the question). Its brief asks the fork whether the exchange
 warrants a goal action: `create` (an untracked multi-step commitment),
@@ -5155,7 +5155,7 @@ planning extra to load it, list `corvidae_planning` under
 
 `AlignmentLensPlugin` (#914) adds one critique lens, `alignment`, through
 `on_critique_init`. It declares an `appraisal_question`; the lens runs when
-that question wins the exchange's critique vector or the
+that question's share of the exchange's critique vector beats "none"'s or the
 `critique.sample_below_rate` draw picks it
 (`critique.lens.alignment.appraisal_question` rewords it). When it runs it
 asks the fork model whether the agent's reply violates any of Grice's four

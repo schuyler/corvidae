@@ -1275,7 +1275,7 @@ deciding only what to newly append and in what order.
    (principle 3). Each lens checks for one kind of problem and is offered
    to the appraisal fork with a one-line appraisal question for each
    point at which it runs. At each point the fork scores each offered
-   lens's question, and "none", for the exchange: the critique vector. At each point, every offered lens whose share is
+   lens's question, and "none", for the exchange: the critique vector. Every offered lens whose share is
    higher than "none"'s runs, and "none" wins ties. The
    built-in lenses check for a misread request (predictive), commitments
    the agent cannot keep (constrained) or objections the agent dismissed
@@ -2042,4 +2042,4 @@ record that holds the reasoning.
 | A reply may be checked before it is sent, ending in send or held back for a revision; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | The pre-send check has two outcomes, send or hold back for a revision, and never withholds: the revising turn may still decline, so a lens never silences a reply on its own | §3.7 Output gate 7; #1149; owner, 2026-11-23 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
-| A fork may call tools its plugin declares read-only, meaning no stored state changed and nothing sent beyond the configured model providers; no tool is read-only by default; a critique fork calls them only after the exchange, capped by an operator-set count with a small default; the calls are not offered to the pre-tool-use check, a choice made for speed that the threat model records and that is open to revisiting; every lens above "none" runs at a point, none winning ties; provenance stays a check, not a lens, until tool-using forks are measured | principle 9; §3.5.12; §3.7 Critique 1, 4; §3.8.1; #1190; owner, 2026-11-23 |
+| A fork may call tools its plugin declares read-only, meaning no stored state changed and nothing sent beyond the configured model providers; no tool is read-only by default; a critique fork calls them only after the exchange, capped by an operator-set count with a small default; the calls are not offered to the pre-tool-use check, a choice made for speed that the threat model records and that is open to revisiting; every lens above "none" runs at a point, "none" winning ties; provenance stays a check, not a lens, until tool-using forks are measured | principle 9; §3.5.12; §3.7 Critique 1, 4; §3.8.1; #1190; owner, 2026-11-23 |

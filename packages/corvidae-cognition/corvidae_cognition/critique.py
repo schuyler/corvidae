@@ -1905,9 +1905,9 @@ class CritiquePlugin(CorvidaePlugin):
     ) -> None:
         """Fork the selected lenses once, record what ran, register the findings.
 
-        The built-ins that ran are one ``{"critique": {"lenses", ...}}``
-        record and the added lenses that ran one ``{"critique": {<name>: ...}}``
-        record, as before the fork was shared; nothing is recorded when no lens
+        The built-ins' keys (``lenses``, ...) and each added lens's
+        ``<name>`` entry share one ``{"critique": {...}}`` record;
+        nothing is recorded when no lens
         ran. Added lenses only wait (``_waking_lenses``); the per-lens wake
         split is done in ``_record_and_register``.
 
@@ -1926,32 +1926,31 @@ class CritiquePlugin(CorvidaePlugin):
             if not found:
                 return
             objections = [o for objs in found.values() for o in objs]
-            outcomes: list[dict] = []
-            # The built-in lenses that ran share one record.
+            # One critique record per run, so a reader keeping the last
+            # record per key loses nothing: the built-ins' keys and each
+            # added lens's entry sit side by side (RESERVED_LENS_NAMES keeps
+            # lens names off the built-ins' keys).
+            crit: dict = {}
             built_in = [name for name in found if name in BUILTIN_LENSES]
             if built_in:
                 built_in_objs = [o for name in built_in for o in found[name]]
-                crit: dict = {
+                crit.update({
                     "lenses": built_in,
                     "objections": len(built_in_objs),
                     "sampled_below_threshold": sampled,
-                }
+                })
                 if built_in_objs:
                     crit["detail"] = built_in_objs
-                outcomes.append({"critique": crit})
-            # The added lenses that ran share the other, keyed by name.
-            per_lens: dict[str, dict] = {}
+            # Each added lens that ran: its own entry, keyed by name.
             for name, objs in found.items():
                 if name in BUILTIN_LENSES:
                     continue
                 entry: dict = {"objections": len(objs), "sampled": sampled}
                 if objs:
                     entry["detail"] = objs
-                per_lens[name] = entry
-            if per_lens:
-                outcomes.append({"critique": per_lens})
+                crit[name] = entry
             await self._record_and_register(
-                channel, trace_id, outcomes, objections, wake=False, origin=origin,
+                channel, trace_id, [{"critique": crit}], objections, wake=False, origin=origin,
                 reply_ref=f"on your reply «{quote(response_text)}»: ")
         finally:
             reset_attribution(token)
