@@ -171,6 +171,11 @@ class FakeForkAgent:
     def fork_enabled(self, stage):
         return stage in self.stages
 
+    def waiting_messages(self):
+        """Accepted, unfinished user messages per channel id: none by default
+        (Agent.waiting_messages; critique waits on it, #1190 PR 2)."""
+        return {}
+
     async def view_inputs(self, channel_id):
         """The channel's ViewInputs: a fixed prompt, this agent's budget, the
         system mid role and the reasoning policy bound to ``reasoning_history``."""
@@ -189,21 +194,42 @@ class FakeForkAgent:
         )
 
     async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None,
-                   snapshot=None):
+                   snapshot=None, max_tool_calls=None, yield_to_caller=None):
+        import json
+
         from corvidae.attribution import get_attribution
         from corvidae.fork import ForkResult
 
+        # ``max_tool_calls`` and ``yield_to_caller`` are Agent.fork's (#1190
+        # PR 2); both are recorded as passed (None: the caller left it out) so
+        # a test can assert what a caller asked for.
         self.calls.append({
             "instruction": instruction, "stage": stage, "cut": cut, "extra_body": extra_body,
             "attribution": dict(get_attribution()), "snapshot": snapshot,
+            "max_tool_calls": max_tool_calls, "yield_to_caller": yield_to_caller,
         })
         if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
             raise self.error
+        # A combined critique fork (#1190 PR 2) names each lens in a
+        # "## Lens: <name>" section and expects one key per lens in the reply.
+        # A test that scripts the flat per-lens shape ({"objections": [...]})
+        # has the model give that answer for every lens in the instruction;
+        # text that is not that shape, or an instruction with no lens section
+        # (every other fork), is returned untouched.
+        text = self.text
+        names = re.findall(r"^## Lens: (\w+)$", instruction, re.MULTILINE)
+        if names:
+            try:
+                flat = json.loads(text)
+            except ValueError:
+                flat = None
+            if isinstance(flat, dict) and set(flat) == {"objections"}:
+                text = json.dumps({name: flat for name in names})
         # ``model`` (issue #299) is the model the fork was sent with; passed
         # only when set so tests that ignore it run on any ForkResult.
         extra = {"model": self.model} if self.model is not None else {}
         return ForkResult(
-            text=self.text, message={"role": "assistant", "content": self.text}, **extra
+            text=text, message={"role": "assistant", "content": text}, **extra
         )
 
 

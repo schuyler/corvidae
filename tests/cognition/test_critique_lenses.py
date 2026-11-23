@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.critique import FORKS_OFF_REASON, _JSON_TAIL
+from corvidae_cognition.critique import FORKS_OFF_REASON
 
 from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
@@ -377,8 +377,10 @@ class TestTransformCritiquePrompt:
             by_lens = {n: next(c["instruction"] for c in env.fork_agent.calls
                                if f"LENSBRIEF-{n}:" in c["instruction"])
                        for n in ("mine", "ctl")}
-            # Its own lens's fork got the transformed text; None passed ctl's through.
-            assert by_lens["mine"].endswith("XFORM-MARK")
+            # Its own lens's section got the transformed text (the exchange
+            # and the reply format follow the section, #1190); None passed
+            # ctl's through.
+            assert "XFORM-MARK" in by_lens["mine"]
             assert "XFORM-MARK" not in by_lens["ctl"]
             assert xform.seen.count("mine") == 1
 
@@ -406,11 +408,12 @@ class TestLensIsData:
             assert not callable(getattr(full, f.name)), f.name
         assert dataclasses.is_dataclass(Lens)
 
-    async def test_fork_prompt_override_replaces_the_brief_keeps_the_tail(
+    async def test_fork_prompt_override_replaces_the_brief_only(
         self, tmp_path,
     ):
-        """R3: critique.lens.<name>.fork_prompt replaces the brief; the JSON
-        tail stays."""
+        """R3 as #1190 changes it (was: replaces the brief, keeps the JSON
+        tail): critique.lens.<name>.fork_prompt replaces the brief in the
+        lens's section; the reply format is critique's, once per fork."""
         async with lens_env(
             tmp_path, _lens("mine"),
             config={"critique": {"lens": {"mine": {"fork_prompt": "OPERATOR-BRIEF-9z"}}}},
@@ -418,7 +421,8 @@ class TestLensIsData:
             await _judged_turn(env, "kr3", stage2=_wins("mine"))
             [call] = [c for c in env.fork_agent.calls if "OPERATOR-BRIEF-9z" in c["instruction"]]
             assert "LENSBRIEF-mine:" not in call["instruction"]
-            assert _JSON_TAIL in call["instruction"]
+            assert "## Lens: mine\nOPERATOR-BRIEF-9z" in call["instruction"]
+            assert call["instruction"].lower().count("single json object") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -65,7 +65,8 @@ async def _turn(env, trace_id, vector, *, origin="user", response_text=ASKS):
 
 class TestChosenByTheVector:
     async def test_proactivity_runs_when_it_tops_the_vector(self, tmp_path):
-        """R1: proactivity on top of the vector runs, alone."""
+        """R1: proactivity above "none" in the vector runs (with the other
+        selected lens, in the one fork, #1190)."""
         env = await _env(tmp_path, chat_text=VERDICT)
         try:
             await _turn(env, "kp1", {"proactivity": 0.6, "predictive": 0.3, "none": 0.1},
@@ -75,7 +76,8 @@ class TestChosenByTheVector:
             await _teardown(env)
 
     @pytest.mark.parametrize("vector", [
-        {"predictive": 0.7, "proactivity": 0.2, "none": 0.1},
+        # Proactivity's share is below "none"'s (any lens above it would run, #1190 S1).
+        {"predictive": 0.7, "proactivity": 0.05, "none": 0.25},
         {"proactivity": 0.1, "none": 0.9},
     ], ids=["another-lens-wins", "none-wins"])
     async def test_a_permission_question_alone_runs_no_proactivity_fork(

@@ -180,11 +180,11 @@ async def test_chosen_before_send_lens_runs_inline_and_returns_its_objections(tm
         # Both records, under their own keys.
         outcomes = await _read_outcomes(env.recorder, "kb9")
         before = outcomes["critique_before_send"]
-        assert before["lens"] == "proactivity"
+        assert before["lenses"] == ["proactivity"]
         assert before["objections"] == 1
         assert before["sampled"] is False
         selection = outcomes["lens_selection_before_send"]
-        assert selection["lens"] == "proactivity"
+        assert selection["lenses"] == ["proactivity"]
         assert selection["sampled"] is False
     finally:
         await _teardown(env)

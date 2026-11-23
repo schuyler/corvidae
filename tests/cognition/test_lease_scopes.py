@@ -50,9 +50,9 @@ def _is_consolidation_key(key: object) -> bool:
         and key.startswith(CONSOLIDATION_KEY_PREFIX)
         and len(key) > len(CONSOLIDATION_KEY_PREFIX)
     )
-CRITIQUE_VERDICT = json.dumps(
-    {"objections": [{"claim": "it was Tuesday", "objection": "you said Monday"}]}
-)
+# The combined critique fork answers one key per lens (#1190).
+CRITIQUE_VERDICT = json.dumps({"predictive": {"objections": [
+    {"claim": "it was Tuesday", "objection": "you said Monday"}]}})
 RUBRIC_REPLY = json.dumps({"importance": 0.6})
 DIALOG = [
     ("user", "my weather station keeps dropping wifi"),
@@ -159,7 +159,7 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
             (DEFAULT_FORK_PROMPTS["predictive"], CRITIQUE_VERDICT),
             (DEFAULT_CONSOLIDATION_FORK_PROMPT, CONSOLIDATION_JSON),
         ):
-            if isinstance(last, str) and last.startswith(prompt):
+            if isinstance(last, str) and prompt in last:
                 return _make_text_response(reply)
         return _make_text_response("ok")
 
@@ -210,9 +210,11 @@ async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCap
     await env.critique.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=7, text="when is the meeting?", annotations={})
 
-    await env.critique._run_critique(
-        env.channel, "k", "when is the meeting?", "It was Tuesday, as you said.",
-        ["predictive"], False, origin=None)
+    # The before-send point runs the lens fork inline through the public hook
+    # (the idle runner this called before was folded into the one fork, #1190).
+    await env.critique.on_appraisal_before_send(
+        channel=env.channel, trace_id="k", text="It was Tuesday, as you said.",
+        annotations={}, lenses={"predictive": 1.0})
 
     rows = await usage_rows(env.db)
     assert [key for stage, key, _m in rows if stage == "critique"] == [env.channel.id]

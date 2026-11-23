@@ -197,17 +197,19 @@ class TestSelection:
         ("mine", "LENSBRIEF-mine:"),                      # a plugin lens
         ("constrained", "[Self-critique: constrained]"),  # a built-in lens
     ])
-    async def test_top_of_the_vector_runs_alone(
+    async def test_every_lens_above_none_runs_in_one_fork(
         self, tmp_path, winner, marker,
     ):
-        """T1: the lens with the highest share runs, and only it."""
+        """T1 as #1190 S1 changes it (was: the top lens runs alone): every
+        lens whose share beats "none"'s is selected, and the selected lenses
+        share one fork; a lens at or below "none" does not run."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt1", {winner: 0.6, "predictive": 0.3, "none": 0.1})
-            # Exactly one lens forked and it is the winner; the runner-up
-            # predictive lens did not run.
-            assert [marker in c["instruction"] for c in env.fork_agent.calls] == [True]
-            assert _marker_runs(env, "[Self-critique: predictive]") == 0
+            # One fork carries both lenses above none.
+            assert len(env.fork_agent.calls) == 1
+            assert _marker_runs(env, marker) == 1
+            assert _marker_runs(env, "[Self-critique: predictive]") == 1
         finally:
             await _teardown(env)
 
@@ -219,27 +221,28 @@ class TestSelection:
         self, tmp_path, vector,
     ):
         """T2: "none" winning (or tying) runs nothing; lens_selection is
-        recorded with no ``lens`` key (RNG above sample_below_rate)."""
+        recorded with no ``lenses`` key (RNG above sample_below_rate)."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt2", vector)
             assert env.fork_agent.calls == []
             selection = (await _read_outcomes(env.recorder, "kt2"))["lens_selection"]
-            assert "lens" not in selection
+            assert "lenses" not in selection
             assert selection["sampled"] is False
             assert selection["basis"] == "none"
         finally:
             await _teardown(env)
 
-    async def test_the_earliest_offered_lens_wins_a_tie_between_lenses(self, tmp_path):
-        """T1 (tie among lenses): the earlier lens in offer order wins; the
-        built-ins come before an added lens."""
+    async def test_lenses_share_one_fork_in_offer_order(self, tmp_path):
+        """T1 (was: the earliest lens wins a tie between lenses): two lenses
+        tied above "none" are both selected, in one fork, in offer order: the
+        built-ins before an added lens."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt1b", {"mine": 0.4, "predictive": 0.4, "none": 0.2})
-            assert [
-                "[Self-critique: predictive]" in c["instruction"]
-                for c in env.fork_agent.calls] == [True]
+            [call] = env.fork_agent.calls
+            text = call["instruction"]
+            assert text.index("[Self-critique: predictive]") < text.index("LENSBRIEF-mine:")
         finally:
             await _teardown(env)
 
@@ -584,13 +587,14 @@ class TestStage2Offer:
 
 class TestChoiceRecorded:
     async def test_the_chosen_lens_is_recorded(self, tmp_path):
-        """T8: lens_selection holds the lens, sampled false and the basis."""
+        """T8: lens_selection holds the lenses (a list, #1190), sampled false
+        and the basis."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt8", {"mine": 0.7, "none": 0.3})
             outcomes = await _read_outcomes(env.recorder, "kt8")
             assert outcomes["lens_selection"] == {
-                "lens": "mine", "sampled": False, "basis": "vector"}
+                "lenses": ["mine"], "sampled": False, "basis": "vector"}
         finally:
             await _teardown(env)
 
@@ -681,7 +685,7 @@ class TestSampling:
             outcomes = await _read_outcomes(env.recorder, "kt9")
             assert outcomes["critique"]["mine"]["sampled"] is True
             selection = outcomes["lens_selection"]
-            assert (selection["lens"], selection["sampled"]) == ("mine", True)
+            assert (selection["lenses"], selection["sampled"]) == (["mine"], True)
         finally:
             await _teardown(env)
 
