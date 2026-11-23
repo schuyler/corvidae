@@ -1395,11 +1395,7 @@ written at admission or rejection and merged in place by every writer
 atomically. Rejected messages keep their row
 with a null row id.
 
-**Calibration and corrections.** The operator's calibration command reports rates per
-gate from the outcome log and suggests threshold changes; the command
-itself never writes them. Closed-loop fitting, where the agent applies
-the changes, is a capability the framework can permit (principles 7 and
-15). A user correction in conversation ("no, I told you X") produces a
+**Corrections.** A user correction in conversation ("no, I told you X") produces a
 correction record, and the operator's corrections-export command emits a curatable
 fixture for the retrieval eval set.
 
@@ -1705,7 +1701,7 @@ design, not requirement. The requirements are outcomes:
    configuration may load; no code loads them on its own. Persona is
    prompt material, never architecture.
 6. The daemon, the terminal client, the ACP agent, scaffolding,
-   redaction, calibration and corrections export are subcommands of one
+   redaction and corrections export are subcommands of one
    command, and plugins can add their own.
 7. Dependencies are pinned in a committed lock file, including the
    plugin framework's git commit, and CI installs from it exactly.
