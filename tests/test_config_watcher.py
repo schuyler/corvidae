@@ -469,7 +469,7 @@ async def test_config_watcher_handles_invalid_yaml(tmp_path, caplog):
     assert error_records, "Invalid YAML must produce an ERROR log"
 
 
-async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
+async def test_a_non_string_llm_profile_key_skips_the_reload_naming_it(tmp_path, caplog):
     """R471.2: a reload carrying a non-string `llm:` key changes nothing.
 
     YAML turns an unquoted `2:` into an int. That used to raise a TypeError
