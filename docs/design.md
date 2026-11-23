@@ -4283,16 +4283,17 @@ channel answers unaddressed — the transport default (`discord.require_mention:
 false`) or a `discord.channels` entry with `require_mention: false` — because
 the intent is per client, not per channel. The mention check itself is per
 channel: a channel that answers unaddressed skips it and the allowlist is the
-only gate there, while every other channel stays mention-only. The bot's
-mention token is stripped when present either way.
+only gate there, while every other channel stays mention-only. A mention of
+the bot is named in the text either way: `<@id>` reads as the bot's `@name`.
 
 **Inbound filtering.** A message is dropped if its author is a bot (this
 covers the bot's own messages and other bots', so two bots cannot talk each
 other into a loop). In DMs every message from a human is processed. In
 guild channels and threads the bot must itself appear in
 `message.mentions`. `@everyone`, `@here`, and role pings do not count, even
-though discord.py's `mentioned_in` would accept some of them. The bot's
-mention token (`<@id>` or `<@!id>`) is stripped and the text is trimmed.
+though discord.py's `mentioned_in` would accept some of them. Every
+mention token (`<@id>` or `<@!id>`) reads as the mentioned user's `@name`,
+and the text is trimmed.
 
 **Attachments.** Images attached to a message from an allowlisted sender are
 downloaded after the allowlist check (never before it), streamed under

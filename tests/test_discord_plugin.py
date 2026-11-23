@@ -842,6 +842,18 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
+    async def test_a_mention_without_a_name_reads_as_you(self):
+        """#1215: a mention Discord gave no name for still reads as a name."""
+        h = await _start_plugin()
+        try:
+            await _deliver(
+                h,
+                make_message(f"<@{BOT_ID}> hi", mentions=[SimpleNamespace(id=BOT_ID)]),
+            )
+            assert _delivered(h) == ["@you hi"]
+        finally:
+            await h.plugin.on_stop()
+
     async def test_a_mention_mid_sentence_keeps_its_spaces(self):
         """#1215: naming the token leaves the sentence, and its spaces, intact."""
         h = await _start_plugin()

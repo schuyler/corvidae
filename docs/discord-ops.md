@@ -163,7 +163,8 @@ bot, and it will not tell them so.
 - **DMs:** every message from an allowlisted user is answered.
 - **Servers and threads:** by default the bot answers only messages that
   @-mention it directly. `@everyone`, `@here`, and role pings do not count.
-  The mention is stripped before the model sees the text. Messages that do
+  The mention reaches the model as the bot's `@name`, so the text still says
+the message was addressed to it. Messages that do
   not mention it are not even delivered with content, and are ignored:
   the kernel never sees them, so nothing is appraised or stored. Each drop
   leaves one DEBUG line naming the channel (and the parent, for a thread)
