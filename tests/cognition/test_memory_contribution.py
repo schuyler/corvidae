@@ -1,6 +1,6 @@
 """RED tests for #1176: memory's retrieval as a before-compose contribution.
 
-Spec: .claude/plans/1176-gather-and-held-text.md, section 6 (callers, memory)
+Spec: docs/1176-gather-and-held-text-design.md, section 6 (callers, memory)
 and requirements R2.2, R3.9, R5.4. Memory's retrieval moves out of
 ``before_agent_turn`` into ``before_compose``, which returns a
 ``Contribution("memory", lines, keys)``. What the store then admitted is
@@ -96,7 +96,8 @@ async def build_env(config: dict | None = None, *, with_spy_funnel: bool = False
     conv = ContextWindow(channel.id)
     channel.conversation = conv
     return SimpleNamespace(
-        memory=memory, channel=channel, conv=conv, db=db, recorder=recorder, spy=spy
+        memory=memory, channel=channel, conv=conv, db=db, recorder=recorder, spy=spy,
+        pm=pm,
     )
 
 
@@ -167,7 +168,10 @@ class TestContribution:
             env.db, env.channel.id, "kestrel moved the rain gauge to the north fence"
         )
         env.conv.append({"role": "user", "content": "where is the rain gauge?"})
-        await env.memory.before_agent_turn(
+        # Through the hook, not the method: memory may drop before_agent_turn
+        # entirely once retrieval moves; the criterion is only that the turn's
+        # before_agent_turn appends and offers nothing.
+        await env.pm.ahook.before_agent_turn(
             channel=env.channel, trace_id="trace-1", annotations={}
         )
         # Nothing in the window, nothing offered to a funnel, nothing logged:

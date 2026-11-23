@@ -787,3 +787,22 @@ criterion. They are drawn from the requirements table and §1-§6.
 - **M5.** Raw pieces are sized to `memory.entry_target_tokens`; memory reads no `funnel` config.
 - **R1.** `RecallSourceMixin.before_compose` returns the rendered hits for a plain user turn and `None` when gated; markdown recall works through it; `on_funnel_ingest` is gone.
 - **D1.** Goals has no `funnel` dependency. Recall sources have no optional `funnel` dependency. Critique declares `held`.
+
+## Red review log
+
+Round 1 (cold reviewer, at `1609e35`): FAIL, 2 critical and 3 important.
+
+| Finding | Disposition |
+|---|---|
+| C-1. F2's non-once test sizes b past the whole budget | fixed: b fits the budget alone but not after a (13/28/19 tokens, budget 32) |
+| C-2. F5's window-cap tests exceed the 512 default budget | fixed: those configs set a high `default_budget` |
+| I-1. M1 calls `memory.before_agent_turn` directly | fixed: through `pm.ahook.before_agent_turn` |
+| I-2. H12's count match passes on "#318" | fixed: whole-number match excluding `#NNN` |
+| I-3. Superseded tests neither migrated nor retired | reclassified: Red only adds failing tests. Green migrates or retires every test the change breaks (rule 5, "no dangling tests"); the list is in PR 1212's handoff comment |
+| Cosmetic: funnel test calls the hookimpl directly (plain vs wrapper) | fixed: it goes through `pm.ahook.transform_held_admission` |
+| Cosmetic: docstrings cite `.claude/plans/` | fixed |
+| Cosmetic: empty `memory.py` allowlist entry | fixed: removed |
+| Cosmetic: `STUB_ANNOTATION` named by the tests only | kept: the tests fix the name, and Green adopts it |
+| Cosmetics: `_drain_late_checks` assertion; strict funnel-string ban; H13 re-asserting the metric; H3 origin equal to source; G4 blind to real-time sleeps | kept: non-blocking |
+| Edge: the store fixture has no `tools` plugin | deferred to Green: stub `_can_read` if the implementation calls it on every hold |
+| Upstream: no per-channel allowance test at before compose; wrapper vs plain policy | noted |

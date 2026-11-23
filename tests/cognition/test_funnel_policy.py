@@ -1,6 +1,6 @@
 """RED tests for #1176: the funnel as the held-text admission policy plugin.
 
-Spec: .claude/plans/1176-gather-and-held-text.md, section 5 (the funnel becomes
+Spec: docs/1176-gather-and-held-text-design.md, section 5 (the funnel becomes
 the policy plugin) and the requirements table (R5.1 to R5.3). The kernel's
 ``held`` plugin hands policy every due batch in one ``transform_held_admission``
 call and appends whatever policy admits; the funnel keeps dedupe, budgets,
@@ -24,7 +24,6 @@ collect.
 """
 
 import asyncio
-import inspect
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -121,13 +120,12 @@ def batch(
 
 
 async def offer(env: Env, batches: list[Any]) -> list[Any]:
-    # Make the kernel's call: every due batch in one go, plans back. The hook
-    # may be sync or async; await it when it is awaitable.
-    result = env.funnel.transform_held_admission(
+    # Make the kernel's call: every due batch in one go, plans back, through
+    # the hook so the test holds whether the funnel's implementation is a
+    # plain hookimpl or a wrapper=True one.
+    result = await env.pm.ahook.transform_held_admission(
         channel=env.channel, conversation=env.conv, batches=batches
     )
-    if inspect.isawaitable(result):
-        result = await result
     return list(result)
 
 
@@ -182,9 +180,12 @@ class TestBudget:
     @staticmethod
     def sized() -> tuple[list[str], int]:
         # Entries a, b, c with b too big once a is in: budget fits a and c only.
-        a, b, c = line("aaa", 6), line("bbb", 30), line("ccc", 6)
-        assert count_tokens(b) > count_tokens(c)
-        return [a, b, c], count_tokens(a) + count_tokens(c)
+        # b must fit the budget on its own, or the funnel would drop it as
+        # "can never fit" even on a pushed batch (design §5).
+        a, b, c = line("aaa", 6), line("bbb", 9), line("ccc", 6)
+        budget = count_tokens(a) + count_tokens(c)
+        assert count_tokens(c) < count_tokens(b) <= budget
+        return [a, b, c], budget
 
     async def test_once_batch_admits_in_order_and_drops_what_does_not_fit(self):
         entries, budget = self.sized()
@@ -307,7 +308,8 @@ class TestConfigValidation:
     async def test_invalid_window_budget_values_warn_and_leave_the_source_uncapped(self, caplog):
         bad = {"memory": "lots", "goals": True, "critique": -1, "notes": 1.5}
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
-            env = await make({"funnel": {"window_budgets": bad}})
+            # A high default budget, so only a cap could keep the big entry out.
+            env = await make({"funnel": {"window_budgets": bad, "default_budget": 100_000}})
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         # The message names the key, the rejected value and what is accepted.
         for source, value in bad.items():
@@ -324,7 +326,8 @@ class TestConfigValidation:
 
     async def test_non_mapping_window_budgets_warns_and_is_ignored(self, caplog):
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
-            env = await make({"funnel": {"window_budgets": [4096]}})
+            # A high default budget, so only a cap could keep the big entry out.
+            env = await make({"funnel": {"window_budgets": [4096], "default_budget": 100_000}})
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any(
             "funnel.window_budgets" in m and "[4096]" in m and "mapping" in m
