@@ -15,8 +15,6 @@ import logging
 from pathlib import Path
 
 import pytest
-from fake_clock import install_kernel_clock
-from webhook_notify import WebhookNotifyPlugin
 
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry
@@ -26,6 +24,9 @@ from corvidae.provenance import frame
 from corvidae.spill import SPILL_NAME, NotificationSpill
 from corvidae.tool import Tool
 from corvidae.tool_collection import ToolCollectionPlugin
+from fake_clock import install_kernel_clock
+
+from webhook_notify import WebhookNotifyPlugin
 
 TARGETS = {"github": ["irc:#a", "irc:#b"], "siri": ["irc:#c"]}
 

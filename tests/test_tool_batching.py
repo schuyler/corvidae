@@ -12,14 +12,15 @@ via on_notify → serial queue → _process_queue_item. The fix ensures that:
 import asyncio
 from unittest.mock import ANY, AsyncMock, MagicMock
 
+import pytest
+
+from corvidae.outbound import OutboundMessage
 from helpers import build_plugin_and_channel, drain, sent
 from llm_response_fixtures import (
     _make_text_response,
-    _make_tool_call,
     _make_tool_call_response,
+    _make_tool_call,
 )
-
-from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
 
 

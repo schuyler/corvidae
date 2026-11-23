@@ -11,13 +11,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
-from helpers import build_plugin_and_channel, drain, sent_texts
 
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import hookimpl
 from corvidae.llm import LLMHTTPError
 from corvidae.llm_plugin import LLMPlugin
+
 from corvidae.outbound import OutboundMessage
-from corvidae.trace import mint_trace_id
+from helpers import build_plugin_and_channel, drain, sent_texts
 
 NOT_LOADED_BODY = json.dumps({
     "error": {"code": 400, "message": "model is not loaded", "type": "invalid_request_error"}

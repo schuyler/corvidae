@@ -11,22 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-from helpers import stub_llm_config
-from llm_response_fixtures import (
-    _make_text_response,
-    _make_tool_call,
-    _make_tool_call_response,
-)
 
+from corvidae.trace import mint_trace_id
+from corvidae.clock import Clock
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.clock import Clock
 from corvidae.compaction import CompactionPlugin
 from corvidae.hooks import (
     TransportPlugin,
@@ -43,7 +38,13 @@ from corvidae.task import TaskPlugin
 from corvidae.thinking import ThinkingPlugin
 from corvidae.tools import FileToolsPlugin, ShellToolPlugin, WebToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
-from corvidae.trace import mint_trace_id
+
+from helpers import stub_llm_config
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+)
 
 pytestmark = pytest.mark.timeout(30)
 

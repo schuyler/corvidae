@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from evals.metrics import mrr, recall_at_k, tokens_of
 
 FIXTURE_PATH = (

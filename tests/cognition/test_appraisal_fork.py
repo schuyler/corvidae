@@ -8,12 +8,12 @@ import json
 import logging
 
 import pytest
-from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT, STAGE2_EXTRA_BODY
-from helpers import FakeForkAgent, window_of
 
+from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT, STAGE2_EXTRA_BODY
 from corvidae.fork import ForkRefused
 
-from .test_appraisal_stage2 import _read_appraisal, _teardown, build_env
+from helpers import FakeForkAgent, window_of
+from .test_appraisal_stage2 import VALID_STAGE2_JSON, _read_appraisal, _teardown, build_env
 
 FORK_JSON = json.dumps({"valence": 0.1, "stakes": 0.2, "ambiguity": 0.3,
                         "commitment_density": 0.4, "novelty": 0.6, "correction": False})

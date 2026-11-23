@@ -7,6 +7,14 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from corvidae.agent import QueueItem, QueueItemRole
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.llm_plugin import LLMPlugin
+from corvidae.queue import SerialQueue
+from corvidae.task import Task, TaskQueue
+from corvidae.tool import ToolContext, ToolRegistry
+
 from helpers import (
     KERNEL_LLM_STAGES,
     build_plugin_and_channel,
@@ -15,13 +23,6 @@ from helpers import (
     stub_llm_config,
 )
 
-from corvidae.agent import QueueItem, QueueItemRole
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.hooks import create_plugin_manager, hookimpl
-from corvidae.llm_plugin import LLMPlugin
-from corvidae.queue import SerialQueue
-from corvidae.task import Task, TaskQueue
-from corvidae.tool import ToolContext, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers

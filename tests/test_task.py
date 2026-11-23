@@ -4,13 +4,15 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import AgentSpec, create_plugin_manager
+
 from corvidae.task import Task, TaskPlugin, TaskQueue
+
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -740,6 +742,7 @@ class TestCompletedDeque:
 
     async def test_completed_deque_bounded_at_100(self):
         """After 101+ completions, only the last 100 entries are retained."""
+        import collections
         queue = TaskQueue()
         channel = _make_channel()
         all_done = asyncio.Event()
@@ -773,6 +776,7 @@ class TestCompletedDeque:
 
     async def test_completed_deque_retains_most_recent(self):
         """After overflow, the deque contains the most recent entries (not the oldest)."""
+        import collections
         queue = TaskQueue()
         channel = _make_channel()
         all_done = asyncio.Event()

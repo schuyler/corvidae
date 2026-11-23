@@ -16,12 +16,12 @@ import json
 import logging
 from unittest.mock import MagicMock
 
-from helpers import KERNEL_LLM_STAGES, build_plugin_and_channel, stub_llm_config
-
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.task import Task
 from corvidae.tool import ToolRegistry
 from corvidae.tool_collection import ToolCollectionPlugin
+
+from helpers import KERNEL_LLM_STAGES, build_plugin_and_channel, stub_llm_config
 
 CONFIG = {
     "limits": {"max_waiting": 2},
@@ -48,10 +48,9 @@ async def test_task_start_refused_but_tool_result_accepted_at_max_waiting(
     """At waiting work == max_waiting the subagent tool returns the refusal
     text and logs a warning; an on_notify tool result at that depth is
     enqueued and processed."""
+    from corvidae.tools.subagent import SubagentPlugin
     from corvidae_core_periphery.limits import LimitsPlugin
     from fake_clock import install_kernel_clock
-
-    from corvidae.tools.subagent import SubagentPlugin
 
     agent, channel, db = await build_plugin_and_channel()
     pm = agent.pm

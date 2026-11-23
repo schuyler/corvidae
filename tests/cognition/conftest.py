@@ -1,9 +1,9 @@
 """Shared fixtures for the cognition tests."""
 
 import pytest
-from helpers import KERNEL_LLM_STAGES
 
 from corvidae.llm_plugin import LLMPlugin
+from helpers import KERNEL_LLM_STAGES
 
 #: Stages the memory plugin registers through register_llm_stages.
 COGNITION_LLM_STAGES = {

@@ -152,7 +152,7 @@ class CorvidaeAcpAgent:
         **kwargs: Any,
     ) -> Any:
         """Enqueue user text via on_message and wait for the turn to finish."""
-        from acp import RequestError
+        from acp import PromptResponse, RequestError
 
         if self._plugin is None or self._plugin._registry is None:
             raise RuntimeError("CorvidaeAcpAgent.prompt requires an AcpPlugin with registry")
@@ -220,8 +220,8 @@ class CorvidaeAcpAgent:
         **kwargs: Any,
     ) -> Any:
         """Restore ``acp:<sessionId>`` from sessions.db and replay history (A16)."""
-        from acp import LoadSessionResponse, update_agent_message_text, update_user_message_text
-
+        from acp import LoadSessionResponse
+        from acp import update_agent_message_text, update_user_message_text
         from corvidae.context import MessageType
 
         channel, history = await self._reattach_session(
@@ -754,7 +754,7 @@ class AcpPlugin(TransportPlugin):
         args_summary, result_summary = event.args_summary, event.result_summary
         from uuid import uuid4
 
-        from acp import start_tool_call, text_block, tool_content, update_tool_call
+        from acp import start_tool_call, tool_content, text_block, update_tool_call
 
         key = (channel.id, tool_name)
         if status == "dispatched":

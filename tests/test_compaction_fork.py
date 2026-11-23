@@ -6,19 +6,17 @@ view call (#380, #388, PRD §3.3.2, §3.8.5)."""
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from helpers import (
-    FakeForkAgent,
-    RecordingClient,
-    build_plugin_and_channel,
-    collect_llm_stages,
-    recording_llm_plugin,
-)
-from llm_response_fixtures import _make_text_response
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType
 from corvidae.fork import ForkRefused, build_fork_prompt
 from corvidae.hooks import create_plugin_manager, hookimpl
+
+from helpers import (
+    FakeForkAgent, RecordingClient, build_plugin_and_channel, collect_llm_stages,
+    recording_llm_plugin,
+)
+from llm_response_fixtures import _make_text_response
 
 MAX_TOKENS = 20000
 

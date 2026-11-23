@@ -6,9 +6,10 @@ All tests in this file are expected to FAIL against the current codebase
 is applied.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
+
 
 # ---------------------------------------------------------------------------
 # 1. ToolCollectionPlugin class exists and can be imported
@@ -48,8 +49,8 @@ def test_tool_collection_plugin_init():
 # ---------------------------------------------------------------------------
 
 def test_tool_collection_plugin_get_registry_returns_registry():
-    from corvidae.tool import ToolRegistry
     from corvidae.tool_collection import ToolCollectionPlugin
+    from corvidae.tool import ToolRegistry
     pm = MagicMock()
     plugin = ToolCollectionPlugin(pm)
     registry = ToolRegistry()
@@ -113,8 +114,8 @@ async def test_tool_collection_plugin_defaults_max_result_chars():
 
 @pytest.mark.asyncio
 async def test_tool_collection_plugin_on_start_builds_registry():
-    from corvidae.tool import Tool, ToolRegistry
     from corvidae.tool_collection import ToolCollectionPlugin
+    from corvidae.tool import Tool, ToolRegistry
 
     async def my_test_tool(x: str) -> str:
         """A test tool."""
@@ -310,7 +311,6 @@ async def test_agent_start_copies_call_timeouts():
     from unittest.mock import NonCallableMagicMock
 
     from helpers import build_plugin_and_channel
-
     from corvidae.llm_plugin import LLMPlugin
     from corvidae.tool import ToolTimeouts
     from corvidae.tool_collection import ToolCollectionPlugin

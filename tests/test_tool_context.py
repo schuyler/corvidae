@@ -2,10 +2,12 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-from llm_response_fixtures import _make_tool_call, _make_tool_call_response
-
-from corvidae.tool import ToolContext, tool_to_schema
 from corvidae.tools.subagent import run_agent_loop
+from corvidae.tool import tool_to_schema
+from corvidae.tool import ToolContext
+
+from llm_response_fixtures import _make_tool_call_response, _make_tool_call
+
 
 # ---------------------------------------------------------------------------
 # ToolContext injection tests

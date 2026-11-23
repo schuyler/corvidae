@@ -32,13 +32,16 @@ or AttributeError/behavioral assertion failures for the `agent.py` step-7 and
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from corvidae.trace import mint_trace_id
+from corvidae.agent import Agent, FRAMEWORK_KEYS
+from corvidae.channel import Channel, ChannelConfig
+from corvidae.turn import AgentTurnResult
+
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
 
-from corvidae.agent import FRAMEWORK_KEYS, Agent
-from corvidae.channel import Channel, ChannelConfig
-from corvidae.trace import mint_trace_id
-from corvidae.turn import AgentTurnResult
 
 # ---------------------------------------------------------------------------
 # Helpers (local to this file — no conftest/shared-fixture edits)

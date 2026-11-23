@@ -3,9 +3,9 @@
 import logging
 import warnings
 
-import aiosqlite
 import pytest
 import pytest_asyncio
+import aiosqlite
 
 # Autouse: closes aiosqlite connections a failing test left open, which would
 # otherwise hang pytest at exit (GitHub issue #64).
@@ -122,6 +122,7 @@ async def mcp_url(mcp_request_log):
     import asyncio
 
     import uvicorn
+
     from mcp_http_server import TOKEN, bearer_app
 
     # Port 0: the OS picks a free port at bind time, so there is no race.

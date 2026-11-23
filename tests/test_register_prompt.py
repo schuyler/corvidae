@@ -15,8 +15,6 @@ from importlib import resources
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from helpers import build_plugin_and_channel, drain
-from llm_response_fixtures import _make_text_response
 
 from corvidae.agent import mint_trace_id
 from corvidae.channel import (
@@ -32,6 +30,9 @@ from corvidae.channels.discord import DiscordPlugin
 from corvidae.channels.signal import SignalPlugin
 from corvidae.channels.web import WebPlugin
 from corvidae.hooks import AgentSpec, hookimpl
+
+from helpers import build_plugin_and_channel, drain
+from llm_response_fixtures import _make_text_response
 
 AGENT = {"system_prompt": "AGENT", "max_turns": 10, "max_context_tokens": 8000}
 

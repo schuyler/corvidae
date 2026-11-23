@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -834,7 +835,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.plugin_loader_fixtures import entry_points_for, ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False
@@ -961,7 +962,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.plugin_loader_fixtures import entry_points_for, ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         config_data = {
             "llm": {
@@ -1009,7 +1010,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.plugin_loader_fixtures import entry_points_for, ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         # Config with no 'plugins' key at all
         config_data = {

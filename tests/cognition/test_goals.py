@@ -15,16 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from corvidae_cognition.funnel import FunnelPlugin
-from corvidae_cognition.goals import GoalsPlugin, goals_command
-from corvidae_cognition.memory import MemoryPlugin
-from fake_clock import install_kernel_clock
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import ContextWindow
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
+from corvidae_cognition.funnel import FunnelPlugin
+from corvidae_cognition.goals import GoalsPlugin, goals_command
+from corvidae_cognition.memory import MemoryPlugin
+from fake_clock import install_kernel_clock
 
 DIMS = 32
 

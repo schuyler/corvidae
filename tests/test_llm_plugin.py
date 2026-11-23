@@ -12,7 +12,9 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 from helpers import stub_llm_config
+
 
 # ---------------------------------------------------------------------------
 # 1. LLMPlugin can be imported from corvidae.llm_plugin
@@ -85,8 +87,8 @@ def test_llm_plugin_get_client_without_stage_returns_main_client():
 
 def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
     """_create_client(cfg, profile) must return an LLMClient constructed from cfg."""
-    from corvidae.llm import LLMClient
     from corvidae.llm_plugin import LLMPlugin
+    from corvidae.llm import LLMClient
 
     cfg = {
         "base_url": "http://localhost:8080",
@@ -110,8 +112,8 @@ def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
 
 def test_llm_plugin_create_client_uses_defaults_for_optional_params():
     """_create_client(cfg) uses sensible defaults when optional keys are absent."""
-    from corvidae.llm import LLMClient
     from corvidae.llm_plugin import LLMPlugin
+    from corvidae.llm import LLMClient
 
     cfg = {
         "base_url": "http://localhost:8080",
@@ -459,6 +461,7 @@ class TestApiKeyFromEnvironment:
 
     async def test_401_reply_does_not_contain_key(self, monkeypatch, caplog):
         """K3: the 401 reply names the key but never its value."""
+        from corvidae.llm_plugin import LLMPlugin
 
         monkeypatch.setenv(_KEY_VAR, _SECRET)
         plugin = await _start_plugin(_as_llm({"main": _profile_cfg("${" + _KEY_VAR + "}")}))
@@ -732,9 +735,9 @@ def _fake_ep(name, dist_name):
 def test_entry_point_duplicates_fail_loudly(monkeypatch):
     """R6: two distributions claiming one entry-point name is a Config
     error naming the point, both distributions, and the remedy."""
-    import importlib.metadata
-
     from corvidae import runtime
+
+    import importlib.metadata
 
     monkeypatch.setattr(
         importlib.metadata, "entry_points", lambda group="corvidae": [
@@ -752,9 +755,9 @@ def test_entry_point_duplicates_fail_loudly(monkeypatch):
 
 
 def test_entry_point_no_duplicates_passes(monkeypatch):
-    import importlib.metadata
-
     from corvidae import runtime
+
+    import importlib.metadata
 
     monkeypatch.setattr(
         importlib.metadata, "entry_points", lambda group="corvidae": [

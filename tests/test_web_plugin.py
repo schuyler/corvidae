@@ -43,10 +43,20 @@ from unittest.mock import MagicMock
 import aiohttp
 import pluggy
 import pytest
-from aiohttp import web
 from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
+from aiohttp import web
 
 from corvidae.channel import Channel, ChannelRegistry
+from corvidae.hooks import (
+    CorvidaePlugin,
+    _check_hook_arg_binding,
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    resolve_reject_wins,
+)
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
+from corvidae.persistence import PersistencePlugin
 
 # The plugin under test does not exist until the green phase; this import
 # failing is the red phase's expected failure.
@@ -58,21 +68,7 @@ from corvidae.channels.web import (
     _normalise_origin,
     _resolve_token,
 )
-from corvidae.hooks import (
-    CorvidaePlugin,
-    _check_hook_arg_binding,
-    create_plugin_manager,
-    hookimpl,
-    install_plugin_hookspecs,
-    resolve_reject_wins,
-)
-from corvidae.outbound import (
-    OutboundMessage,
-    OutboundProgress,
-    OutboundThinking,
-    OutboundToolStatus,
-)
-from corvidae.persistence import PersistencePlugin
+
 
 # ---------------------------------------------------------------------------
 # Constants

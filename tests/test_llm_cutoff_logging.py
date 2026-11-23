@@ -16,10 +16,11 @@ import copy
 import logging
 
 import pytest
-from test_llm_hooks import BASE_URL, MODEL, _make_mock_response, _make_mock_session
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.llm import LLMClient
+
+from test_llm_hooks import BASE_URL, MODEL, _make_mock_response, _make_mock_session
 
 pytestmark = pytest.mark.timeout(15)
 

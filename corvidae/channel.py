@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING
 from corvidae.fork import parse_forks_config
 from corvidae.prompts import read_prompt_files
 from corvidae.tool_policy import parse_channel_tools
-
 # Transport/session metadata parked on Channel.runtime_overrides — never
 # merge into resolved ChannelConfig or forward to the LLM request body.
 RUNTIME_META_KEYS = frozenset({"cwd", "tool_backend"})

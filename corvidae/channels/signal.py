@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from corvidae.attachments import safe_suffix, save_attachment
+from corvidae.attachments import save_attachment, safe_suffix
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels._registers import shipped_register

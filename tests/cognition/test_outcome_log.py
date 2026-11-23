@@ -9,7 +9,6 @@ from corvidae.hooks import create_plugin_manager
 
 async def _setup(db):
     from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
     from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()
@@ -172,7 +171,6 @@ class TestRetrievalTopSimilarity:
         """Two first writers racing the upgrade both succeed: the loser of
         the ALTER race sees 'duplicate column name', which means done."""
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
         from corvidae.persistence import PersistencePlugin
 
         await db.execute(
@@ -239,7 +237,6 @@ class TestRfc7386NoneDeletes:
 async def test_missing_persistence_db_names_path_and_start_status():
     """The exchange_log DB guard names the configured path and start status."""
     from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
     from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()
@@ -269,7 +266,6 @@ class TestStartupDeferralLog:
         import logging
 
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -295,7 +291,6 @@ class TestStartupDeferralLog:
         from unittest.mock import AsyncMock, MagicMock
 
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -387,10 +382,9 @@ class TestUnregisteredChannelRefusals:
     """#261 review: no writer may insert a row for a channel the registry never held."""
 
     async def test_refused_stranger_leaves_no_row_in_any_writer(self, db, tmp_path):
+        from corvidae.channel import Channel, ChannelRegistry
         from corvidae_cognition.appraisal import AppraisalPlugin
         from corvidae_cognition.gates import GatePlugin
-
-        from corvidae.channel import Channel, ChannelRegistry
 
         # Wire registry + outcome_log + appraisal + gates + a refusing transport.
         plugin = await _setup(db)

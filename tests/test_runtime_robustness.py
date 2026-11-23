@@ -62,7 +62,7 @@ def _patched(pm):
 async def _start(config_path: str, pm) -> Runtime:
     """Run Runtime.start() against ``pm``, with one fake entry-point plugin."""
     from tests import plugin_loader_fixtures as fx
-    from tests.plugin_loader_fixtures import entry_points_for, ep
+    from tests.plugin_loader_fixtures import ep, entry_points_for
 
     # Count constructor calls from this start only.
     fx.CALLS.clear()

@@ -2,10 +2,13 @@
 
 from unittest.mock import AsyncMock
 
+import pytest
+
 from corvidae.channel import ChannelRegistry
-from corvidae.channels.cli import CLIPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
+from corvidae.channels.cli import CLIPlugin
+
 
 # ---------------------------------------------------------------------------
 # Helpers

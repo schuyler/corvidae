@@ -6,8 +6,10 @@ prompt via transform_system_prompt, and provides a use_skill tool.
 
 from pathlib import Path
 
-from corvidae_cognition.skills import SkillsPlugin
+import pytest
 from helpers import build_plugin_and_channel
+
+from corvidae_cognition.skills import SkillsPlugin
 
 
 def _make_skills_dir(base: Path) -> Path:

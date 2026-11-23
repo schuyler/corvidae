@@ -1,15 +1,11 @@
 import pytest
+import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
 
-from corvidae.hooks import (
-    AgentSpec,
-    create_plugin_manager,
-    get_dependency,
-    hookimpl,
-    hookspec,
-    validate_dependencies,
-)
 from corvidae.trace import mint_trace_id
+from corvidae.hooks import AgentSpec, hookimpl, hookspec
+from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import get_dependency, validate_dependencies
 
 
 def test_hookspec_marker_exists():

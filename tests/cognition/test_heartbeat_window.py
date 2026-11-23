@@ -20,14 +20,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
-from corvidae_cognition.memory import MemoryPlugin, fetch_range_rows
-from helpers import build_plugin_and_channel, drain
-from llm_response_fixtures import _make_text_response
 
 from corvidae.channel import Channel
 from corvidae.compaction import CompactionPlugin
 from corvidae.hooks import hookimpl
+from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
+from corvidae_cognition.memory import MemoryPlugin, fetch_range_rows
+from helpers import build_plugin_and_channel, drain
+from llm_response_fixtures import _make_text_response
 
 SYSTEM_PROMPT = "You are a test assistant."
 

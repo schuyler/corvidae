@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from corvidae.scheduler_file import read_jobs, write_jobs
 
 

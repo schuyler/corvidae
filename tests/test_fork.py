@@ -5,12 +5,11 @@ user instruction, so llama-server reuses the cached prefix. It mutates,
 persists, fires and dispatches nothing.
 """
 
-import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import logging
+
 import pytest
-from helpers import LLMResponseRecorder, build_plugin_and_channel, sent, start_llm_plugin
-from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.context import ContextWindow, MessageType
@@ -24,7 +23,10 @@ from corvidae.fork import (
     snap_cut_to_tool_boundary,
 )
 from corvidae.hooks import hookimpl
+
 from corvidae.outbound import OutboundMessage
+from helpers import LLMResponseRecorder, build_plugin_and_channel, sent, start_llm_plugin
+from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 INSTRUCTION = "Summarize the conversation above."
 TOOL_SCHEMAS = [{"type": "function", "function": {"name": "shell", "parameters": {}}}]

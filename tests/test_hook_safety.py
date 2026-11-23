@@ -22,14 +22,17 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
-from llm_response_fixtures import _make_text_response
+import pytest
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel
 from corvidae.hooks import TransportPlugin, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.task import Task
-from corvidae.trace import mint_trace_id
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
+from llm_response_fixtures import _make_text_response
+
 
 # ---------------------------------------------------------------------------
 # Helper plugin: raises on a named hook

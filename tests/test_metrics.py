@@ -1,6 +1,10 @@
 """Tests for corvidae.metrics — MetricsPlugin, UsageLogPlugin, MetricsJsonlPlugin."""
 
 import json
+from pathlib import Path
+
+import aiosqlite
+import pytest
 
 from corvidae.hooks import create_plugin_manager, hookimpl
 

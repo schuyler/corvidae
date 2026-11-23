@@ -8,6 +8,7 @@ import pytest
 
 from corvidae.llm import LLMClient
 
+
 BASE_URL = "http://localhost:8080"
 MODEL = "test-model"
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -340,6 +341,7 @@ class TestLLMClientRetry:
 
     async def test_chat_retries_on_transient_status(self):
         """First call returns 500, second returns 200. session.post called twice."""
+        import aiohttp
 
         client = LLMClient(
             base_url=BASE_URL, model=MODEL, max_retries=1, retry_base_delay=1.0
@@ -366,6 +368,7 @@ class TestLLMClientRetry:
 
     async def test_chat_retries_on_429_honors_retry_after(self):
         """429 with Retry-After: 5 header; asyncio.sleep called with 5.0."""
+        import aiohttp
 
         client = LLMClient(
             base_url=BASE_URL, model=MODEL, max_retries=1, retry_base_delay=1.0
@@ -547,6 +550,7 @@ class TestLLMClientTimeout:
 
     async def test_chat_passes_timeout_to_post(self):
         """session.post() is called with timeout=self.timeout kwarg."""
+        import aiohttp
 
         client = LLMClient(base_url=BASE_URL, model=MODEL, timeout=30.0)
         response = _make_mock_response(status=200, json_body=MOCK_COMPLETION)

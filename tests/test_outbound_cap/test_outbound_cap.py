@@ -24,8 +24,8 @@ from outbound_cap import (
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import (
     TransportPlugin,
-    create_plugin_manager,
     hookimpl,
+    create_plugin_manager,
     resolve_reject_wins,
 )
 

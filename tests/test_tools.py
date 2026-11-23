@@ -21,6 +21,7 @@ from corvidae.tools import (
     write_file,
 )
 
+
 # ---------------------------------------------------------------------------
 # TestShell
 # ---------------------------------------------------------------------------
@@ -109,11 +110,10 @@ async def _ranged_read_file(
     when given, is registered as the "registry" plugin so read_file can size
     its page to a channel.
     """
-    from fake_clock import install_kernel_clock
-
     from corvidae.hooks import create_plugin_manager
     from corvidae.spill import NotificationSpill
     from corvidae.tool_collection import ToolCollectionPlugin
+    from fake_clock import install_kernel_clock
 
     config = {"tools": tools_config or {}, "daemon": daemon or {}}
     pm = create_plugin_manager()
@@ -762,6 +762,7 @@ class TestWebFetch:
         assert "[truncated]" in result
 
     async def test_web_fetch_timeout(self):
+        import aiohttp
 
         mock_session = MagicMock()
         mock_response_ctx = AsyncMock()

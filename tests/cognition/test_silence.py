@@ -113,14 +113,13 @@ async def _prompt_pm(config: dict | None = None):
     """A manager with the real SilencePlugin and every real transport; the
     web plugin is enabled so it owns its channel. ``config`` reaches the
     plugin's on_init."""
-    from corvidae_cognition.silence import SilencePlugin
-
     from corvidae.channels.acp import AcpPlugin
     from corvidae.channels.cli import CLIPlugin
     from corvidae.channels.discord import DiscordPlugin
     from corvidae.channels.irc import IRCPlugin
     from corvidae.channels.signal import SignalPlugin
     from corvidae.channels.web import WebPlugin
+    from corvidae_cognition.silence import SilencePlugin
 
     pm = create_plugin_manager()
     silence = SilencePlugin()
@@ -359,11 +358,10 @@ async def _tool_pm(mode: str | None = "tool", outcome_log=None, instruction=None
     """A plugin manager with SilencePlugin in ``mode`` and real transports
     (IRC is conversational; the enabled web plugin and the CLI are not),
     plus the plugin and the tools it registered, keyed by name."""
-    from corvidae_cognition.silence import SilencePlugin
-
     from corvidae.channels.cli import CLIPlugin
     from corvidae.channels.irc import IRCPlugin
     from corvidae.channels.web import WebPlugin
+    from corvidae_cognition.silence import SilencePlugin
 
     pm = create_plugin_manager()
     silence = SilencePlugin()
@@ -543,11 +541,10 @@ class TestEndTurnAtAgentLevel:
     async def test_end_turn_then_echo_sends_nothing_and_records_the_call(self):
         import asyncio
 
+        from corvidae.hooks import TransportPlugin
         from corvidae_cognition.silence import SilencePlugin
         from helpers import drain_task_queue
         from llm_response_fixtures import _make_tool_call, _make_tool_call_response
-
-        from corvidae.hooks import TransportPlugin
 
         class Chat(TransportPlugin):
             transport = "chat"

@@ -8,6 +8,7 @@ deadline or the plugin's wake event is set.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 import pytest
+
 from fake_clock import FakeClock
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
@@ -29,8 +31,8 @@ from corvidae.scheduler import (
     frame_firing,
     parse_duration,
     parse_job,
-    parse_weekday,
     parse_when,
+    parse_weekday,
 )
 from corvidae.tool import ToolContext
 

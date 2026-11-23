@@ -376,6 +376,7 @@ class TestLiveCompactionEval:
 
         from scripts.eval_compaction import (
             CURRENT_PROMPT,
+            IMPROVED_PROMPT,
             generate_summary,
             score_summary,
         )

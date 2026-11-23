@@ -22,6 +22,7 @@ import pytest
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.tool import ToolContext
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

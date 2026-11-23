@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
 # ---------------------------------------------------------------------------
 # TestDiscoverCommands
 # ---------------------------------------------------------------------------
@@ -117,7 +118,6 @@ class TestCliCommand:
     def test_cli_command_exists_and_is_click_command(self):
         """corvidae.channels.cli exposes cli_command as a click.BaseCommand."""
         import click
-
         from corvidae.channels.cli import cli_command
 
         assert isinstance(cli_command, click.BaseCommand)
@@ -131,7 +131,6 @@ class TestCliCommand:
     def test_cli_command_passes_channel_override_to_runtime(self):
         """cli_command instantiates Runtime with channels.cli:local in overrides."""
         from click.testing import CliRunner
-
         from corvidae.channels.cli import cli_command
 
         captured_overrides: list[dict] = []
@@ -160,7 +159,6 @@ class TestCliCommand:
     def test_cli_command_passes_logging_file_override(self):
         """cli_command passes logging.file override to Runtime."""
         from click.testing import CliRunner
-
         from corvidae.channels.cli import cli_command
 
         captured_overrides: list[dict] = []
@@ -201,7 +199,6 @@ class TestServeCommand:
     def test_serve_command_exists_and_is_click_command(self):
         """corvidae.commands.serve exposes serve_command as a click.BaseCommand."""
         import click
-
         from corvidae.commands.serve import serve_command
 
         assert isinstance(serve_command, click.BaseCommand)
@@ -215,7 +212,6 @@ class TestServeCommand:
     def test_serve_command_passes_no_channel_overrides(self):
         """serve_command does not inject any channel overrides into Runtime."""
         from click.testing import CliRunner
-
         from corvidae.commands.serve import serve_command
 
         captured_kwargs: list[dict] = []
@@ -243,7 +239,6 @@ class TestServeCommand:
     def test_serve_command_accepts_config_option(self):
         """serve_command accepts --config option and passes it to Runtime."""
         from click.testing import CliRunner
-
         from corvidae.commands.serve import serve_command
 
         captured_kwargs: list[dict] = []

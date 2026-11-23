@@ -1,9 +1,12 @@
 """Tests for corvidae.thinking — ThinkingPlugin and strip_* utilities."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
-from corvidae.hooks import create_plugin_manager
+import pytest
+
 from corvidae.thinking import ThinkingPlugin, strip_reasoning_content, strip_thinking
+from corvidae.hooks import create_plugin_manager
+
 
 # ---------------------------------------------------------------------------
 # strip_thinking tests

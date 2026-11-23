@@ -3,17 +3,11 @@
 RED phase: all tests fail with ImportError until corvidae/context.py is created.
 """
 
+import pytest
 from unittest.mock import patch
 
-import pytest
-
 # This import fails until corvidae/context.py exists — that is the intended red state.
-from corvidae.context import (
-    DEFAULT_CHARS_PER_TOKEN,
-    ORPHAN_RESULT_LABEL,
-    ContextWindow,
-    MessageType,
-)
+from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN, ORPHAN_RESULT_LABEL
 
 
 class TestMessageType:

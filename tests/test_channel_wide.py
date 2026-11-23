@@ -14,13 +14,14 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from helpers import build_plugin_and_channel, drain, drain_task_queue
-from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 from corvidae.agent import mint_trace_id
 from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.tool import tool_to_schema
 from corvidae.tool_policy import disabled_on, refusal_message
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
+from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 AGENT = {"system_prompt": "AGENT", "max_turns": 10, "max_context_tokens": 8000}
 

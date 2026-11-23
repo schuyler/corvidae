@@ -12,24 +12,28 @@ Designed failure reason (primary test): missing near-dup merge logic in
 MemoryPlugin._consolidate_range (corvidae/memory.py).
 """
 
-import hashlib
+import asyncio
 import json
 import math
+import hashlib
 import re
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
-from corvidae_cognition.memory import MemoryPlugin
-from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
+from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
+from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
+
 from .test_memory_consolidation import entries_reply
+
 
 DIMS = 4  # small for speed; dedup uses cosine similarity only
 

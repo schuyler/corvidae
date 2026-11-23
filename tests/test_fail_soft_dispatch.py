@@ -21,6 +21,7 @@ import apluggy as pluggy
 import pytest
 
 import corvidae.hooks as hooks
+
 from corvidae.hooks import (
     CorvidaePlugin,
     create_plugin_manager,

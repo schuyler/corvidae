@@ -9,12 +9,8 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
-from corvidae.outbound import (
-    OutboundMessage,
-    OutboundProgress,
-    OutboundThinking,
-    OutboundToolStatus,
-)
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
+
 
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
@@ -69,7 +65,6 @@ class TestCorvidaeAcpAgentInitialize:
     async def test_initialize_handshake_in_process(self):
         """initialize returns protocol 1, agent_info, and empty auth methods."""
         from acp import PROTOCOL_VERSION
-
         from corvidae.channels.acp import CorvidaeAcpAgent
 
         agent = CorvidaeAcpAgent(

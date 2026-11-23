@@ -6,12 +6,13 @@ command entry point, and SDK-missing guard land.
 
 from __future__ import annotations
 
-import importlib
 import logging
+import importlib
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from click.testing import CliRunner
 
 

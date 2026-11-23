@@ -19,14 +19,15 @@ import logging
 import time
 
 from click.testing import CliRunner
-from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
-from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
 
 from corvidae.commands.redact import (
     redact_command,
     redact_memory_id,
     redact_messages,
 )
+from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
+
+from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
 CLAIMS = [
     {"claim": "The kestrel nests at Brannan Street", "queries": ["kestrel Brannan", "nest"]},

@@ -6,10 +6,9 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from corvidae.channel import Channel, ChannelRegistry
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage, OutboundProgress
-
 
 # Mock pydle before importing irc_plugin since it may not be installed
 # Create a more sophisticated mock that allows real IRCClient instantiation
@@ -50,7 +49,7 @@ mock_pydle.Client = MockClient
 
 with patch.dict('sys.modules', {'pydle': mock_pydle}):
     from corvidae.channels import irc as _irc_module
-    from corvidae.channels.irc import IRCClient, IRCPlugin
+    from corvidae.channels.irc import IRCPlugin, IRCClient, split_message
 
 
 # ---------------------------------------------------------------------------

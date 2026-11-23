@@ -15,9 +15,10 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from fake_clock import clock_pm
+from unittest.mock import MagicMock
 
 import pytest
-from fake_clock import clock_pm
 
 from corvidae.mcp_client import McpClientPlugin
 

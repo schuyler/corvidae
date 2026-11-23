@@ -26,16 +26,18 @@ import time
 
 import aiosqlite
 import pytest
-from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 
 # The redact module's functions, called directly.
 from corvidae.commands.redact import (
-    _extract_sample_token,
-    _verify_fts_clean,
     redact_command,
-    redact_messages,  # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
+    redact_messages,   # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
+    _verify_fts_clean,
+    _extract_sample_token,
 )
+
 from corvidae.persistence import init_db
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
+
 
 # ---------------------------------------------------------------------------
 # DB setup helpers

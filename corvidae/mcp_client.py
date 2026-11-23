@@ -1304,8 +1304,8 @@ class McpClientPlugin(CorvidaePlugin):
         deadline = asyncio.timeout(connect_timeout)
         try:
             from mcp import ClientSession
-            from mcp.client.sse import sse_client
             from mcp.client.stdio import StdioServerParameters, stdio_client
+            from mcp.client.sse import sse_client
             from mcp.client.streamable_http import streamable_http_client
             from mcp.shared._httpx_utils import create_mcp_http_client
 

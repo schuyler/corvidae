@@ -8,19 +8,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from corvidae_cognition.memory import MemoryPlugin
-from helpers import FakeForkAgent, window_of, with_chat_llm
 
 from corvidae.context import MessageType, message_tokens
 from corvidae.hooks import create_plugin_manager
+from corvidae_cognition.memory import MemoryPlugin
 
+from helpers import FakeForkAgent, window_of, with_chat_llm
 from .test_memory_consolidation import (
-    EMBED_CONFIG,
-    build_consolidation_env,
-    entries_reply,
-    fetch_stamped_memories,
-    fetch_watermark,
-    seed_dialog,
+    EMBED_CONFIG, build_consolidation_env, entries_reply, fetch_stamped_memories,
+    fetch_watermark, seed_dialog,
 )
 from .test_memory_fork import DIALOG, _Registry
 

@@ -13,11 +13,11 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
-from llm_response_fixtures import _make_text_response
-
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.trace import mint_trace_id
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
+from llm_response_fixtures import _make_text_response
 
 
 def _tool_call_response(call_id: str = "call-001") -> dict:

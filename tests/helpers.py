@@ -2,12 +2,13 @@
 
 import asyncio
 import contextlib
+
 import logging
 import re
 import time
 
-import aiosqlite
 import pytest
+import aiosqlite
 
 from corvidae.hooks import hookimpl
 
@@ -57,8 +58,8 @@ async def build_plugin_and_channel(
 
     from corvidae.agent import Agent
     from corvidae.channel import ChannelConfig, ChannelRegistry
-    from corvidae.hooks import create_plugin_manager
     from corvidae.persistence import PersistencePlugin, init_db
+    from corvidae.hooks import create_plugin_manager
     from corvidae.task import TaskPlugin
     from corvidae.thinking import ThinkingPlugin
 
@@ -327,10 +328,10 @@ async def start_llm_plugin(monkeypatch, llm_config: dict, stages: dict, pm=None)
     Returns (plugin, posts). The caller stops the plugin.
     """
     import aiohttp
-    from llm_response_fixtures import _make_text_response
 
     from corvidae.hooks import create_plugin_manager
     from corvidae.llm_plugin import LLMPlugin
+    from llm_response_fixtures import _make_text_response
 
     posts: list[dict] = []
 

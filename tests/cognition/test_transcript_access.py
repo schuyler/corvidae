@@ -10,6 +10,10 @@ import logging
 import time
 
 import pytest
+
+from corvidae.commands.redact import redact_messages
+from corvidae.tool import declares_untrusted_output
+
 from cognition.test_memory_tools import (
     build_tools_env,
     get_tools,
@@ -17,9 +21,6 @@ from cognition.test_memory_tools import (
     seed_message_log_row,
 )
 from helpers import insert_raw_message, skip_warnings
-
-from corvidae.commands.redact import redact_messages
-from corvidae.tool import declares_untrusted_output
 
 # Fixed instants so timestamp assertions are exact (UTC).
 TS_EARLY = 1699999999.0  # 2023-11-14T22:13:19Z

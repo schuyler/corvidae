@@ -44,6 +44,7 @@ from corvidae.task import Task
 from corvidae.tool import Tool
 from corvidae.trace import mint_trace_id
 
+
 # ---------------------------------------------------------------------------
 # The fake server: every POST is a parked Call
 # ---------------------------------------------------------------------------
@@ -583,10 +584,9 @@ async def test_r12_failing_on_metrics_consumer_is_logged_and_shutdown_completes(
 async def test_r13_usage_log_created_before_this_change_gains_lease_wait_ms_in_place(tmp_path) -> None:
     """R13: a usage_log without lease_wait_ms gains the column on
     UsageLogPlugin start, the old row reads NULL, and a new write lands."""
-    from test_lease_scopes import PRE_363_USAGE_LOG_DDL
-
     from corvidae.hooks import create_plugin_manager
     from corvidae.persistence import PersistencePlugin
+    from test_lease_scopes import PRE_363_USAGE_LOG_DDL
 
     async with aiosqlite.connect(str(tmp_path / "old.db")) as db:
         await db.execute(PRE_363_USAGE_LOG_DDL)

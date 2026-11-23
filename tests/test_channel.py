@@ -1,13 +1,11 @@
 """Tests for corvidae.channel: ChannelConfig, Channel, ChannelRegistry, load_channel_config."""
 
-from time import time
-
 import pytest
-
+from time import time
 from corvidae.channel import (
-    CHANNEL_ENTRY_KEYS,
     Channel,
     ChannelConfig,
+    CHANNEL_ENTRY_KEYS,
     ChannelRegistry,
     ReasoningHistory,
     apply_channel_config,
@@ -15,6 +13,7 @@ from corvidae.channel import (
     parse_channel_config,
     validate_agent_config,
 )
+
 
 # ---------------------------------------------------------------------------
 # Section 6.1 — ChannelConfig.resolve tests

@@ -15,7 +15,8 @@ from __future__ import annotations
 import apluggy as pluggy
 import pytest
 
-from corvidae.hooks import _check_hook_arg_binding, create_plugin_manager, hookimpl, hookspec
+from corvidae.hooks import create_plugin_manager, hookimpl, hookspec
+from corvidae.hooks import _check_hook_arg_binding
 
 
 class _Spec:

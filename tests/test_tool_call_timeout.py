@@ -467,7 +467,6 @@ async def test_agent_timeout_frees_worker_and_continues():
         _make_tool_call,
         _make_tool_call_response,
     )
-
     from corvidae.trace import mint_trace_id
 
     plugin, channel, db = await build_plugin_and_channel()

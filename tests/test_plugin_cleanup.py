@@ -15,6 +15,7 @@ import pytest
 
 from corvidae.hooks import AgentSpec, create_plugin_manager
 
+
 # ---------------------------------------------------------------------------
 # 1. on_init hookspec on AgentSpec
 # ---------------------------------------------------------------------------
@@ -85,8 +86,8 @@ async def test_corvidae_plugin_on_init_stores_pm_and_config():
 
 def test_corvidae_plugin_on_init_has_hookimpl():
     """CorvidaePlugin.on_init must be decorated with @hookimpl."""
-
     from corvidae.hooks import CorvidaePlugin, hookimpl
+    import pluggy
 
     marker_attr = hookimpl.project_name + "_impl"  # "corvidae_impl"
     impl_opts = getattr(CorvidaePlugin.on_init, marker_attr, None)
@@ -239,16 +240,16 @@ def test_builtin_tool_plugins_subclass_corvidae_plugin(class_name):
 
 
 def test_cli_plugin_subclasses_corvidae_plugin():
-    from corvidae.channels.cli import CLIPlugin
     from corvidae.hooks import CorvidaePlugin
+    from corvidae.channels.cli import CLIPlugin
     assert issubclass(CLIPlugin, CorvidaePlugin), (
         "CLIPlugin must subclass CorvidaePlugin"
     )
 
 
 def test_irc_plugin_subclasses_corvidae_plugin():
-    from corvidae.channels.irc import IRCPlugin
     from corvidae.hooks import CorvidaePlugin
+    from corvidae.channels.irc import IRCPlugin
     assert issubclass(IRCPlugin, CorvidaePlugin), (
         "IRCPlugin must subclass CorvidaePlugin"
     )
@@ -287,8 +288,8 @@ def test_llm_plugin_subclasses_corvidae_plugin():
 
 
 def test_compaction_plugin_subclasses_corvidae_plugin():
-    from corvidae.compaction import CompactionPlugin
     from corvidae.hooks import CorvidaePlugin
+    from corvidae.compaction import CompactionPlugin
     assert issubclass(CompactionPlugin, CorvidaePlugin), (
         "CompactionPlugin must subclass CorvidaePlugin"
     )
@@ -319,8 +320,8 @@ def test_tool_collection_plugin_subclasses_corvidae_plugin():
 
 
 def test_agent_subclasses_corvidae_plugin():
-    from corvidae.agent import Agent
     from corvidae.hooks import CorvidaePlugin
+    from corvidae.agent import Agent
     assert issubclass(Agent, CorvidaePlugin), (
         "Agent must subclass CorvidaePlugin"
     )

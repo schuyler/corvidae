@@ -5,10 +5,11 @@ A real Agent and registry; no LLM is involved.
 """
 
 import pytest
-from helpers import build_plugin_and_channel
 
 from corvidae.channel import load_channel_config
 from corvidae.context import ContextWindow
+
+from helpers import build_plugin_and_channel
 
 IDENTITY = "AGENT IDENTITY"
 WIDE_REGISTER = "WIDE REGISTER"

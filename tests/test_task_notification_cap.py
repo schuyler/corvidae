@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 
 import pytest
-from fake_clock import install_kernel_clock
 
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager, hookimpl
@@ -21,6 +20,7 @@ from corvidae.spill import NotificationSpill, current_cut
 from corvidae.task import Task, TaskPlugin
 from corvidae.tool import Tool
 from corvidae.tool_collection import ToolCollectionPlugin
+from fake_clock import install_kernel_clock
 
 LIMIT = 40
 # "[Task <id>] " is prepended to the result, so the cut counts it too.

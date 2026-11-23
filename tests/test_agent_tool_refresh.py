@@ -11,13 +11,15 @@ from __future__ import annotations
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
-from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
+import pytest
 
 from corvidae.agent import mint_trace_id
 from corvidae.channel import ChannelConfig
 from corvidae.hooks import hookimpl
 from corvidae.tool_collection import ToolCollectionPlugin
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
+from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 
 def _fn(name: str, calls: list[str], result: str = "ok"):

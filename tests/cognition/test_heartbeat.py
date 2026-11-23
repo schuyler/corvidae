@@ -12,23 +12,11 @@ on_init, then on_start, and only then is the idle tracker started.
 from __future__ import annotations
 
 import logging
-from importlib.metadata import entry_points
 from types import SimpleNamespace
+from importlib.metadata import entry_points
 
 import aiosqlite
 import pytest
-
-# The memory section and its header live with the memory plugin (#1079);
-# reached as attributes so a missing symbol fails the test that needs it.
-from corvidae_cognition import memory as memory_mod
-from corvidae_cognition.heartbeat import (
-    DEFAULT_HEARTBEAT_PROMPT,
-    HEARTBEAT_CHANNEL,
-    HeartbeatPlugin,
-)
-from corvidae_cognition.memory import MemoryPlugin
-from fake_clock import install_kernel_clock
-from helpers import with_chat_llm
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import (
@@ -38,7 +26,18 @@ from corvidae.hooks import (
     validate_dependencies,
 )
 from corvidae.llm_plugin import LLMPlugin
+from helpers import with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
+from corvidae_cognition.heartbeat import (
+    DEFAULT_HEARTBEAT_PROMPT,
+    HEARTBEAT_CHANNEL,
+    HeartbeatPlugin,
+)
+# The memory section and its header live with the memory plugin (#1079);
+# reached as attributes so a missing symbol fails the test that needs it.
+from corvidae_cognition import memory as memory_mod
+from corvidae_cognition.memory import MemoryPlugin
+from fake_clock import install_kernel_clock
 
 AFTER = 600
 # Long enough that no plausible default period hides inside it.
@@ -455,9 +454,8 @@ def test_heartbeat_disabled_logs_no_orphan_warning(owner, caplog):
     """#1079: a config without the heartbeat plugin but with memory or goals
     loaded does not WARN that their on_heartbeat_collect_prompts hookimpl has no
     spec; they declare the heartbeat as an optional dependency."""
-    from corvidae_cognition.goals import GoalsPlugin
-
     from corvidae.hooks import report_orphan_hookimpls
+    from corvidae_cognition.goals import GoalsPlugin
 
     pm = create_plugin_manager()
     pm.register(MemoryPlugin() if owner == "memory" else GoalsPlugin(), name=owner)

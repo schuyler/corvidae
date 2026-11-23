@@ -16,10 +16,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pluggy
 import pytest
+
+from corvidae.hooks import hookimpl
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
 
-from corvidae.hooks import hookimpl
 
 # ---------------------------------------------------------------------------
 # Recorder plugin and Agent fixture
@@ -220,9 +221,8 @@ def _assert_minted(kwargs: dict) -> None:
 class TestTransportCallSites:
     async def test_cli_passes_trace_id(self):
         """O1: the CLI read loop passes a minted trace_id."""
-        from test_cli_plugin import _make_pm_with_registry
-
         from corvidae.channels.cli import CLIPlugin
+        from test_cli_plugin import _make_pm_with_registry
 
         pm, registry = _make_pm_with_registry(transport="cli")
         plugin = CLIPlugin(pm)
@@ -247,9 +247,8 @@ class TestTransportCallSites:
 
     async def test_irc_channel_message_passes_trace_id(self):
         """O1: an IRC channel message passes a minted trace_id."""
-        from test_irc_plugin import _make_pm_with_registry
-
         from corvidae.channels.irc import IRCPlugin
+        from test_irc_plugin import _make_pm_with_registry
 
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
@@ -264,9 +263,8 @@ class TestTransportCallSites:
 
     async def test_irc_private_message_passes_trace_id(self):
         """O1: an IRC private message passes a minted trace_id."""
-        from test_irc_plugin import _make_pm_with_registry
-
         from corvidae.channels.irc import IRCPlugin
+        from test_irc_plugin import _make_pm_with_registry
 
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)

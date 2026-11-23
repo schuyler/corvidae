@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

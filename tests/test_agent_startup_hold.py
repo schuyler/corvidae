@@ -11,11 +11,11 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from helpers import build_plugin_and_channel, drain
-from llm_response_fixtures import _make_text_response
 
 from corvidae.hooks import hookimpl
 from corvidae.trace import mint_trace_id
+from helpers import build_plugin_and_channel, drain
+from llm_response_fixtures import _make_text_response
 
 pytestmark = pytest.mark.timeout(15)
 
@@ -195,11 +195,10 @@ class TestRuntimeStartup:
     ):
         """Real path: a transport delivering from its on_start (step 11) is
         processed once the Agent starts (step 12); Runtime.stop stays in budget."""
-        from test_minimal_profile import _drain_all, _write_minimal_config
-
         from corvidae.llm import LLMClient
         from corvidae.runtime import Runtime
         from corvidae.task import TaskPlugin
+        from test_minimal_profile import _drain_all, _write_minimal_config
 
         monkeypatch.setattr(
             LLMClient, "chat",
@@ -243,11 +242,10 @@ class TestRuntimeStartup:
         """Real path: step 12 raises after a transport delivered during step 11;
         Runtime._cleanup_failed_start must release the held on_message, whose
         WARNING names the channel and trace id."""
-        from test_minimal_profile import _write_minimal_config
-
         from corvidae.agent import Agent
         from corvidae.runtime import Runtime
         from corvidae.task import TaskPlugin
+        from test_minimal_profile import _write_minimal_config
 
         delivered: list[asyncio.Task] = []
         trace_id = mint_trace_id()

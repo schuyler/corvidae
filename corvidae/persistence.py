@@ -21,8 +21,7 @@ from pathlib import Path
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.provenance import PROVENANCE_KEY
-from corvidae.provenance import decode as decode_provenance
+from corvidae.provenance import PROVENANCE_KEY, decode as decode_provenance
 
 logger = logging.getLogger(__name__)
 

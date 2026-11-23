@@ -17,19 +17,22 @@ import math
 import re
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
-from corvidae_cognition.funnel import FunnelPlugin
-from corvidae_cognition.memory import SQLITE_VEC_KNN_MAX, MemoryPlugin
-from evals.metrics import recall_at_k
-from helpers import stub_llm_config, with_chat_llm
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
+from helpers import stub_llm_config, with_chat_llm
+from corvidae_cognition.memory import SQLITE_VEC_KNN_MAX, MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
+
+from evals.metrics import recall_at_k
+
 
 DIMS = 32
 

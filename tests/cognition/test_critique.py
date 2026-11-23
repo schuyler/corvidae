@@ -26,8 +26,6 @@ from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 import pytest
-from corvidae_cognition.outcome_log import OutcomeLogPlugin
-from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
@@ -35,11 +33,16 @@ from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import (
     CorvidaePlugin,
     create_plugin_manager,
+    hookimpl,
     install_plugin_hookspecs,
     resolve_reject_wins,
 )
+from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
+
+from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
+
 
 EMPTY_VERDICT = json.dumps({"objections": []})
 OBJECTION_VERDICT = json.dumps({"objections": [
@@ -1276,13 +1279,12 @@ def _stage2_reply(past_claims):
 async def _real_path_env(tmp_path, replies, past_claims):
     from unittest.mock import MagicMock
 
+    from corvidae.llm_plugin import LLMPlugin
     from corvidae_cognition.appraisal import AppraisalPlugin
     from corvidae_cognition.critique import CritiquePlugin
     from corvidae_cognition.memory import MESSAGE_FTS_DDL, MESSAGE_FTS_INSERT_TRIGGER
     from helpers import build_plugin_and_channel
     from llm_response_fixtures import _make_text_response
-
-    from corvidae.llm_plugin import LLMPlugin
 
     db_path = str(tmp_path / "sessions.db")
     agent, channel, db = await build_plugin_and_channel(
@@ -1367,9 +1369,8 @@ async def _real_path_teardown(env):
 
 
 async def _say(env, text):
-    from helpers import drain, drain_task_queue
-
     from corvidae.trace import mint_trace_id
+    from helpers import drain, drain_task_queue
 
     trace_id = mint_trace_id()
     await env.agent.on_message(channel=env.channel, sender="user", text=text, trace_id=trace_id)

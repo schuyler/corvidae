@@ -11,6 +11,7 @@ import logging
 import time
 
 import pytest
+
 from corvidae_cognition.retention import run_retention_job
 
 from .test_memory_consolidation import build_consolidation_env

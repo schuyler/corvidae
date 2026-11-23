@@ -31,15 +31,16 @@ exist yet.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from helpers import build_plugin_and_channel, drain, sent
-from llm_response_fixtures import _make_text_response
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
-from corvidae.outbound import OutboundToolStatus
 from corvidae.task import Task, TaskPlugin
-from corvidae.trace import mint_trace_id
 from corvidae.turn import AgentTurnResult, run_agent_turn
+
+from corvidae.outbound import OutboundToolStatus
+from helpers import build_plugin_and_channel, drain, sent
+from llm_response_fixtures import _make_text_response
 
 
 def _make_channel(transport="test", scope="scope1") -> Channel:

@@ -13,16 +13,17 @@ independent value.
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 import yaml
+
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call,
     _make_tool_call_response,
 )
-
 from corvidae.trace import mint_trace_id
 
 MINIMAL_DISABLED_PLUGINS = [
@@ -152,9 +153,8 @@ class TestMinimalProfile:
     async def test_boots_chats_tool_loops_compacts_persists_and_survives_restart(
         self, tmp_path
     ):
-        from unittest.mock import AsyncMock
-
         from corvidae.runtime import Runtime
+        from unittest.mock import AsyncMock
 
         session_db = tmp_path / "sessions.db"
 

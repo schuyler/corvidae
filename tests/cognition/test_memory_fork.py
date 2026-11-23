@@ -14,19 +14,14 @@ import json
 import logging
 
 import pytest
-from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
-from helpers import FakeForkAgent, window_of
 
 from corvidae.fork import ForkRefused
+from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
 
+from helpers import FakeForkAgent, window_of
 from .test_memory_consolidation import (
-    THREE_ENTRIES,
-    assert_shared_columns_equal,
-    build_consolidation_env,
-    entries_reply,
-    fetch_memories,
-    fetch_stamped_memories,
-    fetch_watermark,
+    THREE_ENTRIES, assert_shared_columns_equal, build_consolidation_env,
+    entries_reply, fetch_memories, fetch_stamped_memories, fetch_watermark,
     seed_dialog,
 )
 

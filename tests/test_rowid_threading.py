@@ -14,16 +14,18 @@ import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import aiosqlite
 import pytest
-from helpers import build_plugin_and_channel, drain
-from llm_response_fixtures import _make_text_response
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import resolve_single_result
-from corvidae.persistence import PersistencePlugin
-from corvidae.trace import mint_trace_id
+from corvidae.persistence import PersistencePlugin, init_db
+
+from helpers import build_plugin_and_channel, drain
+from llm_response_fixtures import _make_text_response
 
 
 @pytest.fixture
@@ -215,10 +217,10 @@ class TestCompactionCarriesCompactedIds:
     async def test_summarizer_input_carries_no_underscore_keys(self):
         """The view request (a fork miss: the fork raises) carries
         no ``_``-prefixed key on any message (R5, bootstrap-mapping §4.8)."""
-        from helpers import FakeForkAgent, RecordingClient, recording_llm_plugin
-
         from corvidae.fork import ForkRefused
         from corvidae.hooks import create_plugin_manager
+
+        from helpers import FakeForkAgent, RecordingClient, recording_llm_plugin
 
         # A real pm holding a failing-fork agent and a recording main client.
         pm = create_plugin_manager()

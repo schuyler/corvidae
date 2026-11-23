@@ -14,13 +14,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock
 
 import pytest
-from fake_clock import install_kernel_clock
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
-from llm_response_fixtures import _make_text_response
 
 from corvidae.hooks import hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
+from fake_clock import install_kernel_clock
+from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
+from llm_response_fixtures import _make_text_response
 
 REPO = Path(__file__).resolve().parent.parent
 

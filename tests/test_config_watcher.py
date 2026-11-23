@@ -18,11 +18,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 import yaml
+
 from helpers import stub_llm_config
+
 
 # ---------------------------------------------------------------------------
 # 1. on_config_reload hookspec exists on AgentSpec
@@ -376,8 +378,8 @@ async def test_config_watcher_updates_channel_registry_agent_defaults(tmp_path):
     This update is performed directly in ConfigWatcherPlugin._reload_config, not
     via a per-plugin hookimpl.
     """
-    from corvidae.channel import ChannelRegistry
     from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.channel import ChannelRegistry
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
@@ -1641,9 +1643,10 @@ async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
 
 def _make_watcher(config_path: Path):
     """A ConfigWatcherPlugin wired to a plugin manager, not started."""
-    from corvidae.compaction import CompactionPlugin
     from corvidae.config_watcher import ConfigWatcherPlugin
     from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
 
     pm = create_plugin_manager()
     watcher = ConfigWatcherPlugin()
@@ -1704,9 +1707,10 @@ async def _keys_read_by_hook(plugin, config: dict) -> set[str]:
 
 def _make_watcher(config_path: Path):
     """A ConfigWatcherPlugin wired to a plugin manager, not started."""
-    from corvidae.compaction import CompactionPlugin
     from corvidae.config_watcher import ConfigWatcherPlugin
     from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
 
     pm = create_plugin_manager()
     watcher = ConfigWatcherPlugin()
@@ -1721,9 +1725,10 @@ def _make_watcher(config_path: Path):
 
 def _make_watcher(config_path: Path):
     """A ConfigWatcherPlugin wired to a plugin manager, not started."""
-    from corvidae.compaction import CompactionPlugin
     from corvidae.config_watcher import ConfigWatcherPlugin
     from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
 
     pm = create_plugin_manager()
     watcher = ConfigWatcherPlugin()
@@ -1979,6 +1984,60 @@ class TestReloadableKeyRegistry:
         assert any("memory.retrieval.bands" in m for m in messages), (
             f"the reload path must report the restart-only change; got {messages}"
         )
+
+
+async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
+    """A reloaded `llm:` key that is not a string keeps the old config (#984).
+
+    Review of #969 found the existing reload test passes with
+    `_require_string_key` turned into a bare `return`, so nothing proved this
+    path at all. YAML turns an unquoted `2:` into an int, and the config error
+    for some other problem then crashes while building its own message.
+    """
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n"
+        "  profiles:\n    main: {model: m1}\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m1"}},
+            },
+        },
+    )
+
+    # An int key where a provider name belongs: valid YAML, invalid config.
+    config_file.write_text(
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n"
+        "    2: {base_url: http://localhost}\n"
+        "  profiles:\n    main: {model: m2}\n"
+    )
+
+    dispatched: list[dict] = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae"):
+        await plugin._reload_config()
+
+    assert dispatched == [], "a config error must not dispatch the new config"
+    assert "config reload failed" in caplog.text
+    # The old config is still what the plugin holds.
+    assert plugin.config["llm"]["profiles"]["main"]["model"] == "m1"
 
 
 async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, caplog):

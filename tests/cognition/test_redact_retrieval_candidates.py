@@ -13,7 +13,6 @@ import time
 
 import pytest
 from click.testing import CliRunner
-from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
 from corvidae.commands.redact import (
     redact_command,
@@ -21,6 +20,8 @@ from corvidae.commands.redact import (
     redact_messages,
     redact_range,
 )
+
+from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
 
 async def _add_candidates(

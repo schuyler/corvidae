@@ -15,6 +15,7 @@ import pytest
 
 from corvidae.channels.split import split_message
 
+
 # ---------------------------------------------------------------------------
 # Basic splitting behavior — one assertion per tier of the ladder, plus the
 # invariants (byte-length limit, UTF-8 counting, full content preserved)

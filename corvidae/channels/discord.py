@@ -42,7 +42,6 @@ import aiohttp
 
 from corvidae.attachments import save_attachment
 from corvidae.attribution import get_attribution
-
 # The sender-name cache helper moved to corvidae.channel (shared with Zulip);
 # both names stay importable from here, where tests and callers already look.
 from corvidae.channel import (  # noqa: F401

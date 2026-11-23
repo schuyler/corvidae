@@ -15,11 +15,12 @@ logger = logging.getLogger("corvidae.irc_plugin")
 _OUTBOUND_QUEUE_MAX = 50
 
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
-from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
-from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register
+from corvidae.outbound import OutboundMessage, OutboundProgress
+
 
 # The account named by the tag of the PRIVMSG being handled, set by
 # IRCClient.on_raw. Each on_raw runs in its own task, so the value is local to

@@ -4,6 +4,8 @@
 entry-point name `"agent"` — not `AgentPlugin`/`"agent_loop"`.
 """
 
+import inspect
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +47,6 @@ def test_agent_has_expected_attributes():
 def test_main_registers_as_agent_not_agent_loop():
     """Agent must be registered under name 'agent' (via entry point), not 'agent_loop'."""
     from importlib.metadata import entry_points
-
     from corvidae.agent import Agent
 
     # Verify the entry point registers Agent under name 'agent'

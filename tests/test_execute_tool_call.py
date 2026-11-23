@@ -6,7 +6,8 @@ is implemented.
 
 import pytest
 
-from corvidae.tool import ToolContext, execute_tool_call
+from corvidae.tool import execute_tool_call, ToolContext
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,8 +56,9 @@ async def test_execute_tool_call_basic():
 
 async def test_execute_tool_call_injects_ctx():
     """Tool declaring _ctx receives a ToolContext with correct fields."""
-    from corvidae.channel import Channel, ChannelConfig
+    from unittest.mock import MagicMock
     from corvidae.task import TaskQueue
+    from corvidae.channel import Channel, ChannelConfig
 
     channel = Channel(transport="test", scope="s1", config=ChannelConfig())
     task_queue = TaskQueue()

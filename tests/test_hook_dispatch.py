@@ -7,7 +7,11 @@ ordering and chain-stop behavior.
 
 from __future__ import annotations
 
+import pytest
+import apluggy as pluggy
+
 from corvidae.hooks import create_plugin_manager, hookimpl
+
 
 # ---------------------------------------------------------------------------
 # Test 1: resolve_compaction — trylast handler is fallback

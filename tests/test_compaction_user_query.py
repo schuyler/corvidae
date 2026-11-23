@@ -11,10 +11,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from test_mid_conversation_system_role import TemplateError, render_swift
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType, message_tokens
+
+from test_mid_conversation_system_role import TemplateError, render_swift
 
 
 def _channel() -> MagicMock:
