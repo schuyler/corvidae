@@ -599,7 +599,7 @@ async def test_restart_end_to_end_plugin_manager(tmp_path):
 
     # Fake the agent plugin (dependency)
     from unittest.mock import MagicMock
-    agent = MagicMock(spec=Agent)
+    agent = FakeAgent()
     agent.tools = {}
     pm.register(agent, name="agent")
 
@@ -709,13 +709,12 @@ async def test_deliver_notices_end_to_end(tmp_path):
         "_base_dir": str(tmp_path),
         "restart": {
             "home_channel": "test:scope1",
-    print("DBG", isinstance(agent, Agent), Agent, type(agent.__class__))
             "notify_delay_seconds": 0,
         },
         "plugins": {"disabled": []},
     }
 
-    agent = MagicMock(spec=Agent)
+    agent = FakeAgent()
     agent.tools = {"some_tool": True}  # non-empty so _wait_until_ready passes
     pm.register(agent, name="agent")
 
