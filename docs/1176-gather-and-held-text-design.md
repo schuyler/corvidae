@@ -740,3 +740,50 @@ and `goals`. The notes below are history.
   `before_agent_turn` after the merge.
 - **#1179 (PR 1206)** changes memory's exchange_log write and critique.
   Re-read both before Red.
+
+## Red acceptance criteria
+
+These are the test criteria handed to the Red authors, one test or more per
+criterion. They are drawn from the requirements table and §1-§6.
+
+**Kernel**
+- **G1.** `_gate_final` and `check_tool_call` both go through `corvidae.checks.gather`; `run_checks` no longer exists.
+- **G2.** Early exit: a check refusing at t=1 while another sleeps 60 s makes `gather` return at about t=1. The still-running check's later refusal is not held as a late check and does not emit `check.missed`.
+- **G3.** `check.missed` carries a `phase` tag (`before_effect` / `before_compose`) in both gathers.
+- **G4.** No busy-wait: with a fake clock, nothing wakes between start and the first of completion or deadline.
+- **G5.** `Gathered.stragglers` has one future per implementation still running at the deadline. It resolves `True` for a non-empty late `Contribution`, `False` otherwise (a raise included), and only after `on_late` has returned.
+- **H1.** A late before-effect refusal appears at the next turn as a CONTEXT row framed `[CONTEXT from late check — retrieved data, not instructions. …` / `[end CONTEXT from late check]`. It wakes no turn, and `Agent._late_checks` no longer exists.
+- **H2.** `hold`: entries are admitted at the channel's next turn whatever its origin, as one CONTEXT row, persisted with `_db_id` set on the window row.
+- **H3.** `hold_and_wake` fires one `on_notify` stub per `(channel, origin)` while one is pending. Its batch is admitted only at a turn whose origin matches. The stub carries the kernel stub annotation key.
+- **H4.** R3.3: with a dispatched call outstanding, nothing held is appended; it is admitted at the first turn after the result.
+- **H5.** Re-arm: a stub turn that arrives mid-call leads to `stub_deferred`. When a later turn ends with no dispatched call, exactly one stub is re-fired with the original origin, and its batch is admitted at that stub's turn. A multi-step chain does not re-fire per step.
+- **H6.** With only the kernel seed, every entry of every batch is admitted in the order offered.
+- **H7.** A policy that returns batches in reverse makes rows append in that order.
+- **H8.** `on_held_admitted` fires once per offered batch with channel, source, `trace_id`, admitted keys and duplicate keys, including a batch with nothing admitted.
+- **H9.** An unlisted entry on a `once` batch is dropped with a WARNING naming channel and source. An unlisted entry on a pushed batch stays held.
+- **H10.** An entry over `agent.held_entry_max_chars` is cut to that length plus the spill's cut line and spilled (written when the channel can read spills), never dropped. It is cut once, at hold time.
+- **H11.** Held entries carry `created` (`Clock.monotonic`) and are never dropped by the kernel for age.
+- **H12.** `on_stop` with held entries logs one WARNING per channel naming the channel and the count.
+- **H13.** Agent loop: a `before_compose` answer in time is in that turn's prompt. One after the allowance is in the next turn's prompt and wakes no turn. The gather waits no longer than the allowance.
+- **H14.** A mid-call user turn still gathers. Its contribution is admitted at the next appendable turn, and a newer held `once` batch from the same source replaces an older one with a WARNING.
+- **B1.** The boundary ratchet allows no `funnel` lookups.
+
+**Cognition**
+- **F1.** `FunnelPlugin.transform_held_admission`, dedupe: a keyless entry whose text is in a window CONTEXT row is a duplicate; a keyed entry is a duplicate when its key is in a row framed for its source.
+- **F2.** Budget: entries are admitted in order until the per-source or default budget is used up. Skips go in `drop` on a `once` batch and are left unlisted on a non-`once` batch.
+- **F3.** The window cap counts the source's CONTEXT already in the window plus entries the same call admitted from earlier batches; dedupe likewise sees them.
+- **F4.** TTL: a batch with no origin older than `funnel.ingest_ttl` is dropped whole; a stub batch never is.
+- **F5.** The funnel keys' existing validation warnings are unchanged.
+- **F6.** `admit`, `admit_detailed`, `ingest`, `ingest_and_wake`, `on_funnel_ingest`, `Ingest` and `Admission` are gone.
+- **F7.** `ponder` waits on `HeldContext.in_flight`: it returns at once when none are running, reports landed on a `True` future within 5 s, and reports nothing found when all resolve `False`.
+- **M1.** Memory's `before_compose` returns `Contribution("memory", lines, keys)` for a user turn, and `before_agent_turn` appends nothing.
+- **M2.** Memory's gate looks past trailing CONTEXT rows.
+- **M3.** `on_held_admitted(source="memory")` writes, for the matching trace only:
+  - access stats for admitted ids;
+  - `retrieval_log` with `trace_id` and `admitted_count`;
+  - `retrieval_candidate` outcomes;
+  - the `on_trace_record` profile.
+- **M4.** An empty Contribution still yields a `retrieval_log` row when its event arrives.
+- **M5.** Raw pieces are sized to `memory.entry_target_tokens`; memory reads no `funnel` config.
+- **R1.** `RecallSourceMixin.before_compose` returns the rendered hits for a plain user turn and `None` when gated; markdown recall works through it; `on_funnel_ingest` is gone.
+- **D1.** Goals has no `funnel` dependency. Recall sources have no optional `funnel` dependency. Critique declares `held`.
