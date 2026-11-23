@@ -22,6 +22,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
 from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
 from .test_appraisal_stage2 import StubClient, _read_appraisal, _teardown, build_env
+from tests.cognition.trace_helpers import add_trace
 
 # The six fields the fork no longer asks for.
 _DIMENSIONS = ("valence", "stakes", "ambiguity", "commitment_density", "novelty", "correction")
@@ -34,8 +35,8 @@ _REPLY = json.dumps({
 
 
 async def _fork_once(tmp_path, offer=None, reply=_REPLY):
-    """Run one stage-2 fork for exchange "k" with a retrieval profile recorded
-    in exchange_log; return (the fork call, the stored stage 2)."""
+    """Run one stage-2 fork for exchange "k" with a retrieval profile reported
+    on the trace; return (the fork call, the stored stage 2)."""
     env = await build_env(tmp_path)
     agent = FakeForkAgent({"appraisal"}, text=reply)
     env.pm.unregister(name="agent")
@@ -44,14 +45,16 @@ async def _fork_once(tmp_path, offer=None, reply=_REPLY):
     if offer is not None:
         env.appraisal.set_lens_offer(lambda: offer)
     # A retrieval profile the old prompt would have quoted.
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
-    await env.outcome.update_exchange("k", retrieval_top_score=0.87, retrieval_hit_count=3)
+    await env.pm.ahook.on_trace_record(
+        trace_id="k", channel_id=env.channel.id, source="memory", origin=None,
+        record={"retrieval_top_score": 0.87, "retrieval_hit_count": 3},
+    )
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="what did we agree?", annotations={})
     try:
         await env.appraisal._run_stage2(
             env.channel, "k", "what did we agree?", "we agreed on Tuesday", None)
-        stored = ((await _read_appraisal(env.db, "k")) or {}).get("stage2")
+        stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     finally:
         await _teardown(env)
     return agent.calls[0], stored
@@ -139,6 +142,8 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
+        # The trace protocol plugin first: outcome_log depends on it.
+        add_trace(pm)
         outcome = OutcomeLogPlugin()
         pm.register(outcome, name="outcome_log")
         await outcome.on_init(pm=pm, config={})
@@ -165,7 +170,7 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
         # Appraisal leaves memory's own prior in place.
         assert isinstance(memory.importance_prior, RubricPrior)
 
-        # Dialog, and old stage-2 vectors covering it (stored history).
+        # Dialog to consolidate; nothing appraisal recorded can reach the prior.
         channel = Channel(transport="test", scope="conv", config=ChannelConfig())
         rowids = []
         for role, content in [("user", "here is the plan"),
@@ -174,12 +179,6 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
                 channel=channel, message={"role": role, "content": content},
                 message_type=MessageType.MESSAGE,
             ))
-        for key, rowid in (("x1", rowids[0]), ("x2", rowids[1])):
-            await outcome.upsert_exchange(
-                key, channel.id, "user",
-                appraisal={"stage2": {"stakes": 0.9, "valence": 0.9, "novelty": 0.9}},
-            )
-            await outcome.update_exchange(key, message_rowid=rowid)
 
         await memory._consolidate_range(channel.id, rowids[-1], "test")
 
