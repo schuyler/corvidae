@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS fork_log (
     window_first_rowid INTEGER,
     window_last_rowid INTEGER,
     window_cut INTEGER,
-    prompt_sha256 TEXT NOT NULL,
+    prompt_sha256 BLOB NOT NULL,
     renderer_sha TEXT,
     findings_json TEXT,
     verdict TEXT,
@@ -85,12 +85,16 @@ CREATE TABLE IF NOT EXISTS fork_block (
 LABELS = frozenset({"accepted", "declined", "superseded"})
 
 
-def prompt_sha256(messages: Sequence[dict]) -> str:
-    """The hash of a rendered prompt: the messages, in order, as sent."""
+def prompt_sha256(messages: Sequence[dict]) -> bytes:
+    """The hash of a rendered prompt: the messages, in order, as sent.
+
+    Raw 32 bytes, not 64 hex characters: the hex form doubles the field on
+    every row, and there is one row per fork (#1204).
+    """
     blob = json.dumps(
         messages, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
-    return hashlib.sha256(blob).hexdigest()
+    return hashlib.sha256(blob).digest()
 
 
 def digest_of(text: str) -> bytes:
@@ -378,12 +382,23 @@ class ForkLog:
                 "SELECT sha256 FROM fork_block ORDER BY created_at"
             ) as cur:
                 blocks = list(await cur.fetchall())
+            stranded = False
             for row in blocks:
                 if used <= max_bytes:
                     break
                 dropped = await self._drop_block(row["sha256"])
+                if dropped:
+                    stranded = True
                 used -= dropped
                 freed += dropped
+            if stranded:
+                # Text a fork needs but no longer has: the rows say so, rather
+                # than looking reconstructable from a snapshot they never had.
+                await db.execute(
+                    "UPDATE fork_log SET reconstructable = 0"
+                    " WHERE snapshot_sha256 IS NULL"
+                )
+                await db.commit()
         return freed
 
     async def _drop_block(self, sha: str) -> int:

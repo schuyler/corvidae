@@ -48,7 +48,7 @@ async def test_record_writes_the_row_and_its_prompt_hash(log):
     assert row["channel_id"] == "discord:1"
     assert row["instruction"] == "is this fine?"
     assert row["verdict"] == "ok"
-    assert row["prompt_sha256"] == prompt_sha256(MESSAGES)
+    assert bytes(row["prompt_sha256"]) == prompt_sha256(MESSAGES)
 
 
 async def test_the_hash_follows_the_rendered_text(log):
@@ -177,7 +177,7 @@ async def test_evict_drops_text_and_never_a_row(log):
         assert (await cur.fetchone())["n"] == 4
     row = await _row(log, fork_ids[0])
     assert row["label"] == "declined"
-    assert row["prompt_sha256"] == prompt_sha256(MESSAGES)
+    assert bytes(row["prompt_sha256"]) == prompt_sha256(MESSAGES)
 
 
 async def _record_with(log, digests, *, parent=None, chain_from=0, channel="discord:1"):
@@ -237,3 +237,23 @@ async def test_a_length_mismatch_is_not_papered_over(log):
         log, [digest_of("b")], parent=first, chain_from=7
     )
     assert await log.resolve_chain(broken) is None
+
+
+async def test_eviction_marks_the_rows_it_strands(log):
+    ids = [
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=MESSAGES,
+            system_prompt=f"version {n} " + "x" * 4000,
+        )
+        for n in range(3)
+    ]
+    before = await log.bytes_used()
+    await log.evict(max_bytes=before // 2)
+    db = await log._conn()
+    async with db.execute(
+        "SELECT reconstructable FROM fork_log WHERE id = ?", (ids[0],)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["reconstructable"] == 0
