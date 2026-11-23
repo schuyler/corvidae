@@ -1235,7 +1235,7 @@ class AgentSpec:
         implementation that can fail should catch and log its own errors.
 
         The ``final`` firing runs under the channel's check allowance
-        (``corvidae.checks.run_checks``, #1162): every implementation runs
+        (``corvidae.checks.gather``, #1162): every implementation runs
         concurrently, an implementation that raises is logged and counts as
         no opinion while its siblings' verdicts stand, and the reply waits
         for verdicts no longer than the allowance. A verdict that arrives
@@ -1296,7 +1296,7 @@ class AgentSpec:
         next, so the turn continues.
 
         Runs under the channel's check allowance
-        (``corvidae.checks.run_checks``): every implementation runs
+        (``corvidae.checks.gather``): every implementation runs
         concurrently and the call waits no longer than the allowance, then
         runs unchecked; the miss is recorded. A refusal that arrives later
         refuses nothing but reaches the channel's window as a framed CONTEXT
