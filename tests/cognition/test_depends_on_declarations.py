@@ -57,7 +57,7 @@ def test_memory_depends_on_kernel_clock_and_idle() -> None:
     memory resolves the objects leniently.
     """
     memory = _load("corvidae_cognition.memory.MemoryPlugin")
-    assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle", "trace"})
+    assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle", "trace", "registry"})
 
 
 def test_goals_depends_on_persistence_memory_funnel_clock() -> None:

@@ -10,6 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from corvidae.agent import Agent
+from corvidae.channel import ChannelRegistry
+
 from corvidae_restart import (
     RestartPlugin,
     _is_number,
@@ -27,7 +30,7 @@ class FakeChannel:
         self.id = cid
 
 
-class FakeRegistry:
+class FakeRegistry(ChannelRegistry):
     def __init__(self, channels: dict[str, FakeChannel] | None = None):
         self._channels = channels or {}
 
@@ -35,7 +38,11 @@ class FakeRegistry:
         return self._channels.get(cid)
 
 
-class FakeAgent:
+class FakeAgent(Agent):
+    # Shadow Agent's read-only `tools` property so the stub can assign it;
+    # subclassing Agent is what makes it pass get_dependency's isinstance.
+    tools: dict = {}
+
     def __init__(self):
         self.tools = {}
         self.delivered_errors: list[dict] = []
@@ -592,7 +599,7 @@ async def test_restart_end_to_end_plugin_manager(tmp_path):
 
     # Fake the agent plugin (dependency)
     from unittest.mock import MagicMock
-    agent = MagicMock()
+    agent = MagicMock(spec=Agent)
     agent.tools = {}
     pm.register(agent, name="agent")
 
@@ -702,12 +709,13 @@ async def test_deliver_notices_end_to_end(tmp_path):
         "_base_dir": str(tmp_path),
         "restart": {
             "home_channel": "test:scope1",
+    print("DBG", isinstance(agent, Agent), Agent, type(agent.__class__))
             "notify_delay_seconds": 0,
         },
         "plugins": {"disabled": []},
     }
 
-    agent = MagicMock()
+    agent = MagicMock(spec=Agent)
     agent.tools = {"some_tool": True}  # non-empty so _wait_until_ready passes
     pm.register(agent, name="agent")
 

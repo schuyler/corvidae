@@ -18,7 +18,7 @@ import pytest
 from corvidae.fork import ForkRefused
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
 
-from helpers import FakeForkAgent, window_of
+from helpers import FakeForkAgent, add_kernel_registry, window_of
 from .test_memory_consolidation import (
     THREE_ENTRIES, assert_shared_columns_equal, build_consolidation_env,
     entries_reply, fetch_memories, fetch_stamped_memories, fetch_watermark,
@@ -48,7 +48,8 @@ async def env():
     """(memory, stub client, channel, db, rowids) with DIALOG persisted and
     a live window holding it."""
     memory, persistence, stub, channel, db = await build_consolidation_env()
-    memory.pm.register(_Registry(channel), name="registry")
+    # The builder already registered the kernel registry; add the channel to it.
+    add_kernel_registry(memory.pm).channels[channel.id] = channel
     ids = await seed_dialog(persistence, channel, DIALOG)
     channel.conversation = window_of(channel.id, ids, contents=[c for _, c in DIALOG])
     yield memory, stub, channel, db, ids
@@ -225,7 +226,8 @@ def _no_window(memory, channel, ids):
 
 
 def _no_registry_channel(memory, channel, ids):
-    memory.pm.unregister(name="registry")
+    # Drop the channel from the kernel registry so the range has no live window.
+    add_kernel_registry(memory.pm).channels.pop(channel.id, None)
 
 
 def _range_partly_trimmed(memory, channel, ids):
@@ -395,7 +397,8 @@ async def env_with_persistence():
     """The ``env`` fixture plus the persistence plugin, for tests that add a
     message after the channel has already skipped."""
     memory, persistence, stub, channel, db = await build_consolidation_env()
-    memory.pm.register(_Registry(channel), name="registry")
+    # The builder already registered the kernel registry; add the channel to it.
+    add_kernel_registry(memory.pm).channels[channel.id] = channel
     ids = await seed_dialog(persistence, channel, DIALOG)
     channel.conversation = window_of(
         channel.id, ids, contents=[c for _, c in DIALOG]

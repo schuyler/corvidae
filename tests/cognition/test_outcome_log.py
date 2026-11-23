@@ -13,6 +13,7 @@ import pytest
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from helpers import add_kernel_registry
 from tests.cognition.trace_helpers import add_trace, outcomes_file, read_outcomes
 
 CH = Channel(transport="irc", scope="#a")
@@ -29,8 +30,10 @@ async def _setup(db, *, registry: ChannelRegistry | None = None):
     persistence.db = db
     pm.register(persistence, name="persistence")
     add_trace(pm)
-    if registry is not None:
-        pm.register(registry, name="registry")
+    # The kernel registry outcome_log resolves. A test that passes none gets
+    # one that holds CH, the channel most tests record against.
+    known = add_kernel_registry(pm, registry)
+    known.get_or_create(CH.transport, CH.scope)
     plugin = OutcomeLogPlugin()
     pm.register(plugin, name="outcome_log")
     await plugin.on_init(pm, {})
