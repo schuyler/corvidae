@@ -40,7 +40,6 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
         "agent": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/appraisal.py": {
-        "memory": (1, "#1175"),
         "outcome_log": (1, "#1179"),
         "persistence": (1, "#1180"),
         "task": (1, "#1180"),
@@ -65,7 +64,6 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
         "idle": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/memory.py": {
-        "appraisal": (1, "#1175"),
         "clock": (1, "#1180"),
         "funnel": (1, "#1176"),
         "idle": (1, "#1180"),

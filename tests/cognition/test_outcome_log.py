@@ -394,7 +394,6 @@ class TestUnregisteredChannelRefusals:
         appraisal = AppraisalPlugin()
         pm.register(appraisal, name="appraisal")
         await appraisal.on_init(pm=pm, config=cfg)
-        await appraisal.on_start(config=cfg)
         gates = GatePlugin()
         pm.register(gates, name="gates")
         await gates.on_init(pm=pm, config=cfg)

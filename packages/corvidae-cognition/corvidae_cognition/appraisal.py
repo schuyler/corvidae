@@ -1,17 +1,14 @@
 """AppraisalPlugin — the stage-2 appraisal of a finished exchange.
 
 After the agent answers, a silent task forks the live window and asks the
-agent to score the exchange (valence, stakes, ambiguity, commitment density,
-novelty), to list the claims about the past its reply made, and to score the
-critique lenses on offer (plans/implementation/phase-2.md WP2.5). The vector
-feeds memory's importance prior and valence tag, critique's lens selection
-and its provenance check. Stage-1 appraisal, which scored text at the gates
-from English word lists and a probe of memory's full-text index, was
-removed (#1185).
-
-Every parameter here is a commented best-guess constant, runtime-tunable
-through both surfaces via ``corvidae.tuning.resolve_tunable`` (operator
-directive 2, 2026-07-06).
+agent to list the claims about the past its reply made and to score the
+critique lenses on offer. The claims feed critique's provenance check and
+the lens scores its lens selection; both are persisted to the outcome log,
+where the lens scores are the labels a trained readout head learns from
+(#141). Stage-1 appraisal, which scored text at the gates from English word
+lists and a probe of memory's full-text index, was removed (#1185); the
+five-dimension appraisal vector, the correction flag, the importance prior
+built from them and memory's valence tag were removed as unused (#1189).
 """
 
 from __future__ import annotations
@@ -27,7 +24,6 @@ from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
-from corvidae.tuning import resolve_tunable
 from corvidae_cognition.config_keys import warn_removed_keys
 from corvidae_cognition.silence import is_decline
 
@@ -35,12 +31,17 @@ from corvidae_cognition.silence import is_decline
 # and __name__ would be corvidae_cognition.appraisal.
 logger = logging.getLogger("corvidae.appraisal")
 
-# Stage-1 keys #1185 removed: each is warned by name at startup and reload,
-# and otherwise ignored.
+# Keys that configure nothing any more: each is warned by name at startup
+# and reload, and otherwise ignored. The stage-1 keys went with stage 1
+# (#1185); the importance-prior weights went with the appraisal vector (#1189).
+_PRIOR_REMOVED = "the appraisal vector and the importance prior built from it were removed (#1189)"
 _REMOVED_KEYS = {
     "appraisal.probe": "stage-1 appraisal and its memory probe were removed (#1185)",
     "appraisal.weights": "stage-1 appraisal and its salience score were removed (#1185)",
     "appraisal.novelty": "stage-1 appraisal and its memory probe were removed (#1185)",
+    "appraisal.prior.w_stakes": _PRIOR_REMOVED,
+    "appraisal.prior.w_valence": _PRIOR_REMOVED,
+    "appraisal.prior.w_novelty": _PRIOR_REMOVED,
 }
 
 # Bound on the originating-text LRU (AppraisalPlugin._originating_text).
@@ -48,35 +49,13 @@ _REMOVED_KEYS = {
 # mid-cycle by design, so a single per-channel slot would be clobbered.
 ORIGINATING_TEXT_LRU_MAXSIZE = 512
 
-# Stage-2 importance-prior weights (WP2.5 point 3). Best-guess commented
-# defaults AND runtime tunables (directive 2), resolved at consolidation time.
-PRIOR_W_STAKES_DEFAULT = 0.4      # appraisal.prior.w_stakes
-PRIOR_W_VALENCE_DEFAULT = 0.3     # appraisal.prior.w_valence
-PRIOR_W_NOVELTY_DEFAULT = 0.3     # appraisal.prior.w_novelty
-
 # Documented copy of this text lives in prompts/appraisal.md. No live stage
 # reads it: stage 2 runs only as a fork and skips when there is none (#320), so
 # the appraisal.stage2_prompt key is accepted and never consulted (#1129).
 DEFAULT_STAGE2_PROMPT = (
     "You are appraising a completed exchange for the agent's own perception "
-    "system. You are given the originating message, the agent's final "
-    "response, and a summary of what the agent's memory retrieval found for "
-    "this exchange. Score the EXCHANGE (not the agent's performance) on each "
-    "dimension, 0.0-1.0.\n\n"
-    "- valence: the emotional tone of the exchange for the agent. 0.0 = "
-    "strongly negative (conflict, failure, distress), 0.5 = neutral, 1.0 = "
-    "strongly positive (success, warmth, praise).\n"
-    "- stakes: how much depends on this exchange being handled well. "
-    "Commitments, deadlines, personal disclosures, decisions = high; idle "
-    "chat = low.\n"
-    "- ambiguity: how much of the message's intent remained open to "
-    "interpretation. 0.0 = fully explicit; 1.0 = the agent had to guess.\n"
-    "- commitment_density: how many concrete commitments, facts, numbers, or "
-    "promises the exchange contains, relative to its length.\n"
-    "- novelty: how new this exchange's content is relative to what the "
-    "retrieval summary shows the agent already knows. Familiar ground = low.\n"
-    "- correction: true if the user was correcting the agent — telling it "
-    "that something it said, remembered, or did was wrong.\n"
+    "system. You are given the originating message and the agent's final "
+    "response. List the claims about the past the response makes.\n\n"
     "- past_claims: every statement in the agent's final response that "
     "presents something as established BEFORE this exchange — something "
     "said, agreed, promised, decided or done earlier — in any language or "
@@ -87,42 +66,21 @@ DEFAULT_STAGE2_PROMPT = (
     "statement would have used. An empty list when there are none.\n\n"
     "Respond with a single JSON object, nothing else:\n"
     "{\n"
-    '  "valence": 0.5,\n'
-    '  "stakes": 0.0,\n'
-    '  "ambiguity": 0.0,\n'
-    '  "commitment_density": 0.0,\n'
-    '  "novelty": 0.5,\n'
-    '  "correction": false,\n'
     '  "past_claims": [{"claim": "...", "queries": ["..."]}]\n'
     "}"
 )
 
 # Fork instruction for stage 2 (GitHub issue #51). With agent.forks on, the
 # appraisal is a fork of the live window: this text is appended as a user
-# turn, followed by a quote of the exchange's opening message and the
-# retrieval profile. Second person: the fork is the agent appraising its own
+# turn, followed by a quote of the exchange's opening message and of the
+# response. Second person: the fork is the agent appraising its own
 # exchange. Documented copy in prompts/appraisal_fork.md; the static config
 # key appraisal.stage2_fork_prompt (not a runtime tunable) overrides it.
 DEFAULT_STAGE2_FORK_PROMPT = (
     "[Appraisal] Pause the conversation here and appraise, for your own "
     "perception system, the exchange you just completed: from the message "
-    "quoted below through your final response. Score the EXCHANGE (not your "
-    "performance) on each dimension, 0.0-1.0.\n\n"
-    "- valence: the emotional tone of the exchange for you. 0.0 = strongly "
-    "negative (conflict, failure, distress), 0.5 = neutral, 1.0 = strongly "
-    "positive (success, warmth, praise).\n"
-    "- stakes: how much depends on this exchange being handled well. "
-    "Commitments, deadlines, personal disclosures, decisions = high; idle "
-    "chat = low.\n"
-    "- ambiguity: how much of the message's intent remained open to "
-    "interpretation. 0.0 = fully explicit; 1.0 = you had to guess.\n"
-    "- commitment_density: how many concrete commitments, facts, numbers, or "
-    "promises the exchange contains, relative to its length.\n"
-    "- novelty: how new this exchange's content is relative to what you "
-    "already knew, going by the memory retrieval note below. Familiar "
-    "ground = low.\n"
-    "- correction: true if the user was correcting you, telling you that "
-    "something you said, remembered, or did was wrong.\n"
+    "quoted below through your final response. List the claims about the "
+    "past your final response makes.\n\n"
     "- past_claims: every statement in your final response that presents "
     "something as established BEFORE this exchange — something said, "
     "agreed, promised, decided or done earlier — in any language or "
@@ -133,12 +91,6 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     "used. An empty list when there are none.\n\n"
     "Do not call tools. Respond with a single JSON object, nothing else:\n"
     "{\n"
-    '  "valence": 0.5,\n'
-    '  "stakes": 0.0,\n'
-    '  "ambiguity": 0.0,\n'
-    '  "commitment_density": 0.0,\n'
-    '  "novelty": 0.5,\n'
-    '  "correction": false,\n'
     '  "past_claims": [{"claim": "...", "queries": ["..."]}]\n'
     "}"
 )
@@ -149,12 +101,6 @@ DEFAULT_STAGE2_FORK_PROMPT = (
 STAGE2_SCHEMA = {
     "type": "object",
     "properties": {
-        "valence": {"type": "number"},
-        "stakes": {"type": "number"},
-        "ambiguity": {"type": "number"},
-        "commitment_density": {"type": "number"},
-        "novelty": {"type": "number"},
-        "correction": {"type": "boolean"},
         "past_claims": {
             "type": "array",
             "items": {
@@ -167,10 +113,7 @@ STAGE2_SCHEMA = {
             },
         },
     },
-    "required": [
-        "valence", "stakes", "ambiguity", "commitment_density",
-        "novelty", "correction", "past_claims",
-    ],
+    "required": ["past_claims"],
 }
 
 # Bounds on the stage-2 past_claims list (#155), so one verbose reply
@@ -208,11 +151,6 @@ def _extra_body_with_lenses(names: list[str]) -> dict:
             "json_schema": {"name": "stage2_appraisal", "schema": schema},
         }
     }
-
-
-def clamp01(x: float) -> float:
-    """Clamp a float into [0.0, 1.0]."""
-    return max(0.0, min(1.0, x))
 
 
 def _parse_json_block(text: str) -> dict:
@@ -280,23 +218,16 @@ def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, fl
 def _stage2_from_text(
     text: str, offered: list[str] | None = None, trace_id: str | None = None,
 ) -> dict:
-    """Parse a stage-2 reply into the clamped vector; raises on bad output.
+    """Parse a stage-2 reply into its past claims; raises when the reply
+    holds no JSON object.
 
     With ``offered`` (the critique lenses the fork was asked to score) the
     result also carries ``lenses``, the normalized critique vector, unless
     the reply has no usable one: a bad ``lenses`` field never costs the
-    dimensions.
+    claims. Any other field the reply carries is ignored.
     """
     parsed = _parse_json_block(text)
-    stage2 = {
-        "valence": clamp01(float(parsed["valence"])),
-        "stakes": clamp01(float(parsed["stakes"])),
-        "ambiguity": clamp01(float(parsed["ambiguity"])),
-        "commitment_density": clamp01(float(parsed["commitment_density"])),
-        "novelty": clamp01(float(parsed["novelty"])),
-        "correction": bool(parsed.get("correction", False)),
-        "past_claims": _past_claims(parsed.get("past_claims")),
-    }
+    stage2: dict = {"past_claims": _past_claims(parsed.get("past_claims"))}
     # The critique vector, when lenses were offered; absent when unusable.
     if offered:
         vector = _lens_vector(parsed.get("lenses"), offered, str(trace_id))
@@ -309,7 +240,7 @@ def _past_claims(raw) -> list[dict]:
     """Normalize stage 2's past_claims: a list of {claim, queries}.
 
     Tolerant by design: a missing field is no claims, and a malformed entry
-    is dropped with a warning rather than failing the whole stage-2 vector.
+    is dropped with a warning rather than failing the whole stage 2.
     Each claim keeps its non-empty string queries; everything is capped.
     """
     if raw is None:
@@ -397,42 +328,6 @@ def entropy_summary(logprobs: dict | None) -> dict | None:
     }
 
 
-class AppraisalPrior:
-    """Consolidation-time importance prior driven by stored appraisals (WP2.5).
-
-    Wraps a fallback prior (the existing RubricPrior at install time). For a
-    consolidation range it scores each covered exchange from its appraisal
-    envelope and takes the max; when no appraisal covers the range — or the
-    lookup fails — it delegates to the wrapped prior. Satisfies the
-    ``ImportancePrior`` protocol with the two additive optional parameters.
-    """
-
-    def __init__(self, appraisal: "AppraisalPlugin", fallback) -> None:
-        self._appraisal = appraisal
-        self._fallback = fallback
-
-    async def score(
-        self, messages, msg_id_range=None, channel=None, *,
-        hint: float | None = None,
-    ) -> float:
-        if msg_id_range is not None:
-            try:
-                covered = await self._appraisal.importance_over_range(
-                    channel, msg_id_range
-                )
-            except Exception:
-                logger.warning(
-                    "appraisal importance prior failed; using fallback",
-                    exc_info=True,
-                )
-                covered = None
-            if covered is not None:
-                return covered
-        return await self._fallback.score(
-            messages, msg_id_range=msg_id_range, channel=channel, hint=hint
-        )
-
-
 def _declined(channel, response_text: str, trace_id: str | None) -> bool:
     """Whether this final is a decline (#420), failing toward appraising.
 
@@ -451,10 +346,10 @@ def _declined(channel, response_text: str, trace_id: str | None) -> bool:
 
 
 class AppraisalPlugin(CorvidaePlugin):
-    """Stage-2 appraisal: a fork of the window scores each finished exchange.
+    """Stage-2 appraisal: a fork of the window lists each finished
+    exchange's past claims and scores the critique lenses on offer.
 
-    Soft-uses the outcome-log writer and memory's importance-prior seam;
-    fail-soft when either is absent.
+    Soft-uses the outcome-log writer; fail-soft when it is absent.
     """
 
     depends_on = frozenset({"persistence"})
@@ -489,7 +384,7 @@ class AppraisalPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
-        # A stage-1 key #1185 removed configures nothing: say so by name.
+        # A removed key (#1185, #1189) configures nothing: say so by name.
         warn_removed_keys(config, _REMOVED_KEYS)
         self._fork_prompt = resolve_prompt(
             config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
@@ -497,9 +392,8 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        # Swap the config reference; every tunable resolves through
-        # resolve_tunable at decision time, so this, the removed-key
-        # report and the fork prompt are all reload needs.
+        # Swap the config reference; it, the removed-key report and the
+        # fork prompt are all reload needs.
         self.config = config
         warn_removed_keys(config, _REMOVED_KEYS)
         try:
@@ -510,18 +404,6 @@ class AppraisalPlugin(CorvidaePlugin):
             logger.warning(
                 "appraisal: fork prompt reload failed (%s); keeping previous",
                 exc,
-            )
-
-    @hookimpl
-    async def on_start(self, config: dict) -> None:
-        """Install the appraisal-driven importance prior over memory's own."""
-        # Install the appraisal-driven importance prior over MemoryPlugin's
-        # default (§3.2 consumer 3). Fail-soft when memory is absent — the
-        # degradation contract keeps the system on the spec rubric.
-        memory = self.pm.get_plugin("memory") if hasattr(self, "pm") else None
-        if memory is not None:
-            memory.importance_prior = AppraisalPrior(
-                appraisal=self, fallback=memory.importance_prior
             )
 
     @hookimpl
@@ -556,7 +438,8 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     async def get_stage2(self, trace_id: str) -> dict | None:
-        """Pure reader for the stage-2 vector (WP2.5 writes it)."""
+        """Pure reader for the exchange's stored stage 2 (past claims and
+        lens scores), or None."""
         return await self._read_vector(trace_id, "stage2")
 
     def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
@@ -565,7 +448,7 @@ class AppraisalPlugin(CorvidaePlugin):
         Every enqueued stage 2 notifies each listener exactly once, awaited
         with keyword arguments ``channel, trace_id, response_text, annotations,
         stage2``, outside the appraisal attribution: ``stage2`` is the
-        persisted vector, or ``None`` when no vector was produced (the fork
+        persisted stage 2, or ``None`` when none was produced (the fork
         missed, the reply was unusable, or the task raised). A listener must
         accept ``None``. Cancellation (shutdown) notifies no one.
         A listener's exception is logged and never reaches the others. This
@@ -645,7 +528,7 @@ class AppraisalPlugin(CorvidaePlugin):
                     exc_info=True, extra={"channel": channel.id, "trace_id": trace_id},
                 )
                 stage2 = None
-            # Every enqueued stage 2 notifies exactly once, with the vector or
+            # Every enqueued stage 2 notifies exactly once, with the result or
             # None on a miss. Listeners run after _run_stage2 has reset its
             # attribution, so their own work isn't billed to appraisal.
             await self._notify_stage2(channel, trace_id, response_text, annotations, stage2)
@@ -673,25 +556,24 @@ class AppraisalPlugin(CorvidaePlugin):
     ) -> dict | None:
         """The silent task body: one fork of the window, merge-persist stage 2.
 
-        Returns the stage-2 vector, or None when no vector was produced: a
-        fork miss skips the stage with a warning and makes no standalone call
-        (PRD §3.8.5, #320), and the exchange gets no stage-2 vector.
+        Returns the stage 2, or None when none was produced: a fork miss
+        skips the stage with a warning and makes no standalone call
+        (PRD §3.8.5, #320), and the exchange gets no stage 2.
 
         Sets attribution inside the body (usage rows join to the exchange for
         WP2.10's per-band cost report). Malformed model output is logged and
-        the exchange gets no stage-2 vector — no exception escapes (trap #10).
+        the exchange gets no stage 2 — no exception escapes (trap #10).
         """
         token = set_attribution(
             stage="appraisal", channel_id=channel.id, trace_id=trace_id
         )
         try:
-            profile = await self._retrieval_profile_summary(trace_id)
             # A fork of the live window; a miss skips (logged inside).
             stage2 = await self._fork_stage2(
-                channel, trace_id, originating_text, response_text, profile
+                channel, trace_id, originating_text, response_text
             )
             # A miss was already logged by _fork_stage2: the exchange gets
-            # no stage-2 vector (no persist, no listeners, no standalone call).
+            # no stage 2 (no persist, no listeners, no standalone call).
             if stage2 is None:
                 return None
 
@@ -720,17 +602,17 @@ class AppraisalPlugin(CorvidaePlugin):
         self, channel, trace_id: str, reason: str, **kwargs
     ) -> None:
         """Log that stage 2 was skipped, naming the stage, trace, channel and
-        what was missing (PRD §3.8.5); the exchange gets no stage-2 vector."""
+        what was missing (PRD §3.8.5); the exchange gets no stage 2."""
         logger.warning(
             "stage-2 appraisal skipped for trace %s on channel %s: %s; "
-            "the exchange gets no stage-2 vector",
+            "the exchange gets no stage 2",
             trace_id, channel.id, reason,
             extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
         )
 
     async def _fork_stage2(
         self, channel, trace_id: str, originating_text: str | None,
-        response_text: str | None, profile: str,
+        response_text: str | None,
     ) -> dict | None:
         """Stage 2 from a fork of the channel's live window, or None (a skip).
 
@@ -771,11 +653,10 @@ class AppraisalPlugin(CorvidaePlugin):
         instruction = (
             f"{prompt}\n\n"
             f"The exchange began with the message «{quote(originating_text)}», "
-            f"and the response you sent began «{quote(response_text)}».\n"
-            f"Memory retrieval for this exchange: {profile}"
+            f"and the response you sent began «{quote(response_text)}»."
         )
         # The critique lenses on offer, each with its question (none when no
-        # provider is set or it raised: stage 2 then asks for dimensions only).
+        # provider is set or it raised: stage 2 then asks for the claims only).
         offer = self._current_offer(trace_id)
         extra_body = STAGE2_EXTRA_BODY
         if offer:
@@ -808,7 +689,7 @@ class AppraisalPlugin(CorvidaePlugin):
         """The lenses on offer for this stage-2 call; empty when none.
 
         A provider that raises costs the exchange its critique vector, not
-        its dimensions: warn naming the trace and offer nothing.
+        its claims: warn naming the trace and offer nothing.
         """
         if self._lens_offer is None:
             return []
@@ -817,145 +698,10 @@ class AppraisalPlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "stage-2 lens offer failed for trace %s; stage 2 asks for "
-                "dimensions only and the exchange gets no critique vector",
+                "the claims only and the exchange gets no critique vector",
                 trace_id, exc_info=True, extra={"trace_id": trace_id},
             )
             return []
-
-    async def _retrieval_profile_summary(self, trace_id: str) -> str:
-        """Render the exchange's retrieval profile as a short prompt line."""
-        db = self._exchange_db()
-        if db is None:
-            return "no retrieval recorded"
-        try:
-            async with db.execute(
-                "SELECT retrieval_top_score, retrieval_hit_count "
-                "FROM exchange_log WHERE trace_id = ?",
-                (trace_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-        except Exception:
-            return "no retrieval recorded"
-        if row is None or (row[0] is None and row[1] is None):
-            return "no retrieval recorded"
-        top, hits = row
-        if top is not None:
-            return f"{hits or 0} memory hit(s); top relevance score {top:.2f}"
-        return f"{hits or 0} memory hit(s)"
-
-    # ------------------------------------------------------------------
-    # Range readers (consolidation-time importance prior + valence, WP2.5)
-    # ------------------------------------------------------------------
-
-    async def importance_over_range(self, channel, msg_id_range) -> float | None:
-        """Max importance over this channel's exchanges whose message_rowid
-        is in the range (other channels' interleaved exchanges are ignored).
-
-        Per-exchange score = the stage-2 composite; an exchange with no stage
-        2 is skipped, including one that carries only a stage-1 score written
-        before stage 1 was removed (#1185). Returns None when no stage 2
-        covers the range (the caller falls back to the wrapped prior).
-        """
-        # Only this channel's exchanges: message_log ids are global.
-        envelopes = await self._appraisals_in_range(channel.id, msg_id_range)
-        if not envelopes:
-            return None
-        cfg = self.config
-        w_stakes = resolve_tunable(channel, cfg, "appraisal.prior.w_stakes", PRIOR_W_STAKES_DEFAULT)
-        w_valence = resolve_tunable(channel, cfg, "appraisal.prior.w_valence", PRIOR_W_VALENCE_DEFAULT)
-        w_novelty = resolve_tunable(channel, cfg, "appraisal.prior.w_novelty", PRIOR_W_NOVELTY_DEFAULT)
-        scores: list[float] = []
-        for env in envelopes:
-            # Only the stage-2 vector scores an exchange.
-            stage2 = env.get("stage2")
-            if isinstance(stage2, dict):
-                scores.append(clamp01(
-                    w_stakes * float(stage2.get("stakes", 0.0))
-                    + w_valence * abs(float(stage2.get("valence", 0.5)) - 0.5) * 2
-                    + w_novelty * float(stage2.get("novelty", 0.0))
-                ))
-        if not scores:
-            return None
-        return max(scores)
-
-    async def mean_valence(self, channel_id: str, msg_id_range) -> float | None:
-        """Mean stage-2 valence over the range on this channel, or None when
-        none present."""
-        # Only this channel's exchanges: message_log ids are global.
-        envelopes = await self._appraisals_in_range(channel_id, msg_id_range)
-        valences: list[float] = []
-        for env in envelopes:
-            stage2 = env.get("stage2")
-            if isinstance(stage2, dict) and stage2.get("valence") is not None:
-                valences.append(float(stage2["valence"]))
-        if not valences:
-            return None
-        return sum(valences) / len(valences)
-
-    async def _appraisals_in_range(
-        self, channel_id: str, msg_id_range
-    ) -> list[dict]:
-        """Return appraisal envelopes for this channel's exchanges whose
-        message rowid is in range."""
-        if not msg_id_range:
-            return []
-        lo, hi = msg_id_range
-        db = self._exchange_db()
-        if db is None:
-            return []
-        try:
-            async with db.execute(
-                # CAST AS BLOB so invalid UTF-8 stored as TEXT fails at this
-                # row's decode, not inside fetchall() (#232, #311).
-                "SELECT trace_id, CAST(appraisal AS BLOB) FROM exchange_log "
-                "WHERE message_rowid IS NOT NULL AND message_rowid >= ? "
-                "AND message_rowid <= ? AND appraisal IS NOT NULL "
-                "AND channel_id = ?",
-                (lo, hi, channel_id),
-            ) as cursor:
-                rows = await cursor.fetchall()
-        except Exception as exc:
-            # Rescue: treat as "no appraisals" but log it so the fallback
-            # to the rubric prior / NULL valence is visible.
-            logger.warning(
-                "appraisal: exchange_log lookup failed for channel %s, "
-                "messages %d–%d (%s); the record falls back to the rubric "
-                "prior and NULL valence",
-                channel_id, lo, hi, type(exc).__name__,
-                exc_info=True, extra={"channel": channel_id},
-            )
-            return []
-        envelopes: list[dict] = []
-        for trace_id, raw in rows:
-            # A corrupt value (bad JSON, invalid UTF-8, deep nesting) skips
-            # with one WARNING per row naming the trace id, channel and
-            # remedy — the #232 pattern — so a prior computed over fewer
-            # exchanges is never invisible (#311). Only out-of-band writes
-            # can produce one; the daemon's writers always emit valid JSON.
-            try:
-                env = json.loads(raw)
-            except (ValueError, TypeError, RecursionError):
-                logger.warning(
-                    "skipping unparseable appraisal for exchange %s on "
-                    "channel %s; the prior/valence is computed over the "
-                    "remaining exchanges — inspect or correct the row",
-                    trace_id, channel_id,
-                    exc_info=True,
-                    extra={"channel": channel_id, "trace_id": trace_id},
-                )
-                continue
-            if not isinstance(env, dict):
-                logger.warning(
-                    "skipping appraisal for exchange %s on channel %s: "
-                    "decoded to %s, not an envelope; the prior/valence is "
-                    "computed over the remaining exchanges — inspect or "
-                    "correct the row",
-                    trace_id, channel_id, type(env).__name__,
-                    extra={"channel": channel_id, "trace_id": trace_id},
-                )
-                continue
-            envelopes.append(env)
-        return envelopes
 
     def _exchange_db(self):
         """Return the persistence connection, which can read exchange_log,

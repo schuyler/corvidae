@@ -1457,9 +1457,8 @@ def _fused_keys(
 class ImportancePrior(Protocol):
     """Pluggable supplier of the consolidation-time importance prior (§3.1).
 
-    Held as ``MemoryPlugin.importance_prior`` and assignable by later
-    phases: the Phase 2 appraisal replaces the default rubric; a Phase 6
-    toggle adds a surprise term.
+    Held as ``MemoryPlugin.importance_prior`` and assignable, so a later
+    toggle can add a surprise term (PRD §3.7 Memory 2).
     """
 
     async def score(
@@ -1529,7 +1528,7 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at REAL NOT NULL,
     summary TEXT NOT NULL,              -- first-person, epistemic framing preserved
     importance REAL NOT NULL,           -- the prior (WP1a.6); updated by use in Phase 1b
-    valence REAL,                       -- NULL until Phase 2 appraisal
+    valence REAL,                       -- no longer written (#1189); older rows keep theirs
     topic_tags TEXT,                    -- JSON array of strings
     participants TEXT,                  -- JSON array of sender strings
     msg_id_start INTEGER NOT NULL,      -- message_log id range (raw-dialog link)
@@ -1967,7 +1966,8 @@ class MemoryPlugin(CorvidaePlugin):
         # the process. It no longer carries cross-plugin atomicity: that is
         # the write connection's BEGIN IMMEDIATE transaction (#221).
         self._db_lock = asyncio.Lock()
-        # Pluggable importance prior; replaced by later phases (§3.1).
+        # Pluggable importance prior: the consolidation reply's own rating,
+        # else the rubric (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
             lambda: self._llm().get_client("rubric"),
             lambda: self._rubric_prompt,
@@ -2964,7 +2964,7 @@ class MemoryPlugin(CorvidaePlugin):
         """Store ``record``'s entries for ``rows`` and move the watermark, atomically.
 
         Each entry becomes its own row sharing the range, importance,
-        valence, participants and stamp. With no record only the watermark
+        participants and stamp. With no record only the watermark
         moves (a range with no dialog).
         The write is a compare-and-set on ``expected_wm``: False when another
         task already moved the watermark, True once committed.
@@ -2983,9 +2983,8 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._set_watermark(wdb, channel_id, new_wm)
             return True
 
-        # The appraisal-driven prior (WP2.5) scores over the consolidated
-        # message-id range; pass the real channel when the registry has
-        # one, else a stub with empty runtime_overrides (sanctioned by
+        # The importance prior scores over the consolidated message-id
+        # range; pass the real channel when the registry has one, else a stub with empty runtime_overrides (sanctioned by
         # WP2.3's duck-typed resolver) so config/default surfaces apply.
         msg_id_range = (rows[0][0], rows[-1][0])
         registry = self.pm.get_plugin("registry")
@@ -3004,22 +3003,6 @@ class MemoryPlugin(CorvidaePlugin):
             )
         finally:
             reset_attribution(rubric_token)
-
-        # Valence: mean stage-2 valence over the range (NULL when none) —
-        # the §4.9-classifier deletion made real: affect is the appraisal
-        # already computed. Fail-soft when appraisal is absent.
-        valence: float | None = None
-        appraisal_plugin = self.pm.get_plugin("appraisal")
-        if appraisal_plugin is not None:
-            try:
-                valence = await appraisal_plugin.mean_valence(
-                    channel_id, msg_id_range
-                )
-            except Exception:
-                logger.warning(
-                    "mean-valence lookup failed; storing NULL valence",
-                    exc_info=True, extra={"channel_id": channel_id},
-                )
 
         # Date the record from when its source conversation happened,
         # not from when consolidation ran — imported history would
@@ -3086,7 +3069,6 @@ class MemoryPlugin(CorvidaePlugin):
                     summary=entry.narrative,
                     created_at=created_at,
                     importance=importance,
-                    valence=valence,
                     topic_tags=list(entry.topic_tags),
                     participants=list(record.participants),
                     msg_id_start=rows[0][0],
@@ -3171,7 +3153,7 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
-        created_at: float, importance: float, valence: float | None,
+        created_at: float, importance: float,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
         stamp: RecordStamp, exclude_ids: frozenset[int] = frozenset(),
@@ -3193,15 +3175,14 @@ class MemoryPlugin(CorvidaePlugin):
             )
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
-            "importance, valence, topic_tags, participants, "
+            "importance, topic_tags, participants, "
             "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model, trigger) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
                 summary,
                 importance,
-                valence,
                 json.dumps(topic_tags),
                 json.dumps(participants),
                 msg_id_start,
@@ -3357,7 +3338,7 @@ class MemoryPlugin(CorvidaePlugin):
         async with self._db_lock, self._write_txn() as wdb:
             memory_id = await self._insert_record(
                 wdb, channel_id=channel_id, summary=summary,
-                created_at=created_at, importance=importance, valence=None,
+                created_at=created_at, importance=importance,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
                 embedding=embedding, stamp=DIRECT_STAMP,

@@ -156,7 +156,11 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
         appraisal = AppraisalPlugin()
         pm.register(appraisal, name="appraisal")
         await appraisal.on_init(pm=pm, config=cfg)
-        await appraisal.on_start(config=cfg)
+        # Run every on_start appraisal implements (none, today), as the
+        # daemon's broadcast would, without restarting the other plugins.
+        for impl in pm.hook.on_start.get_hookimpls():
+            if impl.plugin is appraisal:
+                await impl.function(config=cfg)
 
         # Appraisal leaves memory's own prior in place.
         assert isinstance(memory.importance_prior, RubricPrior)
