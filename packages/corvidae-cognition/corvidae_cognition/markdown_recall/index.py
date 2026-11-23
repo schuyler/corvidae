@@ -250,6 +250,12 @@ class MarkdownIndex:
         # Always track the chunker version (and the encoder identity when
         # present), so a chunker bump rebuilds even an FTS-only index.
         await self._check_embedding_meta(db, identity)
+        # Commit the schema bookkeeping before anything else runs. Stamping
+        # embedding_meta is a DML, and this interpreter opens a write
+        # transaction on the first DML, so an uncommitted stamp would hold the
+        # write lock across the first embedding call of the pass that follows
+        # -- including a full rebuild's (corvidae#1211).
+        await db.commit()
         # The vector surface exists only with an embedding profile, a loadable
         # sqlite-vec extension, and no identity mismatch; anything else degrades
         # to FTS5-only. Text is canonical; vectors are a cache.
@@ -558,6 +564,16 @@ class MarkdownIndex:
             pass
         async with db.execute("DELETE FROM manifest") as _c:
             pass
+        # Commit before any model call. This interpreter opens a write
+        # transaction on the first DML (aiosqlite keeps sqlite3's legacy
+        # isolation_level=""), so without this the whole corpus's embedding
+        # I/O sits inside one write transaction and every other writer to
+        # this database times out at its busy deadline -- a single slow
+        # embedding call measured 646 s while the lock was held
+        # (corvidae#1211). The index is a rebuildable cache, so an
+        # interrupted rebuild between here and the per-file commits costs a
+        # re-walk, not consistency.
+        await db.commit()
         for path, (size, mtime_ns) in files.items():
             await self._reconcile_file(db, path, size, mtime_ns, None)
         await db.commit()
@@ -593,6 +609,9 @@ class MarkdownIndex:
             await db.execute(
                 "UPDATE manifest SET mtime_ns=? WHERE path=?", (mtime_ns, path)
             )
+            # Commit the touch: leaving this DML open would hold the write
+            # lock across the next file's embedding call (corvidae#1211).
+            await db.commit()
             return
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
