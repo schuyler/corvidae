@@ -161,6 +161,7 @@ class ForkLog:
     #: "no column named ..." -- silently, because writers swallow errors.
     LATE_COLUMNS = {
         "point": "TEXT",
+        "trace_id": "TEXT",
         "lens_id": "TEXT",
         "profile": "TEXT",
         "model": "TEXT",
