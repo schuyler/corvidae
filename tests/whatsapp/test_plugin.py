@@ -208,3 +208,26 @@ async def test_no_block_means_no_connection(tmp_path):
         assert recorder.messages == []
     finally:
         await plugin.on_stop()
+
+
+async def test_a_not_connected_link_is_logged_without_alarming(tmp_path, caplog):
+    """-32002 is normal while the link comes up: INFO naming the fix, not WARNING."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["send_text"] = (
+        "error",
+        {"code": -32002, "message": "not connected", "data": {
+            "state": "not_connected", "fix": "the sidecar is not connected yet; wait and try again"}},
+    )
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        channel = plugin._registry.get_or_create("whatsapp", CHAT)
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await plugin.send_message(channel, OutboundMessage(text="hi"))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING
+                    and "send on" in r.getMessage()]
+        assert any("not ready" in r.getMessage() for r in caplog.records)
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
