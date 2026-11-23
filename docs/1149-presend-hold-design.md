@@ -54,7 +54,8 @@ class PreSendHold:
     def on_turn(self, channel, trace_id: str | None, annotations: dict) -> None: ...  # before_agent_turn
     async def on_admitted(self, channel, source: str, admitted_keys: list[str],
                           duplicate_keys: list[str]) -> None: ...
-    async def on_final(self, channel, trace_id: str | None, annotations: dict) -> bool: ...
+    async def on_final(self, channel, trace_id: str | None, response_text: str,
+                       annotations: dict) -> bool: ...
         # returns True when this final's trace was held (the caller then skips idle work)
 ```
 
@@ -65,7 +66,7 @@ class PreSendHold:
    - Else score as today and fire `on_appraisal_before_send`. Its results are now used: each non-None result is a `list[str]` of objection texts; they are concatenated in hook-result order. A non-list result or a non-string item is dropped with a warning naming the plugin result type (any plugin may implement the hook).
    - Objections present: return `await hold.refuse(...)`. None otherwise. Fails open as today (an exception logs and returns None).
 2. **Refuse.** `refuse` resolves the hold origin: `annotations.get("origin")`, else `resolve_trace_origin(trace_id)`, else `"user"`. It stores `_Pending(channel.id, origin, text, objections)` under `trace_id` in a bounded LRU (64) and returns `Refusal(reason=<objections joined by blank lines>)`. The kernel decides in time or late; the reason is what `hold_late` prints on the late path (R5).
-3. **Outcome (R5, R4, R7).** `AppraisalPlugin.on_agent_response` calls `held = await hold.on_final(channel, trace_id, annotations)` before anything else.
+3. **Outcome (R5, R4, R7).** `AppraisalPlugin.on_agent_response` calls `held = await hold.on_final(channel, trace_id, response_text, annotations)` before anything else.
    - `on_final` first clears the channel's revision state if it is due (step 7).
    - Then it takes the `_Pending` for `trace_id` if its `draft` equals the final's `response_text` (step 9). If present and `final_was_unsent(channel)` is true, the draft was held in time: it sets `_Revision(origin)` on the channel, calls `held.hold_and_wake(channel, origin, SOURCE, objections, stub_text=REVISION_STUB)`, and fires `on_trace_record(source=reporter, record={"held": {"objections": objections}})`. Returns True.
    - Present but sent: the refusal was late; the kernel's late path delivers it. Drop, return False.
@@ -215,3 +216,13 @@ class PreSendHold:
 - E1: a notification without a `tool_call_id` that carries the revision's `trace_id` while its tools are outstanding could clear the span by trace early. No in-tree producer does this. **Deferred.** The fix is small: the trace clause also needs an empty set, or the offering item.
 - E2: `_fire_stub` keeps failing. Same class as Deferred edge 4.
 - Upstream concern, for the owner: the span ends at the next final with nothing outstanding, which can be later than "the next final" in R6.
+
+### Red round 1: FAIL
+- F1 (important): no test for the R6 span end without a revision final. **Fix**: a real-path test.
+- F2 (important): the owners' forwarding (`before_agent_turn`, `on_held_admitted`, `on_final` before the early returns) is untested. **Fix**: one test per owner in the hooks file, including a declined revision that still clears.
+- F3 (important): a duplicate R1 critique test. **Fix**: delete the new one.
+- F4 (important): an assertion beyond the criteria (a mismatch leaves the pending entry). **Fix**: delete it.
+- Cosmetics fixed: the dead parametrize branch, and the window helper now appends the not-sent marker row.
+- Cosmetics left as they are: (d) by policy drop (equivalent end state, said in a docstring), R11 on two traces, overlapping stub counts, the weak "unusable" cause check.
+- Edges Deferred: no test isolates the last-batch-count rule or the `resolve_trace_origin` row.
+- Upstream concern accepted: `on_final` takes `response_text` (design sketch updated). The draft match no longer scans the window.
