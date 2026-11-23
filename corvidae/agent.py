@@ -75,7 +75,7 @@ from corvidae.context import (
     unsent_marker_text,
     well_formed_calls,
 )
-from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, load_fence_key
+from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, frame, load_fence_key
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
 from corvidae.trace import mint_trace_id  # noqa: F401
@@ -114,6 +114,7 @@ from corvidae.task import Task
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     ToolTimeouts,
+    declares_read_only,
     declares_spill_reader,
     declares_untrusted_output,
     dispatch_tool_call,
@@ -2074,6 +2075,7 @@ class Agent(CorvidaePlugin):
         cut: int | None = None,
         extra_body: dict | None = None,
         snapshot: WindowSnapshot | None = None,
+        max_tool_calls: int = 0,
     ) -> ForkResult:
         """Run one fork of the channel's window (GitHub issue #51).
 
@@ -2090,18 +2092,28 @@ class Agent(CorvidaePlugin):
         default chat profile): its endpoint, model and ``extra_body``. A
         runtime override of a key that ``extra_body`` also sets is not sent,
         so the profile wins (see :func:`corvidae.fork.fork_body`). A fork
-        also sends ``tool_choice: "none"`` and ``extra_body`` (a stage's
-        ``response_format``), applied last so ``set_settings`` can't
-        re-enable tool calls.
+        also sends ``extra_body`` (a stage's ``response_format``) and a
+        ``tool_choice`` applied last so ``set_settings`` can't re-enable tool
+        calls: ``"auto"`` while ``max_tool_calls`` calls remain, else
+        ``"none"``.
 
-        Mutates nothing, persists nothing, fires no hooks, dispatches no
-        tools. Attribution gains ``mode="fork"`` for the call; the caller
-        sets ``stage``.
+        Mutates nothing, persists nothing, fires no hooks, and dispatches
+        only tools declared read-only (``reads_only = True``), and only when
+        ``max_tool_calls`` > 0 (the default 0 dispatches none and refuses any
+        tool-call reply). Every call counts against the cap, refused or not.
+        A call to a tool that is missing, disabled on the channel, or not
+        declared read-only gets a refusal result instead of a dispatch. Each
+        result reaches the model framed as untrusted data, whatever the tool
+        declares, and runs with no hooks (``pm=None``). Attribution gains
+        ``mode="fork"`` for the whole loop; the caller sets ``stage``.
+        ``ForkResult.usage`` is the last request's only; every request is
+        metered at the client regardless.
 
         Raises:
             ForkUnavailable: no live window or no client for ``stage``.
-            ForkRefused: the model answered with tool calls, structured or
-                written out as text.
+            ForkRefused: the model answered with a tool call it may not make
+                (cap reached or 0), a malformed or repeated-id call, or tool
+                calls written out as text.
         """
         # The window to render: a snapshot's copy, else the live window.
         conv = snapshot.conv if snapshot is not None else channel.conversation
@@ -2129,9 +2141,6 @@ class Agent(CorvidaePlugin):
             pending,
             self._mid_conversation_system_role,
         )
-        # The profile beats the overrides; the stage's body and tool_choice
-        # none come last.
-        body = fork_body(self._llm_overrides(channel), profile_body, extra_body)
 
         # The client was bound above, so a plugin stop that clears LLMPlugin's
         # clients during the await can't change the model this stamp names.
@@ -2157,21 +2166,118 @@ class Agent(CorvidaePlugin):
         # cost its time without producing one, so it is not ok either.
         ok = False
         try:
-            # A fork extends this channel's prefix, so it takes the channel's
-            # key whatever key the caller holds (#363).
-            with lease_scope(channel.id):
-                # The channel's own schemas: a fork must share the turn's prefix.
-                response = await client.chat(
-                    messages,
-                    tools=self._tool_view(channel).schemas or None,
-                    extra_body=body,
+            # Calls dispatched or refused so far, whether the cap warning has
+            # fired, and every call id seen in this fork (ids must be unique).
+            used = 0
+            warned = False
+            seen_ids: set[str] = set()
+            while True:
+                # Offer calls while any remain; the request after the cap
+                # sends "none" so the fork must give its verdict.
+                body = fork_body(
+                    self._llm_overrides(channel), profile_body, extra_body,
+                    tool_choice="auto" if used < max_tool_calls else "none",
                 )
-            message = response["choices"][0]["message"]
-            if message.get("tool_calls"):
-                raise ForkRefused(
-                    f"fork on {channel.id} answered with "
-                    f"{len(message['tool_calls'])} tool call(s)"
-                )
+                # A fork extends this channel's prefix, so it takes the
+                # channel's key whatever key the caller holds (#363). The
+                # lease covers the request only, not tool dispatch.
+                with lease_scope(channel.id):
+                    # The channel's own schemas: a fork must share the turn's prefix.
+                    response = await client.chat(
+                        messages,
+                        tools=self._tool_view(channel).schemas or None,
+                        extra_body=body,
+                    )
+                message = response["choices"][0]["message"]
+                tool_calls = message.get("tool_calls")
+                if not tool_calls:
+                    break
+                # A call while none remain (cap 0, or after the cap) is refused.
+                if used >= max_tool_calls:
+                    raise ForkRefused(
+                        f"fork on {channel.id} answered with "
+                        f"{len(tool_calls)} tool call(s)"
+                    )
+                # The whole reply is checked before any call runs: a malformed
+                # call, or an id seen before in this fork, voids the reply.
+                for call in tool_calls:
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    call_id = call.get("id") if isinstance(call, dict) else None
+                    if (
+                        not isinstance(call, dict)
+                        or not isinstance(call_id, str) or not call_id
+                        or call_id in seen_ids
+                        or not isinstance(fn, dict)
+                        or not isinstance(fn.get("name"), str)
+                        or not isinstance(fn.get("arguments"), str)
+                    ):
+                        raise ForkRefused(
+                            f"fork on {channel.id} answered with a malformed or "
+                            f"repeated tool call (stage {stage})"
+                        )
+                    seen_ids.add(call_id)
+                # The assistant turn goes into the fork's private list only.
+                messages.append(message)
+                for call in tool_calls:
+                    name = call["function"]["name"]
+                    view = self._tool_view(channel)
+                    if used >= max_tool_calls:
+                        # Over the cap: not dispatched.
+                        result = "Error: tool-call limit reached in this fork"
+                        dispatched = False
+                    elif (
+                        name in disabled_on(channel)
+                        or name not in view.tools
+                        or not declares_read_only(view.tools[name])
+                    ):
+                        # Missing, disabled live, or not declared read-only.
+                        result = (
+                            f"Error: {name} is not available in a fork; only "
+                            "tools declared read-only can be called"
+                        )
+                        dispatched = False
+                    else:
+                        # No pm and no task queue: no hooks fire.
+                        result = (await dispatch_tool_call(
+                            call, view.tools,
+                            schemas=self._tool_arg_schemas(),
+                            channel=channel,
+                            task_queue=None,
+                            pm=None,
+                            call_timeouts=self._tool_call_timeouts,
+                        )).content
+                        dispatched = True
+                    used += 1
+                    logger.info(
+                        "fork tool call",
+                        extra={
+                            "channel": channel.id, "stage": stage,
+                            "trace_id": trace_id, "tool": name,
+                            "dispatched": dispatched,
+                        },
+                    )
+                    # Frame every result as untrusted data with the main
+                    # loop's own renderer, whatever the tool declares.
+                    row = {
+                        "role": "tool", "tool_call_id": call["id"],
+                        "content": result,
+                        PROVENANCE_KEY: encode(
+                            ItemMetadata(tool=name, untrusted=True), {}
+                        ),
+                    }
+                    messages.append(
+                        frame(row, row, channel.id, conv.fence_key)[1]
+                    )
+                # Say once that the cap was reached.
+                if used >= max_tool_calls and not warned:
+                    warned = True
+                    logger.warning(
+                        "fork tool-call limit reached",
+                        extra={
+                            "channel": channel.id, "stage": stage,
+                            "trace_id": trace_id, "max_tool_calls": max_tool_calls,
+                        },
+                    )
             if looks_like_tool_call(message.get("content") or ""):
                 raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
             ok = True

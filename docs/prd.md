@@ -1071,7 +1071,8 @@ Per transport:
     refusal wins. A refused call does not run, and its result to the
     model is the refusal, naming the tool, the reason and what to do
     next, so the turn continues (§3.1.9). Every dispatched call is
-    offered, a subagent's included. An implementation that raises is
+    offered, a subagent's included; a fork's read-only calls are not
+    (§3.8). An implementation that raises is
     logged at warning and counts as no refusal, since one component's
     failure must not stop the agent acting (principle 5); a plugin that must refuse
     when it fails catches its own failure and refuses. A check may delay
@@ -1287,7 +1288,10 @@ deciding only what to newly append and in what order.
    is less than every reply. A lens is added without
    changing critique; it declares its appraisal questions, and the
    questions are operator-configurable. Every lens judges the exchange as
-   the agent saw it (§3.8).
+   the agent saw it (§3.8). After the exchange, a critique fork may search
+   with read-only tools (§3.8): at most an operator-set number of calls,
+   few by default, and none while a message waits on its channel. Before
+   the reply is sent it makes none.
 2. The provenance check runs on any claim about the past, independent of
    the appraisal scores. Appraisal (a model) lists the claims. The
    provenance critic (a model) judges whether any record supports each
@@ -1313,7 +1317,8 @@ deciding only what to newly append and in what order.
    is still judged, except a draft the pre-send check held back for
    revision (Output gate 7), whose revision is judged instead; the agent's choice to stay silent is not a response,
    and is neither judged nor appraised.
-4. Empty objections are recorded and wake nothing. A lens declares whether its
+4. Every finding names the reply it judges. Empty objections are
+   recorded and wake nothing. A lens declares whether its
    non-empty objections wake the channel. A lens that doesn't wake
    re-enters its objections as framed CONTEXT at the channel's next turn, so
    a self-check never sends the user an unsolicited message. A waking lens's
@@ -1536,9 +1541,16 @@ never uses it (item 2). How the deployed backend uses forks
 design, not requirement. The requirements are outcomes:
 
 1. A fork can't act, so the window and the log change only through main
-   turns (principles 2 and 4). It mutates nothing, persists nothing, fires
-   no hooks, dispatches no tools, and refuses any reply
-   carrying a tool call, structured or written out as text.
+   turns (principles 2 and 4). It changes no stored state and fires
+   no hooks of its own. The only calls it may make are to tools their
+   plugin declares read-only: tools that change no stored state,
+   access statistics included, and send nothing anywhere but the
+   operator's configured model providers. No tool is read-only unless its
+   plugin says so. Such a call is not offered for refusal (§3.5.12), and
+   its result reaches the fork framed as data, whatever the tool declares
+   (principle 9). A call to any other tool is never run, and a reply
+   carrying a tool call where none is allowed, structured or written out
+   as text, is refused.
 2. Background judgment of an exchange (appraisal, the critique
    lenses, the provenance check) sees what the agent saw when it wrote the
    reply: the window up to the reply and nothing written after it, never a
@@ -2025,3 +2037,4 @@ record that holds the reasoning.
 | A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
 | A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
+| A fork may call tools its plugin declares read-only, meaning no stored state changed and nothing sent beyond the configured model providers; no tool is read-only by default; a critique fork calls them only after the exchange, capped by an operator-set count with a small default; the calls are not offered to the pre-tool-use check, a choice made for speed that the threat model records and that is open to revisiting; provenance stays a check, not a lens, until tool-using forks are measured | principle 9; §3.5.12; §3.7 Critique 1, 4; §3.8.1; #1190; owner, 2026-11-23 |

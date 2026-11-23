@@ -274,7 +274,7 @@ it, and a warning names the segment.
 
 `agent.forks.reasoning_budget_tokens` was removed, and a config that still sets it fails startup with an error naming the key. A fork's reasoning budget, token cap and any other request parameter belong to the profile its stage maps to: put them in that profile's `extra_body` (see [`llm`](#llm--llm-backend)). A fork keeps the main reasoning effort only if its profile does: the chat template renders the effort into the system block, so a profile that changes `reasoning_effort` misses the cached prefix. An unmapped fork resolves to the default chat profile and sends no budget unless that profile has one.
 
-**Body precedence on a fork.** Later wins: `model`, `messages` and `tools`; the stage profile's `extra_body`; the channel's runtime overrides (`set_settings`), minus any key the profile's `extra_body` also sets; the stage's own `extra_body` (its `response_format`); `tool_choice: "none"`. So the profile beats a runtime override: a channel's `max_tokens: 200` against a profile's `extra_body.max_tokens: 4096` sends 4096, and the fork's cached prefix is unaffected because every runtime override is a sampler-side key. A main turn is unchanged, and there the override beats the profile. The same applies to an unmapped fork: an override of a key in the default chat profile's `extra_body` is dropped for forks and still applies to the channel's main turns.
+**Body precedence on a fork.** Later wins: `model`, `messages` and `tools`; the stage profile's `extra_body`; the channel's runtime overrides (`set_settings`), minus any key the profile's `extra_body` also sets; the stage's own `extra_body` (its `response_format`); `tool_choice: "none"` (`"auto"` while a fork its caller lets call read-only tools still has calls left). So the profile beats a runtime override: a channel's `max_tokens: 200` against a profile's `extra_body.max_tokens: 4096` sends 4096, and the fork's cached prefix is unaffected because every runtime override is a sampler-side key. A main turn is unchanged, and there the override beats the profile. The same applies to an unmapped fork: an override of a key in the default chat profile's `extra_body` is dropped for forks and still applies to the channel's main turns.
 
 Any other key under `agent.forks`, a non-boolean `enabled`, `reasoning_budget_tokens` (removed; see
 [`llm.stages`](#stages)), or `stages` that isn't a list of strings fails at
@@ -701,6 +701,8 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `markdown_recall.timeout` | seconds, `> 0` | mixin default | Seconds a search may run before it is cancelled and the turn proceeds without it (fail-soft). |
 
 The source admits under `funnel.budgets.markdown_recall` (falling back to `funnel.default_budget`), so a per-source token cap is available like any other source's.
+
+Other plugins can search the same folders through the hook `resolve_markdown_recall_search(query)` (#1190), which markdown_recall declares and answers. It returns the top `max_hits` hits, one `<path>: <text>` entry per hit, newline-separated, where a hit's text may itself span lines (`""` for none). It returns `None` when the plugin has no index, or when the index is not ready (not built yet, or not opened since start or since it was closed), and in that case it creates nothing. It only reads the index (plus the embedding call for the query), so a caller may offer it to a fork as a read-only tool. A call made while a reconcile is rebuilding the index waits for the rebuild.
 
 ---
 

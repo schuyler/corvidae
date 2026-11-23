@@ -772,10 +772,49 @@ or objection in `exchange_log`.
 
 What bounds it:
 
-- A fork never dispatches tools. It sends `tool_choice: "none"` after the
-  runtime overrides (so a `set_settings` `tool_choice` can't undo it), and
-  a reply that carries `tool_calls` anyway, or writes a call out as text,
-  raises `ForkRefused`. The fork code has no path to `dispatch_tool_call`.
+- A fork dispatches no tool unless its caller passes `max_tool_calls` above
+  0, and then only tools whose plugin declares them read-only (see "Read-only
+  tool calls in a fork" below). Otherwise it sends `tool_choice: "none"`
+  after the runtime overrides (so a `set_settings` `tool_choice` can't undo
+  it), and a reply that carries `tool_calls` anyway, or writes a call out as
+  text, raises `ForkRefused`.
+
+**Read-only tool calls in a fork (#1190).** A caller can let a fork make up
+to `max_tool_calls` calls, and critique is meant to be that caller, after
+the exchange. The fork dispatches only tools whose registering plugin sets
+`reads_only = True`: tools that change no stored state, access statistics
+included, and send nothing anywhere but the operator's configured model
+providers. In this tree that is `search_memory` and `search_transcripts`.
+`recall_raw` is excluded because it bumps access statistics, MCP tools are
+never declared, and markdown_recall's search is reached through
+`resolve_markdown_recall_search`.
+
+- *What changes:* the window, which participants wrote, can now steer which
+  searches a fork makes and what it searches for. Those searches reach
+  every channel's stored memory and transcripts, which a main turn's
+  `search_memory` already reaches, so this opens no new store. It does open
+  a new path to them that **no refusal plugin sees**. Fork calls are not
+  offered to the pre-tool-use check (`should_execute_tool` once it is built, PRD §3.5.12),
+  and they fire none of the main loop's tool hooks
+  (`transform_tool_result`). That is the owner's choice, made for fast
+  critique (#1190, 7092516304), and is open to revisiting.
+- *What bounds it:*
+  - A non-read-only call is never run; its result is a refusal.
+  - Every result, refusal or not, reaches the fork in the kernel's untrusted
+    fence, whatever the tool declares.
+  - Calls are capped per fork, and the request after the cap sends
+    `tool_choice: "none"`.
+  - Each call is logged at INFO (`fork tool call`) with its stage, channel,
+    trace and tool, and metered under the fork's stage.
+  - The fork's output is still a verdict that code parses, and it reaches a
+    channel only as framed CONTEXT or a wake (PRD §3.7 Critique 4).
+- *The trust a declaration carries:* the plugin author's, which is the
+  trust the operator already gave the plugin by loading it (principle 9).
+  A third-party plugin that wrongly declares a tool read-only lets a fork
+  write state or send window content out. Load only plugins you trust to
+  declare honestly.
+- *Revisit:* if a refusal plugin needs to see reads, or if forks gain tools
+  beyond search.
 - Fork output is parsed, not executed: JSON for consolidation, appraisal
   and critique, plain text for the summary.
 - The consolidation reply's own `importance` rating (#635) becomes the

@@ -20,6 +20,9 @@ Config:
         enabled: true                 # default; false makes every live-window stage but compaction skip
         stages: null                  # null = every stage; or a list of names
 
+A fork dispatches tools only when its caller passes ``max_tool_calls`` > 0,
+and then only tools declared read-only (#1190; ``Agent.fork``).
+
 A fork's reasoning budget, token cap and the like are request parameters of
 the profile its stage maps to under ``llm.stages``, not ``agent.forks`` keys.
 
@@ -52,10 +55,12 @@ _FORKS_KEYS = frozenset({"enabled", "stages"})
 
 
 class ForkRefused(Exception):
-    """The model answered a fork with tool calls instead of text.
+    """The model answered a fork with a tool call it may not make.
 
-    Forks never dispatch tools (``tool_choice: "none"`` plus this check),
-    so the caller treats it as a failed fork and falls back.
+    A fork dispatches only read-only tools and only within its call cap
+    (``Agent.fork``'s ``max_tool_calls``, default 0). A tool-call reply once
+    no calls remain, or a malformed or repeated-id call, raises this, so the
+    caller treats it as a failed fork and falls back.
     """
 
 
@@ -346,7 +351,10 @@ def quote(text: str | None, limit: int = QUOTE_CHARS) -> str:
 
 
 def fork_body(
-    overrides: dict, profile_body: dict | None, stage_body: dict | None
+    overrides: dict,
+    profile_body: dict | None,
+    stage_body: dict | None,
+    tool_choice: str = "none",
 ) -> dict:
     """The call-level ``extra_body`` a fork sends on top of its client's.
 
@@ -354,15 +362,16 @@ def fork_body(
     first by ``LLMClient.chat`` and this body wins over it, so a runtime
     override of a key the profile also sets is dropped here: the profile
     beats ``set_settings``. Then the stage's own body (``response_format``),
-    then ``tool_choice: "none"``, which beats everything so a fork never
-    dispatches tools.
+    then ``tool_choice``, which beats everything so a runtime override cannot
+    change it. It is ``"none"`` unless the caller lets the fork call tools
+    (``"auto"`` while its read-only tool-call cap has calls left).
     """
     # Overrides the profile also sets are not sent: the profile wins (R8).
     shadowed = profile_body or {}
     body = {k: v for k, v in overrides.items() if k not in shadowed}
     # The stage's own body, then the invariant.
     body.update(stage_body or {})
-    body["tool_choice"] = "none"
+    body["tool_choice"] = tool_choice
     return body
 
 

@@ -20,7 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Sequence
 
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tuning import config_value
 from corvidae_cognition.markdown_recall.index import Hit, MarkdownIndex, _EncoderIdentity
 from corvidae_cognition.recall import RecallContext, RecallSourceMixin
@@ -32,6 +32,20 @@ DEFAULT_DB_PATH = "state/markdown_recall/index.db"
 DEFAULT_MAX_HITS = 5
 # How quiet the system must be before the idle reconcile runs.
 IDLE_QUIET_SECONDS = 30.0
+
+
+class MarkdownRecallSpec:
+    """Hooks the markdown_recall plugin owns."""
+
+    @hookspec(firstresult=True)
+    async def resolve_markdown_recall_search(self, query: str) -> str | None:
+        """Search the indexed roots for ``query`` and return the rendered hits.
+
+        One ``<path>: <text>`` entry per hit, newline-separated (a hit's text
+        may itself span lines), or "" for no hits. None means
+        there is nothing to search now: no index, or its schema is not built
+        yet (the search would create it). Never writes.
+        """
 
 
 class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
@@ -50,6 +64,8 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     # The agent.yaml block: root, db_path, max_hits, and the mixin's
     # cooldown/timeout.
     config_key = "markdown_recall"
+    # Owns the resolve_markdown_recall_search hook (#1190).
+    hookspecs = MarkdownRecallSpec
 
     def __init__(self) -> None:
         self._pm = None
@@ -150,6 +166,25 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         except Exception:
             # A failed reconcile keeps the old index; the next trigger retries.
             logger.warning("markdown recall: reconcile failed", exc_info=True)
+
+    @hookimpl
+    async def resolve_markdown_recall_search(self, query: str) -> str | None:
+        """Answer a search for other plugins (#1190).
+
+        None when there is no index or its schema is not built: search would
+        run ``_ensure_schema`` and create the file and tables. Otherwise the
+        top hits, one ``<path>: <render(hit)>`` entry each (newline-separated;
+        a hit may span lines).
+
+        shortcut: reads the index's private ``_schema_ready``; add a public
+        ``ready()`` on MarkdownIndex if a second caller appears.
+        """
+        # Nothing to search yet: report that rather than create the schema.
+        if self._index is None or not self._index._schema_ready:
+            return None
+        # The top hits, rendered one per line.
+        hits = await self._index.search(query, k=self._max_hits)
+        return "\n".join(f"{hit.path}: {self.render(hit)}" for hit in hits)
 
     # -- the mixin contract -----------------------------------------------
 

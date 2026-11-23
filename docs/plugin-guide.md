@@ -1272,6 +1272,34 @@ tool unregistered while it runs stays fenced. It is strict: only `True` counts
 MCP tools are declared by the client for every server, with no setting. See
 [design.md](design.md#untrusted-tool-results).
 
+### Declaring a tool read-only
+
+A tool that a fork may call declares itself read-only on the registered
+callable:
+
+```python
+async def search_notes(query: str) -> str:
+    "Search the notes index."
+    ...
+
+search_notes.reads_only = True
+```
+
+Declare it only when the tool changes no stored state, access statistics
+included, and sends nothing anywhere but the operator's
+configured model providers (an embedding call is fine; a web request is
+not). No tool is read-only by default, and the kernel takes your word for
+it: `corvidae.tool.declares_read_only(fn)` reads the attribute, and only
+`True` counts. MCP tools are never declared. A fork calls such a tool only
+when its caller passes `max_tool_calls` above 0 (see
+[Forking the window](#forking-the-window)). The call is not offered to
+the pre-tool-use check (`should_execute_tool`, once built) and fires no tool hook, and its result reaches the
+fork fenced as untrusted whatever `returns_untrusted` says. A tool that
+writes on some path (lazy schema creation, a statistics bump) is not
+read-only on that path, so guard the path or don't declare it.
+`docs/threat-model.md` ("Read-only tool calls in a fork") records what a
+wrong declaration costs.
+
 ## Plugin boundaries
 
 How one plugin may reach another (#1178): the mechanism the PRD's §4
@@ -1543,7 +1571,7 @@ class MyPlugin(CorvidaePlugin):
         return result.text
 ```
 
-- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None)` returns
+- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None, max_tool_calls=0)` returns
   `ForkResult(text, message, usage, model)`. `model` is the model the fork
   request was sent with (`LLMClient.request_model(body)`, so an
   `extra_body["model"]` override shows), for plugins that record how their
@@ -1557,7 +1585,8 @@ class MyPlugin(CorvidaePlugin):
   goes to that stage's profile: the one the operator maps it to under
   `llm.stages`, else the default chat profile. Name the stage, never a
   profile.
-- It sends the agent's tool schemas with `tool_choice: "none"` and the
+- It sends the agent's tool schemas with `tool_choice: "none"` (`"auto"`
+  while `max_tool_calls` leaves calls) and the
   channel's runtime overrides, so the render matches the main turn; the
   prefix is cached only if the stage's profile is the main turn's, or
   differs from it in sampler-side keys. Don't pass `reasoning_effort` or
@@ -1567,10 +1596,19 @@ class MyPlugin(CorvidaePlugin):
   `reasoning_budget_tokens` and `max_tokens` in its profile's `extra_body`.
   Where a runtime override and the stage profile set the same key, the
   profile wins on a fork (the override is not sent); your `extra_body` beats
-  the profile, and `tool_choice: "none"` beats everything (design.md,
+  the profile, and `tool_choice` (`"none"`, or `"auto"` while `max_tool_calls` leaves calls) beats everything (design.md,
   "Body precedence").
-- It mutates nothing, persists nothing, fires no hooks and never runs
-  tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
+- `max_tool_calls` (default 0) lets the fork call tools declared read-only
+  ([Declaring a tool read-only](#declaring-a-tool-read-only)), up to that
+  many calls in all. A call to any other tool is answered with a refusal and
+  never run. Every result is fenced as untrusted. The request after the cap
+  sends `tool_choice: "none"`, and reaching the cap logs a warning. A
+  malformed call, or a call id the fork has already seen, raises
+  `ForkRefused`. `ForkResult.usage` covers only the last request; each
+  request is metered on its own.
+- It mutates nothing, persists nothing and fires no hooks. With
+  `max_tool_calls=0` it runs no tools: a reply with `tool_calls` (or a call
+  written out as text) raises `ForkRefused`; no window or no
   client for the stage raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a non-fork path only for windowless work (seeding, imports), and for a range that has left the window or a stage whose output can't be skipped, as compaction does: for those use the view call below, not a prompt that describes the conversation.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
   `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
