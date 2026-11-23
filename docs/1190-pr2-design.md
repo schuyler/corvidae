@@ -188,7 +188,7 @@ already carries `trace_id`).
 
 ## Open (for the owner at the design gate)
 
-- **Kernel contract:** `Agent.fork` gains `yield_point` (§4), a cooperative yield at each round of the tool loop; owner accepted the change and the name (2026-11-23). R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
+- **Kernel contract:** `Agent.fork` gains `yield_point` (§4), a cooperative yield at each round of the tool loop; owner accepted the change (2026-11-23); name pending owner confirmation. R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
 - **I1:** the provenance fork gets no deadline (R7 leaves it alone; its provider timeout defaults to none).
 
 ## Review log
