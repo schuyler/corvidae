@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -359,7 +358,7 @@ class TestNoBusyWait:
     async def test_g4_nothing_wakes_between_start_and_the_deadline(self):
         """G4: events plus one timer. Once the gather has started, advancing
         time up to (not through) the deadline schedules no further timer and
-        no further sleep: a polling loop would show as extra ``call_later``,
+        no further sleep (the timer's and the check's are the only two): a polling loop would show as extra ``call_later``,
         ``call_soon`` or ``sleep`` calls. Exactly one timer is the deadline."""
         from corvidae.checks import gather
 
@@ -392,10 +391,11 @@ class TestNoBusyWait:
         await asyncio.wait_for(slow.started.wait(), 1)
         await clock.settle()
 
-        # Started: one deadline timer, one check task, one sleep (the check's).
+        # Started: one deadline timer, one check task, and two parked sleeps
+        # (the timer's own, then the check's); nothing else is waiting.
         assert len(later_calls) == 1
         assert len(soon_calls) == 1
-        assert clock.sleeps.qsize() == 1
+        assert clock.sleeps.qsize() == 2
         before = (len(later_calls), len(soon_calls), clock.sleeps.qsize())
 
         # Time passes inside the allowance: nothing wakes, nothing is armed.
