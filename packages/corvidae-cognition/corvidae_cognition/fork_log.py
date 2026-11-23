@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS fork_log (
     lens_id TEXT,
     profile TEXT,
     model TEXT,
-    question_sha256 TEXT,
+    question_sha256 BLOB,
     question_text TEXT,
     instruction TEXT,
     window_first_rowid INTEGER,
@@ -102,11 +102,11 @@ def digest_of(text: str) -> bytes:
     return hashlib.blake2b(text.encode(), digest_size=16).digest()
 
 
-def question_sha256(question: str | None) -> str | None:
+def question_sha256(question: str | None) -> bytes | None:
     """The hash of the lens question, so rows join by what asked them (#1128)."""
     if not question:
         return None
-    return hashlib.sha256(question.strip().encode()).hexdigest()
+    return hashlib.sha256(question.strip().encode()).digest()
 
 
 def _dumps(value: Any) -> str | None:
