@@ -1569,6 +1569,14 @@ it sends each change to the goal's `origin_channel` through
 origin made the change itself (so a goal the heartbeat created stays silent
 while the heartbeat is the one changing it).
 
+Goals also answers the planning lens's `resolve_corvidae_planning_goals`
+(#1181), a hook planning owns, by returning `open_goals()`: every goal not
+retired, in queue order, as `{"id", "age_seconds", "summary", "status"}`.
+Goals imports nothing from planning; it lists `corvidae_planning` under
+`optional_depends_on`, so with planning absent the implementation is
+reported at `DEBUG` and never called
+([design.md](design.md#planning-lens-corvidae-planning-package)).
+
 **Goals list (#1091):** open goals reach the agent in the heartbeat's beat
 and nowhere else; no turn admits a goals entry to a window. Goals'
 `on_heartbeat_collect_prompts` section opens with the list, in full on every

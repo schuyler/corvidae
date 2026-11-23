@@ -1169,14 +1169,15 @@ two peers points is a design choice that a string lookup hides.
 `tests/test_plugin_boundary.py` enforces the lookup half. It fails on a
 `get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
 list does not cover, and on an entry that covers more calls than remain.
-The list holds the calls that predate the rule, each with the issue that
-removes it: today one, `planning` looking up `goals` (#1181). A missing kernel plugin is not something a plugin works around:
+The list held the calls that predate the rule, each with the issue that
+removed it. It is empty now: the last, planning's read of `goals`, went in
+#1181, where planning owns `resolve_corvidae_planning_goals` and goals
+implements it. New work never adds an entry. A missing kernel plugin is not
+something a plugin works around:
 `get_dependency` raises naming it, and a test that builds a plugin manager
 by hand registers the kernel plugins its plugin uses (`add_kernel_registry`
 in `tests/helpers.py`, `install_kernel_clock` in `tests/fake_clock.py`;
-#1180). When you remove
-a call, lower its count or delete its entry in the same change. New work
-never adds an entry: the list only shrinks.
+#1180).
 
 **Choosing a fallback.** A plugin may call `pm.has_plugin(name)` for a name
 in its own `optional_depends_on`, once (at `on_start` is the usual place), to

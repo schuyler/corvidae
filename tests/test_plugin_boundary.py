@@ -4,12 +4,13 @@ A plugin holds a reference to another plugin only when the target is a
 kernel plugin, named in its ``depends_on`` and resolved with
 ``get_dependency``; it reaches every other plugin through hooks
 (docs/plugin-guide.md, "Plugin boundaries"). A bare ``pm.get_plugin()`` has
-no use in a plugin, but the tree still has calls that predate the rule.
+no use in a plugin. The calls that predated the rule were listed in
+``ALLOWED``, per file and per plugin name, each with the issue that removed
+it; the last went in #1181, so the list is empty.
 
-This test lists those calls in ``ALLOWED``, per file and per plugin name,
-each with the issue that removes it. It fails on a ``get_plugin`` call under
-``packages/`` (test directories excluded) beyond what ``ALLOWED`` lists, and
-on an entry that lists more calls than remain, so the list only shrinks.
+The test fails on a ``get_plugin`` call under ``packages/`` (test
+directories excluded) beyond what ``ALLOWED`` lists, and on an entry that
+lists more calls than remain.
 
 It reads source text and imports nothing from the packages, so it runs in
 the kernel-only CI job, like tests/test_kernel_boundary.py. It is the one
@@ -32,14 +33,10 @@ GUIDE = 'docs/plugin-guide.md, "Plugin boundaries"'
 # The name recorded for a call whose first argument is not a string literal.
 DYNAMIC = "<dynamic>"
 
-# The calls that predate the rule: file (relative to the repo) -> plugin name
-# -> (how many calls, the issue that removes them). Lower a count, or delete
-# the entry, in the change that removes a call.
-ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
-    "packages/corvidae-planning/corvidae_planning/__init__.py": {
-        "goals": (1, "#1181"),
-    },
-}
+# The calls that predated the rule, empty since #1181: file (relative to
+# the repo) -> plugin name -> (how many calls, the issue that removes them).
+# New work never adds an entry.
+ALLOWED: dict[str, dict[str, tuple[int, str]]] = {}
 
 
 def _plugin_sources() -> list[Path]:
