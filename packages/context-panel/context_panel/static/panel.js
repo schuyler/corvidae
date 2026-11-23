@@ -80,10 +80,22 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
+  // A token count as a parenthetical suffix, 3 significant figures: plain below
+  // 10k, k-postfixed from 10k, M-postfixed from ~1M (toPrecision goes
+  // exponential at 1000k, so the k band ends where rounding would reach it).
+  // "" when the server sent none.
+  function tokensLabel(n) {
+    if (typeof n !== "number") return "";
+    if (n >= 999500) return ` (${(n / 1000000).toPrecision(3)}M tokens)`;
+    if (n >= 10000) return ` (${(n / 1000).toPrecision(3)}k tokens)`;
+    return ` (${n} tokens)`;
+  }
+
   // Turn one wire row into its entries, first matching rule wins.
   function rowEntries(index, row) {
     const msg = row.msg;
-    const tag = `#${index} · ${msg.role} · ${row.type}` + (row.ts === undefined ? "" : ` · ${stamp(row.ts)}`);
+    const tag = `#${index} · ${msg.role} · ${row.type}` + (row.ts === undefined ? "" : ` · ${stamp(row.ts)}`)
+      + tokensLabel(row.tokens);
     const extras = Object.keys(msg).filter((k) => !NON_BODY_KEYS.includes(k))
       .map((k) => `${k}: ${show(msg[k])}\n`).join("");
     const out = [];
@@ -206,8 +218,8 @@
       }
       state.toolNames.clear();
       entries.replaceChildren(
-        entry("cat-system-prompt", "system prompt", body.system_prompt),
-        entry("cat-system-prompt", "tools",
+        entry("cat-system-prompt", `system prompt${tokensLabel(body.system_prompt_tokens)}`, body.system_prompt),
+        entry("cat-system-prompt", `tools${tokensLabel(body.tools_tokens)}`,
           body.tools === null ? "not resolved yet" : JSON.stringify(body.tools, null, 2)));
       appendRows(body.rows, body.first);
       renderLive([]);
@@ -257,7 +269,7 @@
       // paused while rendered, so a turn would look frozen rather than stale.
       renderLive([]);
       const bodyEntry = entry("cat-system-prompt",
-        `request body (${body.total} messages)`,
+        `request body (${body.total} messages${tokensLabel(body.total_tokens)})`,
         JSON.stringify(body.messages, null, 2));
       // Open it: the whole point of the button is to see the body.
       bodyEntry.open = true;
