@@ -29,7 +29,7 @@ import asyncio
 import logging
 
 from corvidae.attribution import get_attribution
-from corvidae.hooks import CorvidaePlugin, TransportPlugin, final_was_unsent, hookimpl
+from corvidae.hooks import CorvidaePlugin, final_was_unsent, hookimpl, owning_transport
 from corvidae.prompts import resolve_prompt
 from corvidae.tool import Tool, ToolContext, tool_to_schema
 
@@ -220,10 +220,9 @@ class SilencePlugin(CorvidaePlugin):
 
     def _is_conversational(self, channel) -> bool:
         """True when the transport that owns ``channel`` is conversational."""
-        for plugin in self.pm.get_plugins():
-            if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
-                return bool(plugin.conversational)
-        return False
+        # The kernel names the owning transport (#1193).
+        facts = owning_transport(self.pm, channel)
+        return facts is not None and facts.conversational
 
     def _record(self, trace_id: str, channel_id: str, outcomes: dict) -> None:
         """Report ``outcomes`` on the trace from a tracked fire-and-forget
@@ -244,13 +243,10 @@ class SilencePlugin(CorvidaePlugin):
     def transform_system_prompt(self, channel, text):
         """Append the instruction after the composed prompt, on chat channels only."""
         result = yield
-        # Find the transport that delivers to this channel; only a
-        # conversational one gets the instruction (web, CLI and ACP always answer).
-        for plugin in self.pm.get_plugins():
-            if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
-                if isinstance(result, str) and plugin.conversational:
-                    return f"{result}\n\n{self._instruction}"
-                break
+        # Only a conversational transport's channels get the instruction
+        # (web, CLI and ACP always answer).
+        if isinstance(result, str) and self._is_conversational(channel):
+            return f"{result}\n\n{self._instruction}"
         return result
 
     @hookimpl

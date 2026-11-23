@@ -59,9 +59,9 @@ import logging
 from corvidae.clock import Clock
 from corvidae.hooks import (
     CorvidaePlugin,
-    TransportPlugin,
     get_dependency,
     hookimpl,
+    owning_transport,
     resolve_reject_wins,
 )
 from corvidae.tuning import resolve_tunable
@@ -233,32 +233,18 @@ class OutboundCapPlugin(CorvidaePlugin):
         plugin claims, and are never capped: they are the agent talking to
         itself.
         """
+        # The kernel names the owning transport (#1193).
         try:
-            plugins = self._pm.get_plugins()
-        except Exception:  # pragma: no cover - a pm without get_plugins
+            return owning_transport(self._pm, channel) is not None
+        except Exception:  # pragma: no cover - a broken transport's owns()
             # Fail open: treat the channel as owned so the cap still applies.
             logger.warning(
-                "outbound_cap: could not list plugins to find the owner of %s; "
-                "treating it as transport-owned",
+                "outbound_cap: could not find the transport that owns %s; "
+                "treating it as transport-owned so the cap applies",
                 getattr(channel, "id", None),
                 exc_info=True,
             )
             return True
-        for plugin in plugins:
-            if isinstance(plugin, TransportPlugin):
-                try:
-                    if plugin.owns(channel):
-                        return True
-                except Exception:  # pragma: no cover - a broken transport
-                    # Skip the broken transport and ask the next one.
-                    logger.warning(
-                        "outbound_cap: transport %s failed owns() for %s; skipping it",
-                        type(plugin).__name__,
-                        getattr(channel, "id", None),
-                        exc_info=True,
-                    )
-                    continue
-        return False
 
     @staticmethod
     def _check_window(block: dict) -> None:

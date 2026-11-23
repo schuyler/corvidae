@@ -430,7 +430,10 @@ naming the channel and the untransformed prompt is used. The result is fixed
 when the conversation starts or restarts and is not rebuilt at compaction.
 `TransportPlugin.conversational` (default False; IRC, Discord, Signal and
 Zulip set True) is the neutral fact a plugin reads to tell a chat transport from
-one that always answers. `SilencePlugin` is the one implementation: it
+one that always answers. Plugins read it through `owning_transport(pm, channel)`
+(`corvidae/hooks.py`), which returns the owning transport's `TransportFacts`
+(name, `conversational`, `check_allowance`) or None, so no plugin walks the
+plugin manager for a transport; the check allowance lookup uses it too (#1193). `SilencePlugin` is the one implementation: it
 appends the silence instruction (`NO_REPLY`, or the `end_turn` tool, per `silence.mode`) on conversational channels
 ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
 
