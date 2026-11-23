@@ -179,6 +179,7 @@ Text that reaches a channel without being a message or a tool result (a late che
 
 - `hold(channel, source, entries)` holds for the channel's next turn, whatever its origin, and wakes nothing.
 - `hold_and_wake(channel, origin, source, entries, stub_text=None)` holds for the channel's turn *of that origin* and fires one `on_notify` stub for it. While a stub for a `(channel, origin)` is pending, later batches queue behind it and fire none. The stub carries `annotations={"origin": origin, STUB_ANNOTATION: True}`; `STUB_ANNOTATION` (`"held_stub"`) is the kernel's key for recognising a held-text stub, since task completions and cross-channel notes carry the same origins. With `stub_text=None` the stub reads `<n> pending <source> item(s)`.
+- A user of `hold_and_wake` in the tree: the pre-send hold (#1149, `corvidae_cognition/presend.py`) stores a held draft's objections under source `pre-send check` with the exchange's origin, which is `user` for a person's message, so a stub notification can now carry `origin="user"`. A user message carries no `origin` annotation, so it never pops a `(channel, "user")` batch; the stub's own turn does.
 - `before_compose` (below) is the pull side: a plugin returns a `Contribution(source, entries, keys=None)` and the kernel holds or admits it.
 
 **`before_compose(channel, trace_id, annotations) -> Contribution | None`.** An observe hook the kernel never fires through `pm.ahook`: `Agent._compose_held` calls every implementation with `corvidae.checks.gather`, concurrently, and waits at most the channel's [check allowance](#the-check-allowance). It runs after `before_agent_turn` and the persist loop for that hook's injections, so `message_log` order matches window order. An empty `Contribution` is allowed and closes the source's records; any other non-`None` return is logged at WARNING and dropped.
@@ -2830,9 +2831,9 @@ Stage names are opaque to core (it never names cognition plugins).
 | `consolidation` (compaction trigger) | dropped prefix of a copy of the window taken in `before_compaction` (#628) | in a background task `before_compaction` spawns (it returns at once), after waiting for the channel's in-flight turn or idle consolidation task (#621); the task is stashed and the `on_compaction` task, which waits the same way, awaits its record | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
 | `consolidation` (idle trigger) | window up to `range_end` (cut just past it, #622) | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried by a new message, the turn trigger or compaction and not by the next idle firing (#342); no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
 | `consolidation` (turn trigger) | window up to `range_end` (cut just past it, #622) | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger, until three consecutive failures back the trigger off for the channel (one warning) until the watermark moves or `memory.idle_consolidate_after` passes (#620); no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
-| `appraisal` (before send) | full window at run time, plus the draft quoted whole in the instruction | inline in `should_send_response`, on a final that is not a decline and has a trace; never vetoes | skip with a warning (forks off, originating text unknown, originating rowid out of the window, fork failed or unusable); `on_appraisal_before_send` still fires, with `lenses=None` |
+| `appraisal` (before send) | full window at run time, plus the draft quoted whole in the instruction | inline in `should_send_response`, on a final that is not a decline and has a trace, unless a hold is outstanding on the channel; refuses the draft when peers object, which holds it for one revision | skip with a warning (forks off, originating text unknown, originating rowid out of the window, fork failed or unusable); `on_appraisal_before_send` still fires, with `lenses=None` |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
-| `critique` (the lens chosen by the critique vector) | full window at run time | silent TaskQueue task, enqueued once stage 2 lands; before send, the lens appraisal's draft scores chose (or the fallback draw) runs inline in the output gate, and its objections queue without waking (`critique_before_send`) | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
+| `critique` (the lens chosen by the critique vector) | full window at run time | silent TaskQueue task, enqueued once stage 2 lands; before send, the lens appraisal's draft scores chose (or the fallback draw) runs inline in the output gate, and its objections go back to appraisal (or, in the fallback, to critique's own refusal), which hold the draft for one revision (`critique_before_send`) | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
 Seeding, imports and the `eval_*` scripts have no live window and always
@@ -5175,20 +5176,33 @@ implementer is logged and the others run; no parameter has a default.
 | Hook | Params | Implementers return |
 |---|---|---|
 | `on_appraisal_prompts` | `channel, trigger` (`"idle"` or `"before_send"`) | a list of `(lens name, question)` pairs, or `None`; merged in result order, a duplicate name or malformed pair is dropped with a warning |
-| `on_appraisal_before_send` | `channel, trace_id, text, annotations, lenses` | objections (`list[dict]`) or `None`; appraisal discards it in this version (the send is never held, #1192) |
+| `on_appraisal_before_send` | `channel, trace_id, text, annotations, lenses` | objection texts (`list[str]`) or `None`; appraisal concatenates them in result order and refuses the draft with them (below); a non-list result and a non-string item are dropped with a warning |
 | `on_appraisal_idle` | `channel, trace_id, response_text, annotations, lenses, past_claims` | nothing |
 
 `lenses` is the normalized share per offered lens plus `"none"`; `lenses`
 and `past_claims` are `None` after a miss. Before send, appraisal's
 `should_send_response` forks once on a final draft that is not a decline and
 has a trace (lens scores only, no claims; `appraisal.before_send_fork_prompt`),
-fires `on_appraisal_before_send`, and always returns `None`. After the
-exchange, the stage-2 task fires `on_appraisal_idle` once per exchange.
-Critique runs the lens it selects: before send inline, with objections
-queued and never waking; after the exchange as a queued task. Without
+fires `on_appraisal_before_send`, and returns a `Refusal` carrying the
+objections when peers return any (else `None`). The refusal is the pre-send
+hold (#1149, `corvidae_cognition/presend.py`, a helper class
+`PreSendHold` that is not a plugin and fires no hooks): when the kernel
+decided the refusal in time, the draft is stored unsent, `held.hold_and_wake`
+stores the objections (source `pre-send check`, the exchange's origin, stub
+text with no `NO_REPLY`), and one revising turn follows; while a hold is
+outstanding no final on the channel is checked, so a revision is never held
+again, and the held trace gets no stage 2. A late refusal holds and wakes
+nothing; the kernel's late path delivers it at the next turn. Appraisal and
+critique both list `held` in `depends_on` for it, and both forward
+`before_agent_turn`, `on_held_admitted` and `on_agent_response` to their
+`PreSendHold`; critique does so only without appraisal. After the exchange,
+the stage-2 task fires `on_appraisal_idle` once per exchange.
+Critique runs the lens it selects: before send inline, returning its
+objection texts to appraisal; after the exchange as a queued task. Without
 appraisal (`pm.has_plugin("appraisal")` at `on_start`), one INFO line names
 the fallback and one random lens offered for the point runs at each point at
-`critique.fallback_rate`. `add_stage2_listener` and `set_lens_offer` are gone.
+`critique.fallback_rate`; before send, critique's own `should_send_response`
+refuses the draft on its objections. `add_stage2_listener` and `set_lens_offer` are gone.
 
 ### GitHub events (`github-webhook` package)
 

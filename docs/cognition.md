@@ -1792,7 +1792,7 @@ every final at the gates from English word lists and a word-match probe of
 memory's `memory_fts`, with no model call, and fed the engagement gate and
 the decide gate's salience floor, both removed with it. `AppraisalPlugin`
 now implements no `should_process_message`; its only gate is the
-before-send scoring below, which never vetoes. A config that still
+before-send scoring below, which refuses a draft on its peers' objections. A config that still
 sets `appraisal.probe.*`, `appraisal.weights.*` or `appraisal.novelty.*`,
 or one of the importance-prior weights removed with the appraisal vector
 (`appraisal.prior.w_stakes`, `appraisal.prior.w_valence`,
@@ -1847,9 +1847,11 @@ through hooks and never call methods on it:
   (idle) or doesn't run (before send).
 - `on_appraisal_before_send(channel, trace_id, text, annotations, lenses)`
   tells peers the lens shares of a final draft before it is sent. `lenses`
-  is `None` after a miss. An implementer may return a list of objection
-  dicts, but appraisal discards the result in this version and never holds
-  the send (#1192); a refusal built on it is #1149's.
+  is `None` after a miss. An implementer returns a list of objection
+  strings, or `None`. Appraisal concatenates the lists in hook-result order
+  and refuses the draft with them. A non-list result and a non-string item
+  are dropped with a warning naming the trace, the channel and the type;
+  a blank string is skipped.
 - `on_appraisal_idle(channel, trace_id, response_text, annotations, lenses,
   past_claims)` is the stage-2 push above.
 
@@ -1860,9 +1862,11 @@ still run.
 `final` that is not a decline (`silence.decline_kind`, since the draft isn't
 in the window yet) and has a trace, it collects the `before_send` offers,
 forks the live window once with `DEFAULT_BEFORE_SEND_FORK_PROMPT`, and
-fires `on_appraisal_before_send` with the shares. It always returns `None`:
-appraisal never vetoes a send, and any exception is logged and the send
-goes ahead. The instruction quotes the whole draft on one line, not
+fires `on_appraisal_before_send` with the shares. When peers return
+objections, `should_send_response` returns a `Refusal` carrying them (see
+"Held for a revision" below); otherwise it returns `None`, and any exception
+is logged and the send goes ahead. A final is not checked while a hold is
+outstanding on its channel. The instruction quotes the whole draft on one line, not
 truncated, because the draft is what is being scored and the window doesn't
 hold it yet. The fork asks only for the `lenses` object, with no claims
 (the provenance check runs after the exchange only). No offers fires
@@ -1874,7 +1878,65 @@ static config with `appraisal.before_send_fork_prompt` (not a runtime
 tunable); the documented copy is `prompts/appraisal_before_send_fork.md`.
 At startup, when forks are not enabled for the appraisal stage, appraisal
 warns once naming `agent.forks.enabled` and `agent.forks.stages`: with no
-fork it scores nothing, at either point.
+fork it scores nothing, at either point. Because of that one warning, a
+before-send miss for forks being off logs at debug per final; every other
+miss warns. The before-send scores are also reported on `on_trace_record`
+(`source: appraisal`) as `{"phase": "before_send", "lenses": {...}}`, with
+`lenses` null on a miss so a miss is countable; stage 2's record gains
+`"phase": "idle"`, so one exchange has a record for each phase.
+
+**Held for a revision** (#1149, `corvidae_cognition/presend.py`). A draft
+that draws objections before send ends one of two ways: sent as written, or
+held back for one revision. Nothing is withheld on a lens's say-so.
+
+- **Held.** The kernel decides whether the refusal came in time. If it did,
+  the draft is stored unsent with the window's not-sent marker, so
+  transports never see it. Appraisal records `{"held": {"objections":
+  [...]}}` on `on_trace_record` and hands the objections to the kernel's
+  held-text store with `held.hold_and_wake` (source `pre-send check`,
+  origin of the held exchange: the `origin` annotation, else the trace's
+  recorded origin, else `user`). The stub that wakes the revising turn says
+  the reply was held for the reasons in the CONTEXT above and asks for a
+  revised one. It names no `NO_REPLY`, so Critique 4's silence default does
+  not apply, though the agent may still decline.
+- **The revising turn.** It is the turn of that origin at which the store
+  offers the batch, and it sees the objections framed as CONTEXT from
+  `pre-send check`. A held trace gets no stage 2, so critique runs no lens
+  and no provenance check on it; the revision is judged as usual.
+- **No second hold.** While a hold is outstanding, no final on the channel
+  is checked, the revision's own included. The hold ends at the revision's
+  final, or at the channel's first final after the offer with no tool call
+  outstanding (a revision whose tools are still running, or whose turn
+  failed, ends at the next such final). Finals from other turns in that span
+  go out unchecked.
+- **A late refusal holds nothing.** When the check misses the channel's
+  allowance, the reply has already gone: nothing is held and no turn is
+  woken, and the objections reach the channel's next turn through the
+  kernel's late path (`late check` CONTEXT).
+- **Objections not admitted.** If the revising turn's admission took none of
+  the held objections (duplicates, or no room under the funnel's budget),
+  one warning names the channel and says the revision may have gone out
+  without them.
+- **Failures.** If storing the held objections raises, one warning names the
+  channel and trace, the objections are lost and no turn is woken; the next
+  draft is checked as usual.
+
+Known behaviours (the design's Deferred list):
+
+- A stub turn the kernel defers while a tool call is outstanding still makes
+  its LLM call, with no objections in its window, before the turn that pops
+  the batch.
+- Held objections and the stub are in memory only; a restart between the hold
+  and the revision loses both.
+- A hold whose origin already has a pending stub for the same (channel,
+  origin) reuses that stub's text; for a `critique`-origin hold the revising
+  turn gets critique's stub, which offers `NO_REPLY` (follow-up filed).
+- Over ACP, `cancel_prompt` empties the channel's outstanding-call set, so
+  an interleaved final can end the unchecked span early and the revision's
+  final can then be checked.
+- If another gate vetoes in time while appraisal's refusal arrives late but
+  before `on_agent_response`, appraisal holds and wakes a reply the other
+  gate withheld: one extra turn.
 
 ### CritiquePlugin: the provenance check (`packages/corvidae-cognition/corvidae_cognition/critique.py`)
 
@@ -2156,11 +2218,13 @@ wake the channel; the other built-ins wait.
 - **Before send.** The before-send lens runs inline, inside the
   `should_send_response` check allowance, so the reply waits on it (if the
   allowance runs out the run still finishes in the background). Its
-  objections never refuse the send and never wake: every one is queued as
-  waiting for the channel's next turn, proactivity included
-  (interim, #1192). The provenance check never runs here; it runs after the
-  exchange only. Critique's own `should_send_response` keeps the `NO_REPLY`
-  veto and nothing else when appraisal is registered.
+  objections, as text, are the return value of `on_appraisal_before_send`:
+  appraisal refuses the draft on them and holds it for one revision
+  ("Held for a revision", above). They wake nothing themselves, and a held
+  trace is not judged afterwards. The provenance check never runs here; it
+  runs after the exchange only. Critique's own `should_send_response` keeps
+  the `NO_REPLY` veto and nothing else when appraisal is registered. Its
+  `before_send` record (`critique_before_send`) is written as before.
 - **No appraisal plugin.** Critique asks `pm.has_plugin("appraisal")` once,
   at `on_start`. Without it there is no vector to read, so one INFO line at
   startup names the fallback, and at each point (before send, on a final
@@ -2169,7 +2233,11 @@ wake the channel; the other built-ins wait.
   `critique.fallback_rate` (runtime-tunable per channel, default 0.25),
   built-ins and plugin lenses alike. This replaces the older run-every-exchange
   fallback (PRD §3.2 degrade-to-spec); the rate keeps the cost bounded. The
-  provenance check is off, since it needs appraisal's claims.
+  provenance check is off, since it needs appraisal's claims. The fallback
+  also holds: a sampled draft whose lens objects is refused by critique's own
+  `should_send_response`, and critique runs the same hold-and-revise state
+  (one revising turn, unchecked; no idle lens on the held trace) through the
+  shared `PreSendHold`. A hold is never started while one is outstanding.
 - **Record.** The choice is reported as the `lens_selection` key of a critique record
   (`on_trace_record`, `source: critique`; `lens_selection_before_send` for the
   before-send point, and `critique_before_send` for the run's outcome)

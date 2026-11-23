@@ -18,7 +18,9 @@ Two independent paths:
     (on the draft, before it is sent); the top one runs (#1078, #1169). Before
     send, retention is not offered and a plugin lens only when it declares
     ``before_send=True``; the before-send lens runs inline and its objections
-    only queue for the channel's next turn (#1192). When "none" tops the
+    go back to appraisal, which refuses the draft on them and holds it for one
+    revising turn (#1149; critique does the same itself when appraisal is
+    absent). When "none" tops the
     vector, critique still fires a random offered lens with probability
     ``critique.sample_below_rate`` — the standing experiment's false-negative
     bound (operator directive 3). Without an appraisal plugin (checked once,
