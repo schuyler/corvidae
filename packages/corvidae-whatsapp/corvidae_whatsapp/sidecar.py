@@ -81,10 +81,6 @@ class SidecarClient:
         self._ids = itertools.count(1)
         self._read_task: asyncio.Task | None = None
 
-    @property
-    def connected(self) -> bool:
-        return self._writer is not None and not self._writer.is_closing()
-
     async def connect(self) -> None:
         """Open the socket and start the read loop."""
         self._reader, self._writer = await asyncio.open_unix_connection(self.path)

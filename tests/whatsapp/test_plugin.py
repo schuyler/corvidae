@@ -231,3 +231,19 @@ async def test_a_not_connected_link_is_logged_without_alarming(tmp_path, caplog)
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+async def test_the_link_state_is_read_from_state_not_connected(tmp_path, caplog):
+    """A `reconnecting` link answers connected=false; `state` is the authority (#1220)."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["status"] = {"linked": False, "connected": False, "state": "reconnecting"}
+    await sidecar.start()
+    with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+        plugin, _recorder, _pm = await _plugin(tmp_path)
+        try:
+            await _wait_for(lambda: plugin._session_state != "unknown")
+            assert plugin._session_state == "reconnecting"
+            assert any("reconnecting" in r.getMessage() for r in caplog.records)
+        finally:
+            await plugin.on_stop()
+            await sidecar.stop()
