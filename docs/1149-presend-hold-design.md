@@ -1,6 +1,6 @@
 # Design: hold-and-revise before send (#1149 with #1169 part 2)
 
-Working plan under the rule-of-two pipeline. Not checked in; delete once implemented.
+Working plan under the rule-of-two pipeline, committed for handoff as #1212 did. Delete it, or fold it into `docs/cognition.md`, before the final PR merges. The canonical copy for review is this file.
 Base: `main` at `ccf960b` (after #1210, #1212, #1219).
 
 ## Requirements (approved: #1149 comment 7097300286, accepted 7097465716)
