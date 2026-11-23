@@ -902,8 +902,8 @@ Per transport:
    caps the response. The task pipeline is the shell by another name:
    disabling one disables both, and a non-zero exit marks the task failed
    so dependents do not run.
-4. A tool result over the operator-set result limit is cut to its
-   first that-many characters, and its full text is spilled
+4. A tool result over the operator-set result limit is cut to that
+   many characters, and its full text is spilled
    through the same kernel service as notifications (§3.3.11, §3.4.9):
    the header, derived from the stored row, says how much is shown, the
    full length, and, where the channel's tool set can read spill files,
@@ -1597,7 +1597,7 @@ design, not requirement. The requirements are outcomes:
    retried attempts; observer failures never break the call. The request
    event is retained as the pair of its response event.
 2. Attribution (stage, channel, trace, annotations, trigger, mode) is set
-   at the top of each logical operation and reset when it ends; a task
+   at the top of each logical operation and reset however it ends; a task
    captures the attribution at creation because queue workers do not
    inherit it.
 3. Sinks: a metrics sink (metrics events for tokens, latency, errors),

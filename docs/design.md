@@ -945,10 +945,10 @@ All operations are synchronous; no database access:
   re-roled: the window and `message_log` keep `role: system`. That matters
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
-  to stay cache-stable. The `user` default is gated on the harness
-  `memory_role` probe (`harness/driver.py`, the `buster-memrole` profile),
-  which checks the model still answers the person with the framed block as
-  the last user turn (PRD §3.3.7).
+  to stay cache-stable. The shipped default is `system`; making `user` the
+  default is gated on the harness `memory_role` probe (`harness/driver.py`,
+  the `buster-memrole` profile), which checks the model still answers the
+  person with the framed block as the last user turn (PRD §3.3.7).
 
   Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
   these steps run unwrapped on every turn and an exception here is a
