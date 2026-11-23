@@ -35,14 +35,6 @@ DIALOG = [
 ]
 
 
-class _Registry:
-    def __init__(self, channel):
-        self.channel = channel
-
-    def get(self, channel_id):
-        return self.channel if channel_id == self.channel.id else None
-
-
 @pytest.fixture
 async def env():
     """(memory, stub client, channel, db, rowids) with DIALOG persisted and

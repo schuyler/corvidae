@@ -38,7 +38,7 @@ from .test_memory_consolidation import (
 )
 from .test_memory_dedup import EMBED_CONFIG_DEDUP, build_dedup_env
 from .test_memory_dedup import seed_dialog as dedup_seed_dialog
-from .test_memory_fork import DIALOG, FORK_JSON, _compaction, _Registry, _use
+from .test_memory_fork import DIALOG, FORK_JSON, _compaction, _use
 
 # The memory table exactly as it was before issue #299 (no stamp columns).
 PRE_CHANGE_MEMORY_DDL = """

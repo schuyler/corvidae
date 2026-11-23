@@ -18,7 +18,7 @@ from corvidae_cognition.memory import (
     entry_size_sentence,
     resolve_entry_target_tokens,
 )
-from helpers import FakeForkAgent, window_of
+from helpers import FakeForkAgent, add_kernel_registry, window_of
 
 from corvidae.context import count_tokens
 
