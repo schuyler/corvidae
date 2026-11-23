@@ -1500,12 +1500,14 @@ scope, so time spent checking never counts against `tools.call_timeout`.
   the reason `no reason given`. The refusal is logged at INFO with the tool,
   the channel and the reasons. A refused call returns `error=True` and skips
   `transform_tool_result`, as the other pre-dispatch errors do.
-- **Late.** A `Refusal` that returns after the allowance goes into
+- **Late.** A refusal that returns after the allowance goes into
   `Agent._late_checks` as `late_tool_check_text(tool_name, arguments, plugin,
   reason)`. That is a `[late check: <plugin>]` row saying the call ran
   unchecked, quoting the arguments as JSON cut to 40 characters. It drains
   like a reply's late row (above). A subagent or fork-tool call's row goes to
-  the calling channel's next main turn. A late bare `False` is dropped.
+  the calling channel's next main turn. A late bare `False` gets the reason
+  `no reason given`, as in time (a reply's late bare `False` is still
+  dropped).
 
 **An unsent final releases transport state.** An unsent final never
 reaches `send_message`, where transports end the turn (Discord and Signal

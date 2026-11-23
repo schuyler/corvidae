@@ -1225,17 +1225,20 @@ class Agent(CorvidaePlugin):
         PRD §3.5.12. Every implementation runs under the channel's check
         allowance (``run_checks``). Returns the refusal text the call's result
         carries when any in-time verdict refuses, else None and the call
-        runs. A ``Refusal`` that arrives after the allowance refuses nothing;
+        runs. A refusal (``Refusal`` or bare ``False``) that arrives after the
+        allowance refuses nothing;
         it is held for the channel's next turn (_drain_late_checks). Every
         dispatch path passes this as dispatch_tool_call's ``check``.
         """
         assert self._registry is not None
 
         async def on_late(plugin_name: str, verdict: object) -> None:
-            # Only a refusal has anything to say; the miss is already counted.
-            if isinstance(verdict, Refusal):
+            # A late refusal still reaches the channel, a bare False included
+            # (it refuses with no reason); the miss is already counted.
+            if verdict is False or isinstance(verdict, Refusal):
+                reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
                 self._late_checks.setdefault(channel.id, []).append(
-                    late_tool_check_text(tool_name, arguments, plugin_name, verdict.reason)
+                    late_tool_check_text(tool_name, arguments, plugin_name, reason)
                 )
 
         results = await run_checks(

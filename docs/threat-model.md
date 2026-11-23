@@ -2165,7 +2165,7 @@ lets a plugin narrow what a call can do, never widen it.
   ...` frame, in the `tool` role. A reason that quotes the arguments can echo
   an injection back to the model. A check should not quote untrusted text in
   its reason unless it fences it.
-- **A late refusal is a core-written system row.** A `Refusal` that misses
+- **A late refusal is a core-written system row.** A refusal that misses
   the allowance becomes a `[late check: <plugin>]` CONTEXT row at the
   channel's next turn. Like the reply's late row (finding 3), it is in the
   `system` role. It also quotes the first 40 characters of the call's

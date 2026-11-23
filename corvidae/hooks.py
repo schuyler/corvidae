@@ -1288,7 +1288,7 @@ class AgentSpec:
         Runs under the channel's check allowance
         (``corvidae.checks.run_checks``): every implementation runs
         concurrently and the call waits no longer than the allowance, then
-        runs unchecked; the miss is recorded. A ``Refusal`` that arrives later
+        runs unchecked; the miss is recorded. A refusal that arrives later
         refuses nothing but reaches the channel's window as a framed CONTEXT
         row at its next turn, and wakes no turn. An implementation that raises
         is logged at warning and counts as no refusal (fail open, PRD

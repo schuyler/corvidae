@@ -410,3 +410,28 @@ class TestAllowance:
         assert "that command touched the prod host" in content
         prompt = plugin._client.chat.await_args_list[2].args[0]
         assert any("that command touched the prod host" in str(m.get("content")) for m in prompt)
+
+    async def test_late_bare_false_reaches_the_next_turn_with_no_reason(self, env):
+        """A bare False refuses (it is a refusal with no reason), so a late one
+        reaches the next turn too, saying no reason was given."""
+        plugin, channel, clock, metrics, calls = env
+        veto = Veto(False, clock=clock, delay=60)
+        plugin.pm.register(veto, name="slow_veto")
+        _script(
+            plugin, _shell_call(), _make_text_response("done"),
+            _make_text_response("second reply"),
+        )
+
+        turn = await _start_turn(plugin, channel)
+        await asyncio.wait_for(veto.started.wait(), 1)
+        await clock.advance(DEFAULT_MINIMUM)
+        await asyncio.wait_for(turn, 2)
+        await clock.advance(60)
+        await asyncio.wait_for(await _start_turn(plugin, channel, text="next"), 2)
+
+        (late,) = _late_rows(channel.conversation.messages)
+        content = late["content"]
+        assert content.startswith(f"[{LATE_CHECK_LABEL}: slow_veto]")
+        assert "'shell'" in content
+        assert "ran unchecked" in content
+        assert "no reason given" in content
