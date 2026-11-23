@@ -28,7 +28,7 @@ Signatures follow the design's class sketch as written:
 ``on_turn(channel, trace_id, annotations)``,
 ``on_admitted(channel, source, admitted_keys, duplicate_keys)`` (``on_held_admitted``
 also receives a ``trace_id``, which the design says the hold does not use, so
-``Checker`` does not forward it) and ``on_final(channel, trace_id, annotations)``.
+``Checker`` does not forward it) and ``on_final(channel, trace_id, response_text, annotations)``.
 The hold's logger name is not specified; warning assertions match on the
 channel id and the word "objection", never on a logger name.
 
@@ -140,7 +140,7 @@ class Checker:
         self, channel, request_text, response_text, trace_id, annotations, logprobs
     ):
         # The hold's outcome check runs first, as appraisal's hookimpl does.
-        await self.hold.on_final(channel, trace_id, annotations)
+        await self.hold.on_final(channel, trace_id, response_text, annotations)
 
 
 class NotifySpy:
@@ -681,7 +681,9 @@ class TestRevisionIsNeverHeld:
     ):
         """R6 input (d): admission policy drops every pre-send entry. The
         revision is sent unchecked, with one WARNING naming the channel and the
-        objections that did not reach it."""
+        objections that did not reach it. A policy drop is equivalent to going
+        over the budget: both reach ``on_held_admitted`` with
+        ``admitted_keys == []``, which is all the hold reads."""
         env = await make_env({"the draft": OBJECTIONS, "revised": OBJECTIONS}, mode="drop")
         script(env.plugin, _make_text_response("the draft"), _make_text_response("revised"))
 
@@ -735,6 +737,37 @@ class TestRevisionIsNeverHeld:
         assert len(env.trace.held()) == 2
         assert sent(env)[-1] == "revised"
         assert PRESEND_FRAME in prompt_text(env.plugin, 4)
+
+    async def test_r6_a_revising_turn_that_ends_with_no_final_does_not_leave_the_channel_unchecked(
+        self, make_env
+    ):
+        """R6 span end: the revising turn fails with an error that is not
+        retried (a ValueError is not an unreachable backend, see
+        test_turn_retry.py), so it ends with no final. The batch was offered at
+        that turn, so the hold is outstanding; the channel's next final with
+        nothing outstanding ends the span. A message after that has its final
+        checked, so a hold cannot leave the channel unchecked for good. A hold
+        that cleared only on the revision's own trace would never clear."""
+        env = await make_env({"the draft": OBJECTIONS, "later reply": ["still wrong"]})
+        script(
+            env.plugin, _make_text_response("the draft"), ValueError("bad request"),
+            _make_text_response("in the span"), _make_text_response("later reply"),
+            _make_text_response("later revision"),
+        )
+
+        await say(env)
+        # The revising turn died: only the kernel's error notice went out (an
+        # "error" emission, not a final), never the draft or a revision.
+        assert "the draft" not in sent(env)
+        assert len(sent(env)) == 1
+        assert env.checker.checked == ["the draft"]
+        assert len(env.trace.held()) == 1
+
+        # The span ends at the channel's next final; the one after it is checked.
+        await say(env, "anyone there")
+        await say(env, "one more try")
+        assert "later reply" in env.checker.checked
+        assert len(env.trace.held()) == 2
 
     async def test_r6_an_interleaved_final_while_the_revisions_tools_run_does_not_end_the_span(
         self, make_env

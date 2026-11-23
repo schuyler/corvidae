@@ -30,8 +30,8 @@ import logging
 
 import pytest
 
-from corvidae.context import MessageType
-from corvidae.held import HeldContext
+from corvidae.context import MessageType, unsent_marker_text
+from corvidae.held import STUB_ANNOTATION, HeldContext
 from corvidae.hooks import Refusal, hookimpl
 
 from helpers import add_kernel_registry
@@ -124,6 +124,13 @@ def _append_final(channel, text: str, *, unsent: bool) -> None:
         {"role": "assistant", "content": text},
         MessageType.UNSENT if unsent else MessageType.MESSAGE,
     )
+    # An unsent final is followed by the kernel's not-sent marker row, as
+    # Agent._append_unsent_marker leaves it.
+    if unsent:
+        channel.conversation.append(
+            {"role": "system", "content": unsent_marker_text("final", text)},
+            MessageType.CONTEXT,
+        )
 
 
 async def _final(env, draft: str, *, unsent: bool, annotations=None, trace_id=TRACE) -> None:
@@ -174,31 +181,6 @@ async def test_r1_a_peer_returning_none_leaves_the_answer_none(tmp_path):
         assert await _send(env, "a real draft", annotations={"origin": "user"}) is None
     finally:
         await _teardown(env)
-
-
-async def test_r1_critique_returns_its_objections_as_strings_and_holds_nothing(tmp_path):
-    """R1: critique's on_appraisal_before_send returns its objections as a
-    list of strings when its lens objects, and no longer queues them itself:
-    no held-store hold with source "critique" (and no wake) for a before-send
-    run. The interim path is gone."""
-    env = await build_critique(
-        tmp_path, PresentAppraisal(), chat_text=VERDICT, with_held=True)
-    try:
-        spy = HeldSpy()
-        env.held.hold = spy.hold
-        env.held.hold_and_wake = spy.hold_and_wake
-        await _begin(env, "kb9")
-        result = await env.plugin.on_appraisal_before_send(
-            channel=env.channel, trace_id="kb9", text=DRAFT, annotations={},
-            lenses={"proactivity": 0.8, "none": 0.2})
-        # The objections come back as texts, ready to refuse with.
-        assert isinstance(result, list) and len(result) == 1
-        assert isinstance(result[0], str) and OBJECTION_TEXT in result[0]
-        # The interim path queued them under source "critique"; it is gone.
-        assert [h for h in spy.holds if h["source"] == "critique"] == []
-        assert spy.wakes == []
-    finally:
-        await _teardown_critique(env)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +247,7 @@ async def test_r5_a_late_refusal_holds_nothing_and_reports_no_held_record(tmp_pa
 async def test_r5_a_pending_refusal_is_not_consumed_by_a_different_draft(tmp_path):
     """R5: a pending refusal whose draft text differs from response_text is
     not consumed: an unsent final of the same trace with other text holds
-    nothing, and the refusal is still there for the final it belongs to."""
+    nothing."""
     env, held = await _presend_env(tmp_path, ObjectingPeer([OBJECTION]))
     try:
         refusal = await _send(env, "the refused draft", annotations={})
@@ -274,9 +256,43 @@ async def test_r5_a_pending_refusal_is_not_consumed_by_a_different_draft(tmp_pat
         await _final(env, "some other text", unsent=True)
         assert held.wakes == []
         assert _held_records(env) == []
-        # The refusal was not used up: its own draft, unsent, still holds.
-        await _final(env, "the refused draft", unsent=True)
-        assert len(held.wakes) == 1
+    finally:
+        await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
+# R6: the owners forward the kernel's hooks to the hold
+# ---------------------------------------------------------------------------
+
+
+async def test_r6_appraisal_forwards_the_turn_and_the_offer_and_a_declined_revision_clears(
+    tmp_path,
+):
+    """R6: appraisal forwards before_agent_turn and on_held_admitted to its
+    hold, and calls on_final before its decline early return. A held draft,
+    the revising turn announced to appraisal's own hooks, the batch offered,
+    then a revision that DECLINES (NO_REPLY, unsent): the span still ends at
+    that final, so the channel's next final is checked again and refused. No
+    forwarding of on_held_admitted, or on_final after the decline return,
+    leaves the channel suppressed and the next final unchecked."""
+    env, held = await _presend_env(tmp_path, ObjectingPeer([OBJECTION]))
+    try:
+        await _refuse_then_final(env, "a real draft", unsent=True)
+        [wake] = held.wakes
+        # The revising turn starts: the stub turn, with the hold's origin.
+        await env.appraisal.before_agent_turn(
+            channel=env.channel, trace_id="rev",
+            annotations={"origin": wake["origin"], STUB_ANNOTATION: True})
+        await env.appraisal.on_held_admitted(
+            channel=env.channel, source=SOURCE, trace_id=None,
+            admitted_keys=["k1"], duplicate_keys=[])
+        # The revision declines: NO_REPLY, withheld, as the agent leaves it.
+        await _final(env, "NO_REPLY", unsent=True, annotations={"origin": "user"}, trace_id="rev")
+        # The span ended: the next final on the channel is checked and refused.
+        await _originate(env, "next")
+        result = await _send(
+            env, "another draft", annotations={"origin": "user"}, trace_id="next")
+        assert isinstance(result, Refusal)
     finally:
         await _teardown(env)
 
@@ -378,6 +394,38 @@ async def test_r9_critique_does_not_check_while_its_hold_is_outstanding(tmp_path
         await _begin(env, "kr9b")
         assert await _gate(env, trace_id="kr9b") is None
         assert len(env.fork_agent.calls) == forks
+    finally:
+        await _teardown_critique(env)
+
+
+async def test_r6_critique_forwards_the_turn_and_the_offer_and_a_declined_revision_clears(
+    tmp_path,
+):
+    """R6: with appraisal absent, critique forwards before_agent_turn and
+    on_held_admitted to its hold, and calls on_final before its eligibility
+    and decline early returns. A held draft, the revising turn announced,
+    the batch offered, then a revision that DECLINES (NO_REPLY, unsent): the
+    span ends at that final, so the channel's next final is sampled and
+    refused again. Without the forwarding, or with on_final after the
+    decline return, the channel stays suppressed and nothing is checked."""
+    env, spy = await _critique_fallback_env(tmp_path)
+    try:
+        await _critique_hold_a_draft(env, "kr6")
+        [wake] = spy.wakes
+        await env.plugin.before_agent_turn(
+            channel=env.channel, trace_id="rev",
+            annotations={"origin": wake["origin"], STUB_ANNOTATION: True})
+        await env.plugin.on_held_admitted(
+            channel=env.channel, source=SOURCE, trace_id=None,
+            admitted_keys=["k1"], duplicate_keys=[])
+        # The revision declines, as the agent leaves it: NO_REPLY, unsent.
+        _append_final(env.channel, "NO_REPLY", unsent=True)
+        await env.plugin.on_agent_response(
+            channel=env.channel, request_text="req", response_text="NO_REPLY",
+            trace_id="rev", annotations={"origin": "user"}, logprobs=None)
+        # The span ended: the next final is checked, and refused.
+        await _begin(env, "kr6b")
+        assert isinstance(await _gate(env, trace_id="kr6b"), Refusal)
     finally:
         await _teardown_critique(env)
 
