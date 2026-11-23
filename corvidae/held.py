@@ -163,12 +163,18 @@ class HeldContext(CorvidaePlugin):
         source: str,
         entries: list[str],
         stub_text: str | None = None,
+        *,
+        stub_text_wins: bool = False,
     ) -> None:
         """Hold ``entries`` for the channel's turn of ``origin``, and wake it.
 
         One ``on_notify`` stub fires per ``(channel, origin)`` while one is
         pending; later batches just queue behind it. ``stub_text`` is the
-        stub's text, or None for a count of what is held.
+        stub's text, or None for a count of what is held. By default the
+        first pending stub's text stands; with ``stub_text_wins`` a batch that
+        queues behind a pending (or re-fire-marked) stub replaces the pair's
+        stub text (and source) with its own, so the caller, not the store,
+        declares which text outranks (#1222).
         """
         # Nothing to hold, nothing to wake.
         if not entries:
@@ -183,8 +189,18 @@ class HeldContext(CorvidaePlugin):
         # A stub is pending, or the pair waits for a re-fire that will carry
         # this batch: queue only.
         if pair in self._stub_pending or pair in self._rearm:
+            # The caller says its text outranks the pending one: the stub
+            # (and any re-fire) carries this batch's text; the channel stays.
+            if stub_text_wins:
+                self._stub_info[pair] = (self._stub_info[pair][0], source, stub_text)
             return
         await self._fire_stub(channel, origin, source, stub_text)
+
+    def stub_text(self, channel_id: str, origin: str) -> str | None:
+        """The stub text held for the pair, or None (no stub, or a count stub)."""
+        # No pending condition: a stub item is always the pair's latest fire.
+        info = self._stub_info.get((channel_id, origin))
+        return info[2] if info is not None else None
 
     def in_flight(self, channel_id: str) -> list[asyncio.Future[bool]]:
         """The channel's before-compose stragglers (finished ones kept until its next admit)."""

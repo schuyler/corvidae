@@ -1745,6 +1745,21 @@ class Agent(CorvidaePlugin):
                 _outcome = "no_message"
                 return
             conversation_message, request_text = msg_result
+            # A held stub's row carries the text the store now holds for its
+            # pair, which a later batch may have replaced (#1222).
+            _origin = item.annotations.get("origin")
+            if (
+                item.role == QueueItemRole.NOTIFICATION
+                and not item.tool_call_id
+                and STUB_ANNOTATION in item.annotations
+                and _origin is not None
+            ):
+                _held_text = get_dependency(self.pm, "held", HeldContext).stub_text(
+                    item.channel.id, _origin
+                )
+                if _held_text is not None:
+                    conversation_message["content"] = _held_text
+                    request_text = _held_text
 
             # Pick up registry changes (e.g. a reconnected MCP server) before
             # any conversation is initialised or the turn's tools are read.

@@ -155,7 +155,7 @@ class PreSendHold:
             held = get_dependency(self.pm, "held", HeldContext)
             await held.hold_and_wake(
                 channel, pending.origin, SOURCE, pending.objections,
-                stub_text=REVISION_STUB,
+                stub_text=REVISION_STUB, stub_text_wins=True,
             )
         except Exception:
             logger.warning(
