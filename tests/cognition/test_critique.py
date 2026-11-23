@@ -948,6 +948,53 @@ class TestProvenanceTrigger:
             await _teardown(env)
 
 
+async def _use_real_message_fts(env) -> None:
+    """Replace the test's plain message_fts with the DDL the memory plugin
+    creates in production (the tokenizer under test), before any row is logged."""
+    from corvidae_cognition.memory import MESSAGE_FTS_DDL
+
+    await env.db.execute("DROP TABLE message_fts")
+    await env.db.execute(MESSAGE_FTS_DDL)
+    await env.db.commit()
+
+
+class TestProvenanceUnspacedText:
+    """#1186 R2: critique's provenance search finds unspaced text through
+    the shared keyword query (pieces, or LIKE for a 2-character term)."""
+
+    @pytest.mark.parametrize("query", ["我也喜欢吃", "苹果"], ids=["containing", "short"])
+    async def test_unspaced_claim_finds_the_earlier_message(self, tmp_path, query):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _use_real_message_fts(env)
+            earlier = await _log(env, "我喜欢吃苹果")
+            await _log(env, "kestrel rain gauge calibration")
+            origin = await _log(env, "你喜欢什么？")
+            await _begin_exchange(env, "kj", origin_rowid=origin)
+            claim = {"claim": "你说过你喜欢吃苹果", "queries": [query]}
+            evidence = await env.plugin._gather_evidence(env.channel, "kj", [claim])
+            assert _candidate_rowids(evidence) == [[earlier]]
+        finally:
+            await _teardown(env)
+
+    async def test_non_string_query_entries_are_skipped_not_fatal(self, tmp_path):
+        """A model-written `queries` list can hold a non-string; the claim
+        is still searched by its string entries (no TypeError abandons the
+        provenance check)."""
+        env = await _provenance_env(tmp_path)
+        try:
+            await _use_real_message_fts(env)
+            earlier = await _log(env, "the quarterly audit deadline is Thursday")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kn", origin_rowid=origin)
+            claim = {"claim": "deadline", "queries": [None, 42, "quarterly audit deadline"]}
+            evidence = await env.plugin._gather_evidence(env.channel, "kn", [claim])
+            assert evidence is not None
+            assert _candidate_rowids(evidence) == [[earlier]]
+        finally:
+            await _teardown(env)
+
+
 class TestProvenanceEvidence:
     async def test_rows_before_the_exchange_are_candidates(self, tmp_path):
         env = await _provenance_env(tmp_path)

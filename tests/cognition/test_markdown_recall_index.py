@@ -13,7 +13,6 @@ from corvidae_cognition.markdown_recall.index import (
     Hit,
     MarkdownIndex,
     _EncoderIdentity,
-    _fts_match,
 )
 
 
@@ -186,18 +185,80 @@ async def test_search_empty_index_returns_nothing(tmp_path):
     await index.close()
 
 
-def test_fts_match_sanitizes_and_ors():
-    assert _fts_match("hello world") == '"hello"* OR "world"*'
-    assert _fts_match("") == ""
-    assert _fts_match("   ") == ""
-    assert _fts_match("spectrum") == '"spectrum"*'
+# ---------------------------------------------------------------------------
+# #1186 R2: markdown recall finds unspaced text through the trigram index
+# ---------------------------------------------------------------------------
+
+UNSPACED = {
+    "cjk.md": "# 笔记\n\n我喜欢吃苹果",
+    "other.md": "# Other\n\nunrelated content about cooking pasta",
+}
 
 
-def test_fts_match_escapes_double_quotes():
-    # A `"` in a token is doubled so the MATCH stays valid FTS5.
-    assert _fts_match('foo"bar') == '"foo""bar"*'
-    # a" -> a"" (the quote doubles), wrapped -> "a"""*
-    assert _fts_match('a" b"c') == '"a"""* OR "b""c"*'
+async def test_chunks_fts_is_created_with_the_trigram_tokenizer(tmp_path):
+    """A new index creates chunks_fts with trigram remove_diacritics 1."""
+    index, _, _ = await make_index(tmp_path, UNSPACED, identity=None)
+    db = await index._ensure_schema()
+    async with db.execute("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'") as c:
+        (ddl,) = await c.fetchone()
+    assert "trigram" in ddl and "remove_diacritics 1" in ddl, ddl
+    await index.close()
+
+
+async def test_search_finds_a_sentence_containing_an_unspaced_word(tmp_path):
+    """A query that contains 喜欢吃 (a 3-character piece) finds the page
+    holding 我喜欢吃苹果 on the FTS-only path."""
+    index, _, _ = await make_index(tmp_path, UNSPACED, identity=None)
+    await index.reconcile()
+    hits = await index.search("我也喜欢吃", k=3)
+    assert [h.path for h in hits][:1] == ["cjk.md"], hits
+    await index.close()
+
+
+async def test_search_finds_a_two_character_cjk_word(tmp_path):
+    """A query of only a 2-character word (no term of 3+ characters) goes
+    through the LIKE scan and finds the page."""
+    index, _, _ = await make_index(tmp_path, UNSPACED, identity=None)
+    await index.reconcile()
+    hits = await index.search("苹果", k=3)
+    assert [h.path for h in hits] == ["cjk.md"], hits
+    await index.close()
+
+
+async def test_search_of_only_common_words_still_runs(tmp_path):
+    """R1: no stopword list; a query of only common English words runs and
+    returns the chunks that share their pieces."""
+    index, _, _ = await make_index(
+        tmp_path, {"a.md": "# A\n\nDinner: pasta with garlic and basil"}, identity=None
+    )
+    await index.reconcile()
+    hits = await index.search("the and with", k=3)
+    assert [h.path for h in hits] == ["a.md"], hits
+    await index.close()
+
+
+async def test_chunker_version_bump_rebuilds_an_index_built_by_the_old_chunker(tmp_path):
+    """#1186 R4: chunk boundaries moved (bytes, source spans), so an index
+    stamped by the previous chunker version is rebuilt at the next
+    reconcile, re-embedding the folder, even though no file changed."""
+    index, root, embed = await make_index(tmp_path, {"a.md": "# A\n\nalpha beta gamma"})
+    await index.reconcile()
+    # Stamp the manifest as the previous chunker (otterwiki-2) built it.
+    await index._db.execute("UPDATE embedding_meta SET chunker_version = 'otterwiki-2'")
+    await index._db.commit()
+    await index.close()
+
+    reopened = MarkdownIndex(
+        root=root, db_path=tmp_path / "index.db",
+        get_client=lambda: embed, get_identity=lambda: IDENTITY,
+    )
+    before = embed.calls
+    await reopened.reconcile()
+    assert embed.calls > before, "the old-chunker index was not rebuilt"
+    async with reopened._db.execute("SELECT chunker_version FROM embedding_meta") as c:
+        (version,) = await c.fetchone()
+    assert version != "otterwiki-2"
+    await reopened.close()
 
 
 class TestMultiRoot:

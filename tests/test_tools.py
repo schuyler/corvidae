@@ -1026,6 +1026,24 @@ def _make_ddgs_mock(search_results):
     return mock_ctx
 
 
+class TestWebSearchRegion:
+    """#1186 R8: web_search passes a region from the system locale, not the
+    library's us-en default."""
+
+    @pytest.mark.parametrize("locale_name,region", [
+        ("de_DE", "de-de"), (None, "wt-wt"),
+    ])
+    async def test_region_follows_the_system_locale(self, monkeypatch, locale_name, region):
+        from corvidae import system_locale
+
+        monkeypatch.setattr(system_locale, "time_locale", lambda: locale_name)
+        mock_ctx = _make_ddgs_mock([{"title": "T", "href": "http://x.example", "body": "b"}])
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            await web_search("anfrage")
+        ddgs = mock_ctx.__enter__.return_value
+        assert ddgs.text.call_args.kwargs.get("region") == region
+
+
 class TestWebSearch:
     async def test_web_search_returns_formatted_results(self):
         results = [

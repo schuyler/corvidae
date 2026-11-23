@@ -61,7 +61,7 @@ FORK_PROMPT = (
     '  "participants": ["<sender name>", "..."],\n'
     '  "importance": "<number from 0 to 1>"\n'
     '}\n'
-    "Keep each entry's narrative to about 192 words or fewer; if one topic needs more, give it consecutive entries rather than one long one.\n"
+    "Keep each entry's narrative to about 256 tokens or fewer; if one topic needs more, give it consecutive entries rather than one long one.\n"
 )
 
 

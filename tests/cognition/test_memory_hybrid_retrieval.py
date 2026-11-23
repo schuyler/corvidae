@@ -19,7 +19,6 @@ from corvidae_cognition.memory import (
     CANDIDATES_CHOICES,
     FTS_SIMILARITY_PROXY,
     MemoryPlugin,
-    _fts_match_query,
 )
 
 from .test_memory_retrieval import (
@@ -64,26 +63,6 @@ async def seed_named_and_distractors(db, channel_id: str) -> int:
     for text in DISTRACTORS:
         await seed_memory(db, channel_id, text)
     return await seed_memory(db, channel_id, NAMED)
-
-
-class TestFtsQueryStopwords:
-    """The hybrid side's FTS query drops common words."""
-
-    def test_stopwords_dropped_when_asked(self):
-        assert _fts_match_query("what about Yoz", stopwords=True) == '"Yoz"'
-
-    def test_all_stopwords_gives_no_query(self):
-        assert _fts_match_query("what about that", stopwords=True) is None
-
-    def test_default_keeps_every_word(self):
-        """search_memory and the degraded path keep today's builder."""
-        assert _fts_match_query("what about Yoz") == '"what" OR "about" OR "Yoz"'
-
-    def test_cap_counts_words_left_after_stopwords(self):
-        text = " ".join(["the"] * 30 + [f"w{i}" for i in range(25)])
-        match = _fts_match_query(text, stopwords=True)
-        assert match is not None
-        assert match.count(" OR ") == 19 and '"the"' not in match
 
 
 class TestFusion:
@@ -150,16 +129,35 @@ class TestFusion:
         await db.close()
 
     async def test_query_with_no_lexical_hit_ranks_as_vector_only(self):
-        """Requirement 2: no FTS match means the fused order is the vec order."""
+        """Requirement 2: no FTS match means the fused order is the vec order.
+
+        #1186: the query shares no 3-character piece with any record (the
+        old "what about those" shared the common words of the distractors, and
+        with no stopword list those now match)."""
         orders = []
         for mode in ("hybrid", "vector"):
             memory, _e, channel, _conv, db = await build_retrieval_env(config(mode, k=8))
             for text in [NAMED, *DISTRACTORS]:
                 await seed_memory(db, channel.id, text)
-            pool = await memory._retrieve_pool("what about those")  # all stopwords
+            pool = await memory._retrieve_pool("qzxv wkjy")
             orders.append([(c["id"], round(c["similarity"], 6)) for c in pool.ranked])
             await db.close()
         assert orders[0] == orders[1]
+
+    async def test_query_of_only_common_words_still_returns_rows(self):
+        """#1186 R1: with no stopword list the hybrid FTS side runs a query
+        of only common words. The distractors have no vector, so only the
+        keyword side can return them."""
+        memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
+        await seed_memory(db, channel.id, "kestrel rain gauge calibration")
+        for text in DISTRACTORS:
+            await seed_memory(db, channel.id, text, embedded=False)
+
+        pool = await memory._retrieve_pool("what about those")
+
+        found = {c["id"] for c in pool.ranked if c["source"] == "fts"}
+        assert found, "a common-words query returned no keyword hits"
+        await db.close()
 
 
 class TestNoKeywordFloor:
