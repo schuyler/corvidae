@@ -1,13 +1,26 @@
-"""Tests for corvidae.outcome_log — the exchange_log table and writer API."""
+"""outcome_log as the sink of ``on_trace_record`` (#1179, R4, R6).
 
-import asyncio
+outcome_log appends one JSONL line per record to ``<db stem>.outcomes.jsonl``
+beside the session DB, writes its own admitted/rejected/persisted records
+the same way, answers ``resolve_trace_origin`` from a bounded in-memory
+index, and no longer creates or writes ``exchange_log``.
+"""
 
+import logging
+
+import aiosqlite
 import pytest
 
+from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 
+from tests.cognition.trace_helpers import add_trace, outcomes_file, read_outcomes
 
-async def _setup(db):
+CH = Channel(transport="irc", scope="#a")
+
+
+async def _setup(db, *, registry: ChannelRegistry | None = None):
+    """outcome_log on a pm with persistence (on ``db``) and the trace plugin."""
     from corvidae_cognition.outcome_log import OutcomeLogPlugin
     from corvidae.persistence import PersistencePlugin
 
@@ -15,6 +28,9 @@ async def _setup(db):
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
+    add_trace(pm)
+    if registry is not None:
+        pm.register(registry, name="registry")
     plugin = OutcomeLogPlugin()
     pm.register(plugin, name="outcome_log")
     await plugin.on_init(pm, {})
@@ -22,405 +38,187 @@ async def _setup(db):
     return plugin
 
 
-class TestExchangeLogWriter:
-    async def test_record_and_update_round_trip(self, db):
-        plugin = await _setup(db)
+@pytest.fixture
+async def file_db(tmp_path):
+    """A file-backed session DB, so outcome_log has a place to write."""
+    from corvidae.persistence import init_db
 
-        await plugin.record_exchange(
-            "ex1", "irc:#general", origin="user", message_rowid=7
+    path = tmp_path / "sessions.db"
+    async with aiosqlite.connect(str(path)) as conn:
+        await init_db(conn)
+        yield conn, path
+
+
+async def _fire(pm, trace_id="t1", channel_id=CH.id, source="gates",
+                origin=None, record=None):
+    # Fire the hook the way a reporter does.
+    await pm.ahook.on_trace_record(
+        trace_id=trace_id, channel_id=channel_id, source=source,
+        origin=origin, record=record if record is not None else {"send": {"vetoed": True}},
+    )
+
+
+class TestRecords:
+    async def test_one_line_per_record_beside_the_db(self, file_db):
+        db, path = file_db
+        plugin = await _setup(db)
+        await _fire(plugin.pm, record={"send": {"vetoed": True}})
+        await _fire(plugin.pm, record={"suppressed": {"progress": True}})
+
+        lines = read_outcomes(outcomes_file(path))
+        assert [line["record"] for line in lines] == [
+            {"send": {"vetoed": True}}, {"suppressed": {"progress": True}},
+        ]
+        first = lines[0]
+        assert set(first) == {"ts", "trace_id", "channel_id", "source", "origin", "record"}
+        assert (first["trace_id"], first["channel_id"], first["source"], first["origin"]) == (
+            "t1", "irc:#a", "gates", None,
         )
-        await plugin.update_exchange(
-            "ex1", retrieval_top_score=0.91, retrieval_hit_count=3
-        )
+        assert first["ts"] > 0
 
-        async with db.execute(
-            "SELECT channel_id, origin, message_rowid, retrieval_top_score, "
-            "retrieval_hit_count, probe_score FROM exchange_log "
-            "WHERE trace_id = ?",
-            ("ex1",),
-        ) as cursor:
-            row = await cursor.fetchone()
+    async def test_path_follows_the_db_file(self, tmp_path):
+        # The file sits beside whatever file the persistence connection
+        # opened, so redact (which only has the DB) can find it.
+        from corvidae.persistence import init_db
 
-        assert row == ("irc:#general", "user", 7, 0.91, 3, None)
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        async with aiosqlite.connect(str(sub / "other.db")) as db:
+            await init_db(db)
+            plugin = await _setup(db)
+            await _fire(plugin.pm)
+        assert len(read_outcomes(sub / "other.outcomes.jsonl")) == 1
 
-    async def test_record_minimal_defaults(self, db):
+    async def test_no_exchange_log_table_is_created(self, file_db):
+        db, _ = file_db
         plugin = await _setup(db)
-        await plugin.record_exchange("ex2", "cli:local")
-
+        await plugin.on_message_admitted(channel=CH, trace_id="t1", sender="u", text="hi")
+        await _fire(plugin.pm)
         async with db.execute(
-            "SELECT origin, message_rowid, created_at FROM exchange_log "
-            "WHERE trace_id = ?",
-            ("ex2",),
+            "SELECT name FROM sqlite_master WHERE name = 'exchange_log'"
         ) as cursor:
-            row = await cursor.fetchone()
+            assert await cursor.fetchone() is None
 
-        assert row[0] is None
-        assert row[1] is None
-        assert row[2] > 0  # created_at is stamped
-
-    async def test_duplicate_record_is_idempotent(self, db):
-        plugin = await _setup(db)
-        await plugin.record_exchange("ex3", "cli:local", origin="user")
-        # Second insert with different values is ignored (INSERT OR IGNORE).
-        await plugin.record_exchange("ex3", "other", origin="task")
-
-        async with db.execute(
-            "SELECT COUNT(*), MAX(channel_id) FROM exchange_log "
-            "WHERE trace_id = ?",
-            ("ex3",),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        assert row == (1, "cli:local")
-
-    async def test_update_unknown_column_rejected(self, db):
-        plugin = await _setup(db)
-        await plugin.record_exchange("ex4", "cli:local")
-
-        with pytest.raises(ValueError):
-            await plugin.update_exchange("ex4", not_a_column="x")
-
-    async def test_update_immutable_column_rejected(self, db):
-        # The key/channel/created_at identity columns are not updatable.
-        plugin = await _setup(db)
-        await plugin.record_exchange("ex5", "cli:local")
-
-        with pytest.raises(ValueError):
-            await plugin.update_exchange("ex5", channel_id="hijacked")
-
-    async def test_update_json_columns(self, db):
-        """appraisal/outcomes are merge columns: dict fragments are merged
-        via atomic json_patch, not stored verbatim (see WP2.1's
-        test_merge_column_rejects_scalar_value for the scalar-rejection
-        half of this contract)."""
-        import json
-
-        plugin = await _setup(db)
-        await plugin.record_exchange("ex6", "cli:local")
-        await plugin.update_exchange(
-            "ex6", appraisal={"valence": 0.2}, outcomes={"verdict": "good"}
-        )
-
-        async with db.execute(
-            "SELECT appraisal, outcomes FROM exchange_log WHERE trace_id = ?",
-            ("ex6",),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        assert json.loads(row[0]) == {"valence": 0.2}
-        assert json.loads(row[1]) == {"verdict": "good"}
-
-        # A second update with a new fragment merges rather than overwrites.
-        await plugin.update_exchange("ex6", appraisal={"stage2": {"score": 0.5}})
-
-        async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-            ("ex6",),
-        ) as cursor:
-            (merged_appraisal,) = await cursor.fetchone()
-
-        assert json.loads(merged_appraisal) == {
-            "valence": 0.2,
-            "stage2": {"score": 0.5},
-        }
-
-
-class TestRetrievalTopSimilarity:
-    """#66: exchange_log carries the raw top similarity next to the score."""
-
-    async def test_similarity_round_trip(self, db):
-        plugin = await _setup(db)
-        await plugin.record_exchange("ex-s", "irc:#general")
-        await plugin.update_exchange(
-            "ex-s", retrieval_top_score=0.3, retrieval_top_similarity=0.82
-        )
-        async with db.execute(
-            "SELECT retrieval_top_score, retrieval_top_similarity "
-            "FROM exchange_log WHERE trace_id = ?",
-            ("ex-s",),
-        ) as cursor:
-            assert await cursor.fetchone() == (0.3, 0.82)
-
-    async def test_legacy_table_upgraded(self, db):
-        """An exchange_log created before #66 gains the column, rows kept."""
-        await db.execute(
-            "CREATE TABLE exchange_log (trace_id TEXT PRIMARY KEY, "
-            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
-            "created_at REAL NOT NULL, retrieval_top_score REAL, "
-            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
-            "provenance_snapshot TEXT, outcomes TEXT)"
-        )
-        await db.execute(
-            "INSERT INTO exchange_log (trace_id, channel_id, created_at, "
-            "retrieval_top_score) VALUES ('old', 'irc:#old', 1.0, 0.4)"
-        )
-        await db.commit()
-
-        plugin = await _setup(db)
-        await plugin.record_exchange("new", "irc:#new")
-        await plugin.update_exchange("new", retrieval_top_similarity=0.9)
-        async with db.execute(
-            "SELECT trace_id, retrieval_top_score, retrieval_top_similarity "
-            "FROM exchange_log ORDER BY created_at"
-        ) as cursor:
-            rows = await cursor.fetchall()
-        assert rows == [("old", 0.4, None), ("new", None, 0.9)]
-
-
-    async def test_concurrent_upgrade_does_not_fail(self, db):
-        """Two first writers racing the upgrade both succeed: the loser of
-        the ALTER race sees 'duplicate column name', which means done."""
+    def test_writer_api_is_gone(self):
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
-        from corvidae.persistence import PersistencePlugin
 
-        await db.execute(
-            "CREATE TABLE exchange_log (trace_id TEXT PRIMARY KEY, "
-            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
-            "created_at REAL NOT NULL, retrieval_top_score REAL, "
-            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
-            "provenance_snapshot TEXT, outcomes TEXT)"
-        )
-        await db.commit()
-        pm = create_plugin_manager()
-        persistence = PersistencePlugin()
-        persistence.db = db
-        pm.register(persistence, name="persistence")
-        plugin = OutcomeLogPlugin()
-        pm.register(plugin, name="outcome_log")
-        await plugin.on_init(pm, {})
-
-        await asyncio.gather(plugin._ensure_table(), plugin._ensure_table())
-        async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
-            cols = {row[1] for row in await cursor.fetchall()}
-        assert "retrieval_top_similarity" in cols
+        for name in ("record_exchange", "update_exchange", "upsert_exchange"):
+            assert not hasattr(OutcomeLogPlugin, name), name
 
 
-class TestFreshTable:
-    async def test_fresh_table_has_no_provenance_snapshot(self, db):
-        """A new exchange_log has no provenance_snapshot column (#1001)."""
-        await _setup(db)
-        async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
-            cols = {row[1] for row in await cursor.fetchall()}
-        assert cols
-        assert "provenance_snapshot" not in cols
-
-
-class TestRfc7386NoneDeletes:
-    """Pin the RFC 7386 cross-WP contract (WP2.1 review-gate follow-up):
-    a None value inside a merge fragment DELETES that key from the
-    envelope. Every 2B–2E writer must therefore zero/omit fields rather
-    than None them — this test is the executable statement of that rule."""
-
-    async def test_none_in_fragment_deletes_the_key(self, db):
-        import json
-
+class TestOwnRecords:
+    async def test_admitted_then_persisted(self, file_db):
+        db, path = file_db
         plugin = await _setup(db)
-        await plugin.record_exchange("ex-7386", "cli:local")
-        await plugin.update_exchange(
-            "ex-7386", appraisal={"stage1": {"salience": 0.4}, "entropy": {"mean": 1.0}}
+        await plugin.on_message_admitted(channel=CH, trace_id="t1", sender="u", text="hi")
+        await plugin.on_message_persisted(
+            channel=CH, trace_id="t1", rowid=7, text="hi", annotations={},
         )
+        lines = read_outcomes(outcomes_file(path))
+        assert [(l["source"], l["origin"], l["record"]) for l in lines] == [
+            ("outcome_log", "user", {"event": "admitted"}),
+            # First origin wins: a user trace's persisted line says "user".
+            ("outcome_log", "user", {"event": "persisted", "message_rowid": 7}),
+        ]
 
-        # Merging {"entropy": None} removes the entropy key entirely.
-        await plugin.update_exchange("ex-7386", appraisal={"entropy": None})
-
-        async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-            ("ex-7386",),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        envelope = json.loads(row[0])
-        assert "entropy" not in envelope
-        assert envelope["stage1"] == {"salience": 0.4}
-
-
-async def test_missing_persistence_db_names_path_and_start_status():
-    """The exchange_log DB guard names the configured path and start status."""
-    from corvidae_cognition.outcome_log import OutcomeLogPlugin
-    from corvidae.persistence import PersistencePlugin
-
-    pm = create_plugin_manager()
-    persistence = PersistencePlugin()
-    pm.register(persistence, name="persistence")
-    plugin = OutcomeLogPlugin()
-    pm.register(plugin, name="outcome_log")
-    await plugin.on_init(pm, {})
-    # on_start runs with the persistence DB still closed, so the early DDL
-    # attempt is deferred; the writer then hits the guard.
-    await plugin.on_start({"daemon": {"session_db": "custom-sessions.db"}})
-
-    with pytest.raises(RuntimeError) as excinfo:
-        await plugin.record_exchange("ex-missing", "cli:local")
-
-    message = str(excinfo.value)
-    assert "custom-sessions.db" in message
-    assert "on_start completed: True" in message
-
-
-class TestStartupDeferralLog:
-    """The expected early-boot deferral is one plain warning (#163)."""
-
-    async def test_db_not_open_logs_one_plain_warning(self, caplog):
-        # Persistence opens its DB after outcome_log's on_start (LIFO), so the
-        # deferral is expected: one WARNING naming what is deferred, no traceback.
-        import logging
-
-        from corvidae_cognition.outcome_log import OutcomeLogPlugin
-        from corvidae.persistence import PersistencePlugin
-
-        pm = create_plugin_manager()
-        pm.register(PersistencePlugin(), name="persistence")
-        plugin = OutcomeLogPlugin()
-        pm.register(plugin, name="outcome_log")
-        await plugin.on_init(pm, {})
-        with caplog.at_level(logging.DEBUG, logger="corvidae.outcome_log"):
-            await plugin.on_start({})
-
-        records = [r for r in caplog.records if r.name == "corvidae.outcome_log"
-                   and r.levelno >= logging.WARNING]
-        assert len(records) == 1, [r.getMessage() for r in records]
-        assert records[0].levelno == logging.WARNING
-        assert records[0].exc_info is None
-        message = records[0].getMessage()
-        assert "exchange_log" in message and "first write" in message, message
-
-    async def test_ddl_failure_keeps_traceback(self, caplog):
-        # A DB that is open but whose DDL fails is a real fault: still a
-        # WARNING with the traceback.
-        import logging
-        from unittest.mock import AsyncMock, MagicMock
-
-        from corvidae_cognition.outcome_log import OutcomeLogPlugin
-        from corvidae.persistence import PersistencePlugin
-
-        pm = create_plugin_manager()
-        persistence = PersistencePlugin()
-        persistence.db = MagicMock()
-        persistence.db.execute = AsyncMock(side_effect=RuntimeError("disk I/O error"))
-        pm.register(persistence, name="persistence")
-        plugin = OutcomeLogPlugin()
-        pm.register(plugin, name="outcome_log")
-        await plugin.on_init(pm, {})
-        with caplog.at_level(logging.WARNING, logger="corvidae.outcome_log"):
-            await plugin.on_start({})
-
-        records = [r for r in caplog.records if r.name == "corvidae.outcome_log"]
-        assert len(records) == 1, [r.getMessage() for r in records]
-        assert records[0].levelno == logging.WARNING
-        assert records[0].exc_info is not None
-
-
-class TestRejectedRefusals:
-    """#261: a transport-gate refusal of an unknown channel leaves no row."""
-
-    async def _count(self, db, trace_id: str) -> int:
-        # Count exchange_log rows for one trace id.
-        async with db.execute(
-            "SELECT COUNT(*) FROM exchange_log WHERE trace_id = ?", (trace_id,)
-        ) as cursor:
-            return (await cursor.fetchone())[0]
-
-    async def _env(self, db, with_registry: bool = True):
-        # Build the plugin, optionally with a ChannelRegistry registered.
-        from corvidae.channel import ChannelRegistry
-
+    async def test_persisted_without_admission_takes_annotation_origin(self, file_db):
+        db, path = file_db
         plugin = await _setup(db)
-        registry = None
-        if with_registry:
-            registry = ChannelRegistry({})
-            plugin.pm.register(registry, name="registry")
-        return plugin, registry
-
-    async def test_refused_stranger_writes_no_row(self, db):
-        from corvidae.channel import Channel
-
-        plugin, _ = await self._env(db)
-        # A transient channel the registry never held, as a refused sender gets.
-        stranger = Channel(transport="irc", scope="mallory")
-        await plugin.on_message_rejected(
-            channel=stranger, trace_id="t-refused", sender="mallory", text="hi"
+        await plugin.on_message_persisted(
+            channel=CH, trace_id="hb", rowid=3, text="beat",
+            annotations={"origin": "heartbeat"},
         )
-        assert await self._count(db, "t-refused") == 0
-
-    async def test_rejected_known_channel_keeps_row(self, db):
-        plugin, registry = await self._env(db)
-        known = registry.get_or_create("irc", "alice")
-        await plugin.on_message_rejected(
-            channel=known, trace_id="t-known", sender="alice", text="ok"
+        await plugin.on_message_persisted(
+            channel=CH, trace_id="tk", rowid=None, text="note", annotations={},
         )
-        async with db.execute(
-            "SELECT channel_id, message_rowid, outcomes FROM exchange_log "
-            "WHERE trace_id = ?", ("t-known",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == "irc:alice"
-        assert row[1] is None
-        assert '"gate": "rejected"' in row[2] or '"gate":"rejected"' in row[2]
+        lines = {l["trace_id"]: l for l in read_outcomes(outcomes_file(path))}
+        assert lines["hb"]["origin"] == "heartbeat"
+        assert lines["tk"]["origin"] == "task"
+        assert lines["tk"]["record"] == {"event": "persisted", "message_rowid": None}
 
-    async def test_no_registry_fails_open(self, db):
-        from corvidae.channel import Channel
-
-        plugin, _ = await self._env(db, with_registry=False)
-        await plugin.on_message_rejected(
-            channel=Channel(transport="irc", scope="bob"),
-            trace_id="t-noreg", sender="bob", text="hi",
-        )
-        assert await self._count(db, "t-noreg") == 1
+    async def test_rejected(self, file_db):
+        db, path = file_db
+        plugin = await _setup(db)
+        await plugin.on_message_rejected(channel=CH, trace_id="t1", sender="u", text="no")
+        (line,) = read_outcomes(outcomes_file(path))
+        assert (line["origin"], line["record"]) == ("user", {"event": "rejected"})
 
 
-class _DenyTransport:
-    """Transport stand-in whose gate refuses every message (an allowlist)."""
-
-    from corvidae.hooks import hookimpl as _hookimpl
-
-    @_hookimpl
-    async def should_process_message(self, channel, sender, text, trace_id):
-        return False
-
-
-class TestUnregisteredChannelRefusals:
-    """#261 review: no writer may insert a row for a channel the registry never held."""
-
-    async def test_refused_stranger_leaves_no_row_in_any_writer(self, db, tmp_path):
-        from corvidae.channel import Channel, ChannelRegistry
-        from corvidae_cognition.appraisal import AppraisalPlugin
-        from corvidae_cognition.gates import GatePlugin
-
-        # Wire registry + outcome_log + appraisal + gates + a refusing transport.
+class TestOriginIndex:
+    async def test_resolves_first_origin(self, file_db):
+        db, _ = file_db
         plugin = await _setup(db)
         pm = plugin.pm
-        pm.register(ChannelRegistry({}), name="registry")
-        cfg = {"daemon": {"session_db": str(tmp_path / "s.db")}}
-        appraisal = AppraisalPlugin()
-        pm.register(appraisal, name="appraisal")
-        await appraisal.on_init(pm=pm, config=cfg)
-        gates = GatePlugin()
-        pm.register(gates, name="gates")
-        await gates.on_init(pm=pm, config=cfg)
-        pm.register(_DenyTransport(), name="deny")
-
-        # A stranger on a channel the registry does not hold is refused.
-        ch = Channel(transport="irc", scope="mallory")
-        await pm.ahook.should_process_message(
-            channel=ch, sender="mallory", text="hello there", trace_id="tr1"
+        await plugin.on_message_admitted(channel=CH, trace_id="t1", sender="u", text="hi")
+        await plugin.on_message_persisted(
+            channel=CH, trace_id="t1", rowid=1, text="hi",
+            annotations={"origin": "heartbeat"},
         )
-        await pm.ahook.on_message_rejected(
-            channel=ch, trace_id="tr1", sender="mallory", text="hello there"
-        )
-        # Let fire-and-forget persistence tasks finish.
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+        await _fire(pm, trace_id="t2", origin="reminder")
+        assert await pm.ahook.resolve_trace_origin(trace_id="t1") == "user"
+        assert await pm.ahook.resolve_trace_origin(trace_id="t2") == "reminder"
+        assert await pm.ahook.resolve_trace_origin(trace_id="nope") is None
 
-        async with db.execute("SELECT channel_id FROM exchange_log") as cursor:
-            rows = await cursor.fetchall()
-        assert rows == [], f"refused stranger left rows: {rows}"
+    async def test_index_is_bounded(self, file_db, monkeypatch):
+        from corvidae_cognition import outcome_log
 
-    async def test_direct_writers_skip_unregistered_channel(self, db):
-        from corvidae.channel import ChannelRegistry
-
+        monkeypatch.setattr(outcome_log, "ORIGIN_INDEX_MAX", 2)
+        db, _ = file_db
         plugin = await _setup(db)
-        plugin.pm.register(ChannelRegistry({}), name="registry")
-        await plugin.record_exchange("t1", "irc:mallory")
-        await plugin.upsert_exchange("t2", "irc:mallory", outcomes={"x": 1})
-        async with db.execute("SELECT count(*) FROM exchange_log") as cursor:
-            assert (await cursor.fetchone())[0] == 0
+        for trace_id in ("a", "b", "c"):
+            await plugin.on_message_admitted(channel=CH, trace_id=trace_id, sender="u", text="x")
+        pm = plugin.pm
+        assert await pm.ahook.resolve_trace_origin(trace_id="a") is None
+        assert await pm.ahook.resolve_trace_origin(trace_id="c") == "user"
+
+
+class TestUnregisteredChannel:
+    """#261: nothing is recorded for a channel the registry never held."""
+
+    async def test_refused_stranger_and_reporters_leave_no_line(self, file_db):
+        db, path = file_db
+        plugin = await _setup(db, registry=ChannelRegistry({}))
+        stranger = Channel(transport="irc", scope="mallory")
+        await plugin.on_message_rejected(channel=stranger, trace_id="t1", sender="m", text="hi")
+        await _fire(plugin.pm, channel_id=stranger.id)
+        assert read_outcomes(outcomes_file(path)) == []
+
+    async def test_known_channel_is_recorded(self, file_db):
+        db, path = file_db
+        registry = ChannelRegistry({})
+        plugin = await _setup(db, registry=registry)
+        known = registry.get_or_create("irc", "alice")
+        await plugin.on_message_rejected(channel=known, trace_id="t1", sender="a", text="ok")
+        assert len(read_outcomes(outcomes_file(path))) == 1
+
+
+class TestNowhereToWrite:
+    async def test_in_memory_db_writes_nothing_and_warns_once(self, db, tmp_path, monkeypatch, caplog):
+        # An in-memory session DB has no file to sit beside: nothing is
+        # written (not even into the working directory) and the operator is
+        # told once, naming the config key.
+        monkeypatch.chdir(tmp_path)
+        plugin = await _setup(db)
+        with caplog.at_level(logging.WARNING, logger="corvidae.outcome_log"):
+            await _fire(plugin.pm, trace_id="t1")
+            await _fire(plugin.pm, trace_id="t2")
+        warnings = [r for r in caplog.records if r.name == "corvidae.outcome_log"]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "daemon.session_db" in warnings[0].getMessage()
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_write_failure_warns_naming_path_trace_and_remedy(self, file_db, caplog):
+        # A failed append is logged with the file, the trace and what to
+        # check; the reporter is not affected.
+        db, path = file_db
+        target = outcomes_file(path)
+        target.mkdir()  # appending to a directory fails with an OSError
+        plugin = await _setup(db)
+        with caplog.at_level(logging.WARNING, logger="corvidae.outcome_log"):
+            await _fire(plugin.pm, trace_id="t-fail", source="silence")
+        messages = [r.getMessage() for r in caplog.records if r.name == "corvidae.outcome_log"]
+        assert len(messages) == 1, messages
+        assert str(target) in messages[0]
+        assert "t-fail" in messages[0] and "silence" in messages[0]
+        assert "permission" in messages[0] or "disk" in messages[0]
+

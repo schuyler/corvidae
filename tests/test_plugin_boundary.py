@@ -40,19 +40,12 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
         "agent": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/appraisal.py": {
-        "outcome_log": (1, "#1179"),
-        "persistence": (1, "#1180"),
         "task": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/critique.py": {
         "appraisal": (2, "#1169"),
         "funnel": (1, "#1176"),
-        "outcome_log": (2, "#1179"),
         "task": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/gates.py": {
-        "outcome_log": (2, "#1179"),
-        "persistence": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/goals.py": {
         "clock": (1, "#1180"),
@@ -67,14 +60,10 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
         "clock": (1, "#1180"),
         "funnel": (1, "#1176"),
         "idle": (1, "#1180"),
-        "outcome_log": (1, "#1179"),
         "registry": (2, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/outcome_log.py": {
         "registry": (1, "#1180"),
-    },
-    "packages/corvidae-cognition/corvidae_cognition/silence.py": {
-        "outcome_log": (1, "#1179"),
     },
     "packages/corvidae-inotify/corvidae_inotify/__init__.py": {
         "agent": (1, "#1180"),
