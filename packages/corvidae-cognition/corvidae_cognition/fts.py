@@ -33,8 +33,15 @@ _WHOLE_TERM_MIN_CHARS: Final[int] = 4
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 
 
+# Zero-width non-joiner and joiner: format characters that belong inside a
+# word, so they must not split it (Persian می‌خواهم is one word).
+_JOINERS: Final[str] = "\u200c\u200d"
+
+
 def search_terms(text: str) -> list[str]:
-    """Maximal runs of characters whose Unicode category is L*, M* or N*.
+    """Maximal runs of characters whose Unicode category is L*, M* or N*,
+    plus the zero-width joiners (U+200C, U+200D) that sit inside words in
+    Persian, Indic and emoji text.
 
     Every other character (punctuation, whitespace, symbols) separates
     terms, so a term never holds a quote, ``%`` or ``_``.
@@ -43,7 +50,7 @@ def search_terms(text: str) -> list[str]:
     current: list[str] = []
     for char in text:
         # Letters, combining marks and numbers stay inside a term.
-        if unicodedata.category(char)[0] in "LMN":
+        if unicodedata.category(char)[0] in "LMN" or char in _JOINERS:
             current.append(char)
         elif current:
             terms.append("".join(current))

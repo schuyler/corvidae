@@ -132,7 +132,8 @@ def _extract_sample_token(text: bytes | str) -> str | None:
 
 
 def _term_runs(text: str) -> list[list[str]]:
-    """Maximal runs of characters whose Unicode category is L*, M* or N*.
+    """Maximal runs of characters whose Unicode category is L*, M* or N*,
+    plus the zero-width joiners U+200C/U+200D, which sit inside words.
 
     Duplicated from the cognition search-term split because the kernel may
     not import corvidae_cognition.
@@ -140,7 +141,7 @@ def _term_runs(text: str) -> list[list[str]]:
     runs: list[list[str]] = []
     current: list[str] = []
     for ch in text:
-        if unicodedata.category(ch)[0] in "LMN":
+        if unicodedata.category(ch)[0] in "LMN" or ch in "\u200c\u200d":
             current.append(ch)
         elif current:
             runs.append(current)

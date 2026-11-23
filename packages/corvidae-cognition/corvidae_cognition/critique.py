@@ -1780,7 +1780,8 @@ class CritiquePlugin(CorvidaePlugin):
         """The closest earlier messages for each claim, or None.
 
         Mechanical retrieval; it decides nothing. Each claim's queries
-        (written by stage 2) become one FTS5 OR query over message_fts,
+        (written by stage 2) become one FTS5 OR query over message_fts (a
+        LIKE scan when no term reaches three characters),
         ranked by bm25, restricted to:
 
           * rows before the exchange's originating row: the exchange's own
@@ -1820,8 +1821,11 @@ class CritiquePlugin(CorvidaePlugin):
             for claim in claims:
                 # A claim with no queries is searched by its own words. The
                 # model writes `queries`, so a non-string entry is skipped
-                # rather than abandoning the whole check.
+                # rather than abandoning the whole check. A bare string is
+                # one query, not a sequence of single characters.
                 queries = claim.get("queries") or [claim.get("claim", "")]
+                if isinstance(queries, str):
+                    queries = [queries]
                 q = keyword_query(
                     "\n\n".join(x for x in queries if isinstance(x, str))
                 )

@@ -47,6 +47,8 @@ def test_constants_pin_the_trigram_tokenizer():
     ('foo"bar 100%', ["foo", "bar", "100"]),
     ("Привет, мир", ["Привет", "мир"]),
     ("?!", []),
+    # A zero-width non-joiner sits inside a Persian word and must not split it.
+    ("من می\u200cخواهم", ["من", "می\u200cخواهم"]),
 ])
 def test_search_terms_split_by_unicode_category(text, terms):
     assert fts.search_terms(text) == terms
