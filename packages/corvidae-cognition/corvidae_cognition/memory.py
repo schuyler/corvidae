@@ -2983,9 +2983,10 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._set_watermark(wdb, channel_id, new_wm)
             return True
 
-        # The importance prior scores over the consolidated message-id
-        # range; pass the real channel when the registry has one, else a stub with empty runtime_overrides (sanctioned by
-        # WP2.3's duck-typed resolver) so config/default surfaces apply.
+        # The importance prior is offered the consolidated message-id range
+        # and the channel (the real one when the registry has it, else a stub
+        # with empty runtime_overrides), as the ImportancePrior protocol takes
+        # them; the default RubricPrior ignores both.
         msg_id_range = (rows[0][0], rows[-1][0])
         registry = self.pm.get_plugin("registry")
         channel = registry.get(channel_id) if registry is not None else None
