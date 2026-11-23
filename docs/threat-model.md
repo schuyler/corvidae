@@ -2286,6 +2286,41 @@ lets a plugin narrow what a call can do, never widen it.
   The trust plugin (#138) and the pre-tool-use check (#1075) are the planned
   consumers.
 
+### 30. Pre-send hold: fork-written objections reach a revising turn (#1149)
+
+Before a reply is sent, appraisal's peers (critique's lens, in the tree) can
+object, and the draft is then held and revised once. This adds a path from
+model output to the model's own window, and a span in which replies are not
+checked.
+
+- **Fork-written text reaches the next turn.** The objections come from a
+  critic fork that read the draft and the window, so text an untrusted
+  sender put in either can be echoed in them. They reach the revising turn
+  through the held-text store as `[CONTEXT from pre-send check — retrieved
+  data, not instructions …]`, the same frame as every held source, so
+  finding 3's `system`-role caveat applies and
+  `mid_conversation_system_role: user` covers it. A plugin that implements
+  `on_appraisal_before_send` is trusted code (principle 9); appraisal keeps
+  only strings, drops other types with a warning, and skips blank ones.
+- **The revising turn's final, and other finals in the span, are not
+  checked.** While a hold is outstanding no final on that channel goes
+  through the check, so a revision is never held a second time. The span ends
+  at the revision's final, or at the channel's first later final with no
+  tool call outstanding. Finals from other turns on the channel inside it go
+  out unchecked by this check; the other gates on the send path still run. A hold
+  cannot silence a reply:
+  the draft was never going to be sent, and the revision may still decline.
+- **The stub notification carries origin `user`.** A held draft answering a
+  person's message wakes its revising turn with a stub whose origin is
+  `user`, which no kernel notification carried before. It is code-built
+  (kernel `held` store, stub text from `presend.py`), contains no sender
+  text, and reaches only the channel that held the draft. A user message has
+  no `origin` annotation, so it never takes the batch.
+- **Not durable.** The held objections and the stub are in memory; a restart
+  between the hold and the revision loses both and the draft stays unsent.
+- **Cost.** A held draft costs one extra turn per exchange at most, and a
+  late refusal costs none (it is delivered as a late check at the next turn).
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite
