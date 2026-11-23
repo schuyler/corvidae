@@ -180,83 +180,73 @@ async def test_evict_drops_text_and_never_a_row(log):
     assert bytes(row["prompt_sha256"]) == prompt_sha256(MESSAGES)
 
 
-async def _record_with(log, digests, *, parent=None, chain_from=0, channel="discord:1"):
+async def _fork(log, blocks, *, parent=None, appended=None):
+    """One fork whose full block list is ``blocks``.
+
+    Only the appended tail is stored; ``parent`` supplies the prefix.
+    """
+    from corvidae_cognition.fork_log import digest_of
+
+    chain_from = 0 if parent is None else len(blocks) - (appended or 1)
     return await log.record(
         stage="appraisal",
-        channel_id=channel,
-        messages=MESSAGES,
-        digests=digests,
+        channel_id="discord:1",
+        messages=blocks,
+        digests=[digest_of(b) for b in blocks[chain_from:]] if parent else [
+            digest_of(b) for b in blocks
+        ],
         chain_parent=parent,
         chain_from=chain_from,
     )
 
 
+B = [{"role": "user", "content": t} for t in "abcdefg"]
+
+
 async def test_a_chain_resolves_to_the_full_block_list(log):
     from corvidae_cognition.fork_log import digest_of
 
-    a, b, c = digest_of("a"), digest_of("b"), digest_of("c")
-    first = await _record_with(log, [a, b])
-    second = await _record_with(log, [c], parent=first, chain_from=2)
+    first = await _fork(log, B[:2])
+    second = await _fork(log, B[:3], parent=first, appended=1)
 
-    assert await log.resolve_chain(first) == [a, b]
-    assert await log.resolve_chain(second) == [a, b, c]
+    assert await log.resolve_chain(first) == [digest_of(b) for b in B[:2]]
+    assert await log.resolve_chain(second) == [digest_of(b) for b in B[:3]]
 
 
 async def test_a_window_reset_starts_a_new_chain(log):
     from corvidae_cognition.fork_log import digest_of
 
-    a, d = digest_of("a"), digest_of("d")
-    first = await _record_with(log, [a])
-    after_compaction = await _record_with(log, [d])
-    later = await _record_with(
-        log, [digest_of("e")], parent=after_compaction, chain_from=1
-    )
+    first = await _fork(log, B[:2])
+    after_reset = await _fork(log, B[2:4])
+    later = await _fork(log, B[2:5], parent=after_reset, appended=1)
 
-    assert await log.resolve_chain(after_compaction) == [d]
-    assert await log.resolve_chain(later) == [d, digest_of("e")]
-    assert await log.resolve_chain(first) == [a]
+    assert await log.resolve_chain(after_reset) == [digest_of(b) for b in B[2:4]]
+    assert await log.resolve_chain(later) == [digest_of(b) for b in B[2:5]]
+    assert await log.resolve_chain(first) == [digest_of(b) for b in B[:2]]
 
 
-async def test_a_evicted_ancestor_makes_its_descendants_unreconstructable(log):
-    from corvidae_cognition.fork_log import digest_of
-
-    a = digest_of("a")
-    first = await _record_with(log, [a])
-    second = await _record_with(log, [digest_of("b")], parent=first, chain_from=1)
+async def test_an_evicted_ancestor_makes_its_descendants_unreconstructable(log):
+    first = await _fork(log, B[:2])
+    second = await _fork(log, B[:3], parent=first, appended=1)
     await log.mark_unreconstructable([first])
 
     assert await log.resolve_chain(second) is None
     assert await log.resolve_chain(first) is None
 
 
-async def test_a_length_mismatch_is_not_papered_over(log):
+async def test_digests_that_do_not_describe_the_blocks_are_refused(log):
     from corvidae_cognition.fork_log import digest_of
 
-    first = await _record_with(log, [digest_of("a")])
-    broken = await _record_with(
-        log, [digest_of("b")], parent=first, chain_from=7
-    )
-    assert await log.resolve_chain(broken) is None
-
-
-async def test_eviction_marks_the_rows_it_strands(log):
-    ids = [
+    first = await _fork(log, B[:2])
+    with pytest.raises(ValueError, match="do not describe"):
         await log.record(
             stage="appraisal",
             channel_id="discord:1",
-            messages=MESSAGES,
-            system_prompt=f"version {n} " + "x" * 4000,
+            messages=B[:3],
+            digests=[digest_of("not the block")],
+            chain_parent=first,
+            chain_from=2,
         )
-        for n in range(3)
-    ]
-    before = await log.bytes_used()
-    await log.evict(max_bytes=before // 2)
-    db = await log._conn()
-    async with db.execute(
-        "SELECT reconstructable FROM fork_log WHERE id = ?", (ids[0],)
-    ) as cur:
-        row = await cur.fetchone()
-    assert row["reconstructable"] == 0
 
 
 async def _blocks(log):

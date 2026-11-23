@@ -98,9 +98,20 @@ def prompt_sha256(messages: Sequence[dict]) -> bytes:
     return hashlib.sha256(blob).digest()
 
 
-def digest_of(text: str) -> bytes:
-    """A message block's 16-byte digest: cheap to store, cheap to compare."""
-    return hashlib.blake2b(text.encode(), digest_size=16).digest()
+def digest_of(block: dict | str) -> bytes:
+    """A rendered block's 16-byte digest.
+
+    The whole block, not just its text: two sends can share ``content`` and
+    differ in ``role`` or ``tool_calls``, and a digest list that cannot tell
+    them apart does not identify the prompt (#1204, found in review).
+    """
+    if isinstance(block, str):
+        payload = block.encode()
+    else:
+        payload = json.dumps(
+            block, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+    return hashlib.blake2b(payload, digest_size=16).digest()
 
 
 def question_sha256(question: str | None) -> bytes | None:
@@ -247,6 +258,9 @@ class ForkLog:
         )
         fork_id = int(cur.lastrowid)
         if digests:
+            await self._check_digests(
+                messages, digests, chain_parent=chain_parent, chain_from=chain_from
+            )
             await db.executemany(
                 "INSERT OR REPLACE INTO fork_digest (fork_id, ordinal, digest)"
                 " VALUES (?, ?, ?)",
@@ -254,6 +268,29 @@ class ForkLog:
             )
         await db.commit()
         return fork_id
+
+    async def _check_digests(
+        self,
+        messages: Sequence[dict],
+        digests: Sequence[bytes],
+        *,
+        chain_parent: int | None,
+        chain_from: int,
+    ) -> None:
+        """Refuse a digest list that does not describe the blocks being sent."""
+        prefix: list[bytes] = []
+        if chain_from:
+            if chain_parent is None:
+                raise ValueError("fork_log: chain_from without a chain_parent")
+            parent = await self.resolve_chain(chain_parent)
+            if parent is None or len(parent) != chain_from:
+                raise ValueError("fork_log: chain_parent does not resolve")
+            prefix = parent
+        expected = [digest_of(block) for block in messages]
+        if [*prefix, *digests] != expected:
+            raise ValueError(
+                "fork_log: digests do not describe the rendered blocks"
+            )
 
     async def resolve_chain(
         self, fork_id: int, _memo: dict[int, list[bytes]] | None = None
