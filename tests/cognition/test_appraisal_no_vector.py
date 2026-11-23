@@ -22,6 +22,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
 from fake_clock import install_kernel_clock
 from helpers import add_kernel_registry, FakeForkAgent, stub_llm_config, window_of, with_chat_llm
+from .test_appraisal_hooks import PeerSpy, _wire
 from .test_appraisal_stage2 import StubClient, _read_appraisal, _teardown, build_env
 from tests.cognition.trace_helpers import add_trace
 
@@ -44,7 +45,8 @@ async def _fork_once(tmp_path, offer=None, reply=_REPLY):
     env.pm.register(agent, name="agent")
     env.channel.conversation = window_of(env.channel.id, [41, 42])
     if offer is not None:
-        env.appraisal.set_lens_offer(lambda: offer)
+        # A peer offers the lenses at the idle trigger (on_appraisal_prompts).
+        _wire(env, PeerSpy({"idle": offer}))
     # A retrieval profile the old prompt would have quoted.
     await env.pm.ahook.on_trace_record(
         trace_id="k", channel_id=env.channel.id, source="memory", origin=None,

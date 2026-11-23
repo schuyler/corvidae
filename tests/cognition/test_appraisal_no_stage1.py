@@ -19,13 +19,14 @@ def _appraisal():
     return plugin, pm
 
 
-def test_appraisal_implements_no_gate_hook():
-    """No inbound or outbound gate hook: stage 1 is gone, and stage 2 runs
-    from on_agent_response."""
+def test_appraisal_implements_no_inbound_gate_hook():
+    """No inbound gate hook: stage 1 is gone, and stage 2 runs from
+    on_agent_response. Appraisal does implement should_send_response since
+    #1169, but only to score a draft's lenses before the send: it never
+    vetoes (tests/cognition/test_appraisal_hooks.py)."""
     from corvidae_cognition.appraisal import AppraisalPlugin
 
     assert not hasattr(AppraisalPlugin, "should_process_message")
-    assert not hasattr(AppraisalPlugin, "should_send_response")
 
 
 # Every stage-1 block. The importance-prior weights #1189 removed are

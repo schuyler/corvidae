@@ -23,7 +23,7 @@ import pytest
 
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
@@ -66,8 +66,11 @@ class StubClient:
 
 async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     """Wire persistence + outcome_log + llm(stub) + task + appraisal against a
-    file-backed session DB. Returns a SimpleNamespace of the pieces."""
-    from corvidae_cognition.appraisal import AppraisalPlugin
+    file-backed session DB. Returns a SimpleNamespace of the pieces.
+
+    Appraisal's own hookspecs (AppraisalSpec) are added, as add_trace adds the
+    trace plugin's and startup's install_plugin_hookspecs would."""
+    from corvidae_cognition.appraisal import AppraisalPlugin, AppraisalSpec
 
     db_path = str(tmp_path / "sessions.db")
     db = await aiosqlite.connect(db_path)
@@ -114,6 +117,7 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     # A miss skips, so without both the stage-2 vector would never exist.
     agent = FakeForkAgent({"appraisal"}, text=chat_text)
     pm.register(agent, name="agent")
+    pm.add_hookspecs(AppraisalSpec)
     channel.conversation = window_of(channel.id, list(range(1, 200)))
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, appraisal=appraisal, task=task_plugin,
@@ -165,7 +169,7 @@ async def _read_appraisal(recorder, key):
 
 # ---------------------------------------------------------------------------
 # 0. Originating-text LRU (moved from Agent to AppraisalPlugin, §1.4/§1.5).
-# Fed by a new on_message_persisted hookimpl; read via get_originating_text.
+# Fed by a new on_message_persisted hookimpl; read from appraisal's own LRU.
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +180,7 @@ class TestOriginatingTextLRU:
             channel=env.channel, trace_id="k-lru-1", rowid=5,
             text="the original user text", annotations={},
         )
-        assert env.appraisal.get_originating_text("k-lru-1") == "the original user text"
+        assert env.appraisal._originating_text.get("k-lru-1") == "the original user text"
         await _teardown(env)
 
     async def test_on_message_persisted_accepts_nullable_rowid(self, tmp_path):
@@ -188,12 +192,12 @@ class TestOriginatingTextLRU:
             channel=env.channel, trace_id="k-lru-none", rowid=None,
             text="text with no rowid yet", annotations={},
         )
-        assert env.appraisal.get_originating_text("k-lru-none") == "text with no rowid yet"
+        assert env.appraisal._originating_text.get("k-lru-none") == "text with no rowid yet"
         await _teardown(env)
 
-    async def test_get_originating_text_returns_none_for_unknown_id(self, tmp_path):
+    async def test_originating_text_lru_returns_none_for_unknown_id(self, tmp_path):
         env = await build_env(tmp_path)
-        assert env.appraisal.get_originating_text("never-seen") is None
+        assert env.appraisal._originating_text.get("never-seen") is None
         await _teardown(env)
 
     async def test_lru_bounded_at_512_evicts_oldest(self, tmp_path):
@@ -208,9 +212,9 @@ class TestOriginatingTextLRU:
             )
         # The oldest entry (k-0) was evicted once the 513th arrived; the
         # newest MAXSIZE entries survive.
-        assert env.appraisal.get_originating_text("k-0") is None
-        assert env.appraisal.get_originating_text("k-1") == "text 1"
-        assert env.appraisal.get_originating_text(
+        assert env.appraisal._originating_text.get("k-0") is None
+        assert env.appraisal._originating_text.get("k-1") == "text 1"
+        assert env.appraisal._originating_text.get(
             f"k-{ORIGINATING_TEXT_LRU_MAXSIZE}"
         ) == f"text {ORIGINATING_TEXT_LRU_MAXSIZE}"
         await _teardown(env)
@@ -447,6 +451,31 @@ class TestPastClaims:
         assert "past_claims" in DEFAULT_STAGE2_FORK_PROMPT
 
 
+class _IdlePeer(CorvidaePlugin):
+    """A peer that implements on_appraisal_idle and hands every call, as
+    keyword arguments, to ``callback`` (the hook that replaced the stage-2
+    listener, #1169)."""
+
+    depends_on = frozenset()
+
+    def __init__(self, callback):
+        self.callback = callback
+
+    @hookimpl
+    async def on_appraisal_idle(
+        self, channel, trace_id, response_text, annotations, lenses, past_claims,
+    ):
+        await self.callback(
+            channel=channel, trace_id=trace_id, response_text=response_text,
+            annotations=annotations, lenses=lenses, past_claims=past_claims)
+
+
+def _listen(env, callback, name="peer"):
+    """Register an idle peer beside appraisal (build_env installed the
+    hookspecs; pluggy checks a later hookimpl against them)."""
+    env.pm.register(_IdlePeer(callback), name=name)
+
+
 class TestStage2Listeners:
     async def _run(self, env, trace_id, annotations=None):
         await _originate(env, trace_id)
@@ -462,11 +491,11 @@ class TestStage2Listeners:
         heard = []
 
         async def listener(**kwargs):
-            # Stage 2 is persisted before listeners run.
+            # Stage 2 is reported before peers are told.
             kwargs["persisted"] = (await _read_appraisal(env.recorder, kwargs["trace_id"]))["stage2"]
             heard.append(kwargs)
 
-        env.appraisal.add_stage2_listener(listener)
+        _listen(env, listener)
         try:
             await self._run(env, "kl")
             [call] = heard
@@ -474,7 +503,7 @@ class TestStage2Listeners:
             assert call["trace_id"] == "kl"
             assert call["response_text"] == "the reply"
             assert call["annotations"] == {"origin": "reminder"}
-            assert call["stage2"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
+            assert call["past_claims"] == CLAIMS_STAGE2["past_claims"]
             assert call["persisted"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
         finally:
             await _teardown(env)
@@ -486,7 +515,7 @@ class TestStage2Listeners:
         async def listener(**kwargs):
             seen.append(dict(get_attribution()))
 
-        env.appraisal.add_stage2_listener(listener)
+        _listen(env, listener)
         try:
             await self._run(env, "ka")
             assert seen[0].get("stage") != "appraisal"
@@ -503,13 +532,14 @@ class TestStage2Listeners:
         async def fine(**kwargs):
             heard.append(kwargs["trace_id"])
 
-        env.appraisal.add_stage2_listener(broken)
-        env.appraisal.add_stage2_listener(fine)
+        _listen(env, broken, name="broken")
+        _listen(env, fine, name="fine")
         try:
-            with caplog.at_level("WARNING", logger="corvidae.appraisal"):
+            with caplog.at_level("WARNING", logger="corvidae"):
                 await self._run(env, "kf")
             assert heard == ["kf"]
-            assert "stage-2 listener" in caplog.text and "kf" in caplog.text
+            # The hook dispatch logs the failure, naming the hook and the plugin.
+            assert "on_appraisal_idle" in caplog.text and "broken" in caplog.text
         finally:
             await _teardown(env)
 
@@ -520,12 +550,12 @@ class TestStage2Listeners:
         async def listener(**kwargs):
             heard.append(kwargs)
 
-        env.appraisal.add_stage2_listener(listener)
+        _listen(env, listener)
         try:
             await self._run(env, "kb")
-            # A miss notifies exactly once, with stage2=None (#1033 R5).
+            # A miss notifies exactly once, with no lenses and no claims (#1033 R5).
             assert len(heard) == 1
-            assert heard[0]["stage2"] is None
+            assert heard[0]["lenses"] is None and heard[0]["past_claims"] is None
         finally:
             await _teardown(env)
 
@@ -544,12 +574,12 @@ class TestStage2Listeners:
         async def explode(*args, **kwargs):
             raise RuntimeError("stage 2 exploded")
 
-        env.appraisal.add_stage2_listener(listener)
+        _listen(env, listener)
         monkeypatch.setattr(env.appraisal, "_run_stage2", explode)
         try:
             with caplog.at_level("WARNING", logger="corvidae.appraisal"):
                 await self._run(env, "kx")
-            assert [h["stage2"] for h in heard] == [None]
+            assert [(h["lenses"], h["past_claims"]) for h in heard] == [(None, None)]
             assert "kx" in caplog.text
         finally:
             await _teardown(env)
@@ -565,7 +595,7 @@ class TestStage2Listeners:
         async def cancelled(*args, **kwargs):
             raise asyncio.CancelledError()
 
-        env.appraisal.add_stage2_listener(listener)
+        _listen(env, listener)
         monkeypatch.setattr(env.appraisal, "_run_stage2", cancelled)
         try:
             with pytest.raises(asyncio.CancelledError):

@@ -258,6 +258,7 @@ the first one: the only runtime check on confabulation can be switched off
 by the thing being checked.
 
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
+`appraisal.before_send_fork_prompt`,
 `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from operator
 config only, so `set_settings` can't rewrite them. That covers only calls
@@ -1149,8 +1150,8 @@ What each kind of unlock costs:
   cached prefix, and a forced `response_format` or grammar can stop the
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
-  `critique.provenance.enabled`, `critique.sample_below_rate`; open by
-  default today). The lens appraisal questions `critique.lens.<name>.appraisal_question`
+  `critique.provenance.enabled`, `critique.sample_below_rate`,
+  `critique.fallback_rate`; open by default today). The lens appraisal questions `critique.lens.<name>.appraisal_question`
   are static config, not tunables (finding 23).
   Covered in finding 2: an injection can silence the agent on a channel or
   switch off the provenance check. The recommended blocklist in
@@ -1988,6 +1989,16 @@ Four things are new.
   make a different lens, or none, run on one exchange, but cannot change
   what any lens asks, and the `critique.sample_below_rate` draw keeps
   sampling what the vector misses.
+- **The draft reaches the before-send fork (#1169).** Before a final is
+  sent, appraisal quotes the agent's whole draft, on one line and
+  untruncated, in a fork instruction beside the lens offer. The draft is the
+  agent's own output, which may echo untrusted text, and it reaches the same
+  forked window that already holds that text, so no new party sees it. The
+  fork's reply is the same critique vector, which only chooses a lens. The
+  before-send lens's objections queue for the next turn through critique's
+  existing funnel path, never wake, and never hold the send, so they add no
+  new route into the window. `critique.fallback_rate` (the no-appraisal
+  sampling rate) is an agent-writable tunable like `sample_below_rate`.
 - **The questions are static config, not tunables.**
   `critique.lens.<name>.appraisal_question` (and `fork_prompt`) are read
   with `config_value`, so `set_settings` can't reword the critic it is
@@ -2109,8 +2120,9 @@ Mitigations and their limits:
   `cross_channel_send.max_hops` (finding 24).
 - The correction stub defaults to `NO_REPLY`, which critique's veto on
   critique-origin finals withholds.
-- Per channel, `critique.provenance.enabled` and
-  `critique.sample_below_rate` turn the checks down
+- Per channel, `critique.provenance.enabled`,
+  `critique.sample_below_rate` and (without an appraisal plugin)
+  `critique.fallback_rate` turn the checks down
   or off (they are agent-writable unless listed in
   `agent.immutable_settings`, finding 23). The proactivity lens's switch,
   `critique.lens.proactivity.enabled`, is static config the agent can't

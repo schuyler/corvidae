@@ -20,7 +20,7 @@ revision additions), named by its ``T#`` in the docstring:
           alignment are checked in their own test files).
 
 Critique is driven the way the daemon drives it: ``on_agent_response`` and
-the appraisal stage-2 listener (``handle_stage2``) for the same trace, then
+appraisal's ``on_appraisal_idle`` hook for the same trace, then
 every task critique queued. Appraisal is driven through its real fork path.
 """
 
@@ -38,6 +38,7 @@ from corvidae_cognition.critique import (
 )
 
 from helpers import FakeForkAgent, window_of
+from tests.cognition.test_appraisal_hooks import PeerSpy, _wire
 from tests.cognition.test_appraisal_stage2 import (
     _read_appraisal,
     _teardown as _teardown_appraisal,
@@ -50,6 +51,7 @@ from tests.cognition.test_critique import (
     RenderingForkAgent,
     UNSUPPORTED_VERDICT,
     _fire,
+    _stage2_hook,
     _provenance_exchange,
     _read_outcomes,
     _run_next_task,
@@ -93,17 +95,10 @@ def _lens(name="mine", **kwargs):
     return Lens(name=name, **kwargs)
 
 
-class OfferAppraisal(FakeAppraisal):
-    """FakeAppraisal that also keeps the lens-offer provider critique hands
-    it (``AppraisalPlugin.set_lens_offer``), so a test reads the offer."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.offer = None
-
-    def set_lens_offer(self, provider):
-        # Critique registers its offers here at start-up.
-        self.offer = provider
+async def _offer(env):
+    """The offer critique makes at the idle trigger: what appraisal collects
+    from ``on_appraisal_prompts`` to score (#1169)."""
+    return await env.plugin.on_appraisal_prompts(channel=env.channel, trigger="idle")
 
 
 class Contributor(CorvidaePlugin):
@@ -144,7 +139,7 @@ async def _env(
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
-        tmp_path, appraisal or OfferAppraisal(),
+        tmp_path, appraisal or FakeAppraisal(),
         chat_text, with_funnel=with_funnel, config=config,
         extra_plugins=contributors,
     )
@@ -165,9 +160,8 @@ async def _judged_turn(env, trace_id="kv", vector=None, origin="user", stage2="v
     await _fire(env, trace_id, origin=origin)
     if stage2 == "vector":
         stage2 = {"past_claims": [], "lenses": vector}
-    [listener] = env.appraisal.stage2_listeners
-    await listener(
-        channel=env.channel, trace_id=trace_id, response_text="resp",
+    await _stage2_hook(
+        env, channel=env.channel, trace_id=trace_id, response_text="resp",
         annotations={} if origin == "user" else {"origin": origin},
         stage2=stage2,
     )
@@ -269,7 +263,7 @@ class TestQuestionRequired:
             "contrib": Contributor(bare, _lens("good"))})
         try:
             assert _warnings(caplog, "contrib", "bare", "appraisal_question"), caplog.text
-            offered = [name for name, _ in env.appraisal.offer()]
+            offered = [name for name, _ in await _offer(env)]
             assert "good" in offered and "bare" not in offered
         finally:
             await _teardown(env)
@@ -316,7 +310,7 @@ class TestConfigKeys:
                 "predictive": {"appraisal_question": "OPERATOR-QUESTION-predictive"},
             }}})
         try:
-            offer = dict(env.appraisal.offer())
+            offer = dict(await _offer(env))
             assert offer["mine"] == "OPERATOR-QUESTION-mine"
             assert offer["predictive"] == "OPERATOR-QUESTION-predictive"
         finally:
@@ -380,7 +374,7 @@ class TestConfigKeys:
             assert _warnings(
                 caplog, "critique.lens.mine.appraisal_question",
                 "one line, non-empty"), caplog.text
-            assert dict(env.appraisal.offer())["mine"] == QUESTION.format("mine")
+            assert dict(await _offer(env))["mine"] == QUESTION.format("mine")
             assert env.plugin._fork_prompts["mine"].startswith("RELOADED-BRIEF-9q")
         finally:
             await _teardown(env)
@@ -392,14 +386,14 @@ class TestConfigKeys:
 
         env = await _env(tmp_path, config={"critique": {"lens": {"predictive": None}}})
         try:
-            assert dict(env.appraisal.offer())["predictive"] == BUILTIN_LENSES["predictive"][0]
+            assert dict(await _offer(env))["predictive"] == BUILTIN_LENSES["predictive"][0]
         finally:
             await _teardown(env)
 
     async def test_provenance_fork_prompt_key_is_read(self, tmp_path):
         """T4b: critique.provenance.fork_prompt is the provenance brief."""
         env = await build_critique(
-            tmp_path, OfferAppraisal(), config={"critique": {
+            tmp_path, FakeAppraisal(), config={"critique": {
                 "sample_below_rate": 0.0,
                 "provenance": {"fork_prompt": "OPERATOR-PROVENANCE-7m"}}},
             fork=False)
@@ -533,7 +527,8 @@ async def _appraise(tmp_path, reply, offer=OFFER, fork_prompt="Score it."):
     env.appraisal.config = new_config
     await env.appraisal.on_config_reload(new_config)
     if offer is not None:
-        env.appraisal.set_lens_offer(lambda: offer)
+        # A peer offers the lenses at the idle trigger (on_appraisal_prompts).
+        _wire(env, PeerSpy({"idle": offer}))
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is it Friday?", annotations={})
     await env.appraisal._run_stage2(env.channel, "k", "is it Friday?", "yes, Friday", None)
@@ -703,7 +698,7 @@ class TestOffers:
         question, in that order."""
         env = await _env(tmp_path, config={"critique": {"retention": {"root": ROOT}}})
         try:
-            offer = env.appraisal.offer()
+            offer = await _offer(env)
             assert [name for name, _ in offer] == [
                 "predictive", "constrained", "adversarial", "retention", "proactivity"]
             for name, question in offer:
@@ -715,6 +710,6 @@ class TestOffers:
         """T10: no knowledge-base root, no retention offer."""
         env = await _env(tmp_path)
         try:
-            assert "retention" not in [name for name, _ in env.appraisal.offer()]
+            assert "retention" not in [name for name, _ in await _offer(env)]
         finally:
             await _teardown(env)

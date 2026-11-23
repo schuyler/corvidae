@@ -166,7 +166,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `on_heartbeat_collect_prompts(channel)`, an observe hook whose `str | None` values the plugin combines: sections in hook order, then the heartbeat prompt; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `on_heartbeat_collect_prompts(channel)`, an observe hook whose `str | None` values the plugin combines: sections in hook order, then the heartbeat prompt; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt). The `appraisal` plugin (cognition extra) owns `on_appraisal_prompts(channel, trigger)`, which collects the lens questions it scores, and `on_appraisal_before_send(channel, trace_id, text, annotations, lenses)` and `on_appraisal_idle(channel, trace_id, response_text, annotations, lenses, past_claims)`, which carry its lens scores before the reply is sent and after the exchange; `critique` implements all three (see [cognition.md](cognition.md)).
 
 ### Funnel pull path
 
@@ -239,7 +239,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no kernel implementation (`LimitsPlugin`, `core-periphery` extra, rejects at `limits.inbound_per_channel`); None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; the `final` firing runs under the channel's [check allowance](#the-check-allowance), so a raising implementation there is no opinion and its siblings' verdicts stand; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; the `final` firing runs under the channel's [check allowance](#the-check-allowance), so a raising implementation there is no opinion and its siblings' verdicts stand; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY` and, with no appraisal plugin loaded, runs one random before-send lens on `critique.fallback_rate` of finals (never a veto); `AppraisalPlugin` scores a final draft's lenses in one fork and never vetoes; and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
 | `should_start_work` | veto, called by hand / first `WorkRefusal` wins | the [admission seam](#the-admission-seam-should_start_work) (K1, #1050): `subagent` (kind `task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) call `offer_work` before they enqueue anything; `channel` is the queue the work would land on, `source_channel` the channel it comes from; a raising implementation is logged and treated as no opinion; `LimitsPlugin` refuses past `limits.max_waiting` (`core-periphery` extra); no kernel implementation, so with none registered everything starts |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
@@ -2768,8 +2768,9 @@ Stage names are opaque to core (it never names cognition plugins).
 | `consolidation` (compaction trigger) | dropped prefix of a copy of the window taken in `before_compaction` (#628) | in a background task `before_compaction` spawns (it returns at once), after waiting for the channel's in-flight turn or idle consolidation task (#621); the task is stashed and the `on_compaction` task, which waits the same way, awaits its record | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
 | `consolidation` (idle trigger) | window up to `range_end` (cut just past it, #622) | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried by a new message, the turn trigger or compaction and not by the next idle firing (#342); no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
 | `consolidation` (turn trigger) | window up to `range_end` (cut just past it, #622) | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger, until three consecutive failures back the trigger off for the channel (one warning) until the watermark moves or `memory.idle_consolidate_after` passes (#620); no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
+| `appraisal` (before send) | full window at run time, plus the draft quoted whole in the instruction | inline in `should_send_response`, on a final that is not a decline and has a trace; never vetoes | skip with a warning (forks off, originating text unknown, originating rowid out of the window, fork failed or unusable); `on_appraisal_before_send` still fires, with `lenses=None` |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
-| `critique` (the lens chosen by the critique vector) | full window at run time | silent TaskQueue task, enqueued once stage 2 lands | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
+| `critique` (the lens chosen by the critique vector) | full window at run time | silent TaskQueue task, enqueued once stage 2 lands; before send, the lens appraisal's draft scores chose (or the fallback draw) runs inline in the output gate, and its objections queue without waking (`critique_before_send`) | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
 Seeding, imports and the `eval_*` scripts have no live window and always
@@ -2833,7 +2834,8 @@ before the fork.
 The voice is a choice, not a measured result; #186's prompt-voice A/B will
 say whether it matters:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
-`appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`,
+`appraisal.stage2_fork_prompt`, `appraisal.before_send_fork_prompt`,
+`critique.lens.<lens>.fork_prompt`,
 `critique.provenance.fork_prompt` (documented
 copies in `prompts/*_fork.md`). They are read from static config with
 `tuning.config_value`, never `resolve_tunable`, so `set_settings` can't
@@ -5036,8 +5038,8 @@ goals-notify extra to load it, and list `goals_notify` under
 ### Planning lens (`corvidae-planning` package)
 
 `PlanningLensPlugin` (#1067) adds one critique lens, `planning`, through
-`on_critique_init`. It declares an `appraisal_question`, which the stage-2
-appraisal fork scores against the other lenses and "none", so it runs when
+`on_critique_init`. It declares an `appraisal_question`, which the appraisal
+fork scores against the other lenses and "none", so it runs when
 its question wins the exchange's critique vector or the
 `critique.sample_below_rate` draw picks it (it has no rate of its own;
 `critique.lens.planning.appraisal_question` rewords the question). Its brief asks the fork whether the exchange
@@ -5082,17 +5084,41 @@ override the brief with `critique.lens.alignment.fork_prompt`.
 
 #### The `Lens` contract (#1078)
 
-A critique lens is `Lens(name, fork_prompt, appraisal_question, wakes=False)`
+A critique lens is `Lens(name, fork_prompt, appraisal_question, wakes=False, before_send=False)`
 (`corvidae_cognition.critique`), frozen data with no callables. It replaces
 the earlier thresholds, reply patterns and sample rate: critique no longer
-decides from rules a lens carries. The stage-2 appraisal fork scores each
+decides from rules a lens carries. The appraisal fork scores each
 offered lens's `appraisal_question` and "none"; the top share runs and "none"
-wins ties (cognition.md, "How a lens is chosen"). `wakes=True` makes the
+wins ties (cognition.md, "How a lens is chosen"). Lenses are scored at two
+points: after the exchange (stage 2) and, for a lens with
+`before_send=True` (default `False`; the built-ins except retention are
+always offered), on a final draft before it is sent. `wakes=True` makes the
 lens's non-empty objections wake the channel, under the silence default
 and the critique-origin brake. A lens without a question is rejected at
-startup with a warning. `AppraisalPlugin.set_lens_offer(provider)` is the
-seam through which critique tells appraisal what to score; it is one
-provider, not a hookspec, because critique is the only consumer.
+startup with a warning.
+
+**Appraisal's hooks (#1169).** `AppraisalPlugin` owns the spec
+(`AppraisalSpec`, `corvidae_cognition.appraisal`); critique implements it and
+lists `appraisal` in `optional_depends_on`. All are `on_` hooks, so a failing
+implementer is logged and the others run; no parameter has a default.
+
+| Hook | Params | Implementers return |
+|---|---|---|
+| `on_appraisal_prompts` | `channel, trigger` (`"idle"` or `"before_send"`) | a list of `(lens name, question)` pairs, or `None`; merged in result order, a duplicate name or malformed pair is dropped with a warning |
+| `on_appraisal_before_send` | `channel, trace_id, text, annotations, lenses` | objections (`list[dict]`) or `None`; appraisal discards it in this version (the send is never held, #1192) |
+| `on_appraisal_idle` | `channel, trace_id, response_text, annotations, lenses, past_claims` | nothing |
+
+`lenses` is the normalized share per offered lens plus `"none"`; `lenses`
+and `past_claims` are `None` after a miss. Before send, appraisal's
+`should_send_response` forks once on a final draft that is not a decline and
+has a trace (lens scores only, no claims; `appraisal.before_send_fork_prompt`),
+fires `on_appraisal_before_send`, and always returns `None`. After the
+exchange, the stage-2 task fires `on_appraisal_idle` once per exchange.
+Critique runs the lens it selects: before send inline, with objections
+queued and never waking; after the exchange as a queued task. Without
+appraisal (`pm.has_plugin("appraisal")` at `on_start`), one INFO line names
+the fallback and one random lens offered for the point runs at each point at
+`critique.fallback_rate`. `add_stage2_listener` and `set_lens_offer` are gone.
 
 ### GitHub events (`github-webhook` package)
 

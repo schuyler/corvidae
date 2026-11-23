@@ -37,7 +37,6 @@ DYNAMIC = "<dynamic>"
 # the entry, in the change that removes a call.
 ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
     "packages/corvidae-cognition/corvidae_cognition/critique.py": {
-        "appraisal": (2, "#1169"),
         "funnel": (1, "#1176"),
     },
     "packages/corvidae-cognition/corvidae_cognition/memory.py": {

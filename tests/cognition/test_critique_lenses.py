@@ -40,6 +40,7 @@ from tests.cognition.test_critique import (
     FakeAppraisal,
     FixedRng,
     _fire,
+    _stage2_hook,
     _read_outcomes,
     _run_next_task,
     build_critique,
@@ -135,9 +136,8 @@ async def _judged_turn(
     then every task critique queued."""
     await _fire(env, trace_id, origin=origin, response_text=reply)
     if stage2 is not NO_STAGE2:
-        [listener] = env.appraisal.stage2_listeners
-        await listener(
-            channel=env.channel, trace_id=trace_id, response_text=reply,
+        await _stage2_hook(
+            env, channel=env.channel, trace_id=trace_id, response_text=reply,
             annotations={} if origin == "user" else {"origin": origin},
             stage2=stage2,
         )
@@ -438,12 +438,11 @@ class TestSameMachinery:
                 "past_claims": [{"claim": "we agreed on Friday", "queries": ["Friday"]}],
                 "lenses": {"none": 1.0},
             }
-            [listener] = env.appraisal.stage2_listeners
-            # The malformed value may raise out of the listener; provenance
+            # The malformed value may raise out of the hook; provenance
             # must already be queued by then.
             try:
-                await listener(
-                    channel=env.channel, trace_id="kprov", response_text="resp",
+                await _stage2_hook(
+                    env, channel=env.channel, trace_id="kprov", response_text="resp",
                     annotations={"origin": "reminder"}, stage2=stage2)
             except TypeError:
                 pass
@@ -463,7 +462,10 @@ class TestSameMachinery:
     async def test_declined_turn_runs_no_lens(self, tmp_path, monkeypatch):
         """R6: a declined final (NO_REPLY) is never judged by a lens. With no
         appraisal plugin critique itself picks the lens at the response."""
-        async with lens_env(tmp_path, _lens("early"), appraisal=None) as env:
+        async with lens_env(
+            tmp_path, _lens("early"), appraisal=None,
+            config={"critique": {"fallback_rate": 1.0}},
+        ) as env:
             env.plugin._rng = FixedRng(value=0.5, choice_value="early")
             # Control: an ordinary final is judged.
             await _judged_turn(env, "kr6b0")
