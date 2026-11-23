@@ -223,16 +223,19 @@ class WhatsAppPlugin(TransportPlugin):
             return
         channel = self._registry.get_or_create("whatsapp", chat_jid, config=ChannelConfig())
         sender = message.get("sender_jid") or chat_jid
-        # Remember the id only once the message is actually handed over: a
-        # message dropped above (no text, no registry) must not burn its id,
-        # or a replay of it would be suppressed as a duplicate forever.
+        await self.pm.ahook.on_message(
+            channel=channel, sender=sender, text=text, trace_id=mint_trace_id(),
+        )
+        # Remember the id only after the agent has taken the message: a message
+        # dropped above (no text, no registry) must not burn its id, and neither
+        # must one whose on_message raised -- the read loop swallows that
+        # exception, so an early insert would turn a failed hand-over into a
+        # permanent duplicate. Safe after the await because notifications on one
+        # connection are serialized by the read loop.
         if wamid:
             self._seen[wamid] = None
             while len(self._seen) > SEEN_LIMIT:
                 self._seen.popitem(last=False)
-        await self.pm.ahook.on_message(
-            channel=channel, sender=sender, text=text, trace_id=mint_trace_id(),
-        )
 
     # Outbound ---------------------------------------------------------------
 

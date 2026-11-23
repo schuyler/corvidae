@@ -309,3 +309,49 @@ async def test_a_dropped_message_does_not_consume_its_id(tmp_path):
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+class FlakyRecorder(Recorder):
+    """Raises on the first message it sees, then records normally."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    @hookimpl
+    async def on_message(self, channel, sender: str, text: str, trace_id: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("agent not ready")
+        await super().on_message(channel, sender, text, trace_id)
+
+
+async def test_a_raising_recorder_does_not_kill_the_read_loop(tmp_path, caplog):
+    """corvidae's hook guard swallows a raising impl, so the await returns normally.
+
+    That guard is why the wamid insert can sit after the await: the exception
+    never reaches the plugin. A later, distinct message must still arrive.
+    """
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    pm = create_plugin_manager()
+    pm.register(ChannelRegistry(), name="registry")
+    recorder = FlakyRecorder()
+    pm.register(recorder, name="recorder")
+    plugin = WhatsAppPlugin()
+    pm.register(plugin, name="whatsapp")
+    config = {"whatsapp": {"socket": str(tmp_path / "whatsapp.sock")}}
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+    message = {"id": "R1", "chat_jid": CHAT, "sender_jid": CHAT,
+               "from_me": False, "text": "hello", "ts": 4}
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        await sidecar.notify("message", message)
+        await _wait_for(lambda: recorder.failed)
+        await sidecar.notify("message", {**message, "id": "R2", "text": "second"})
+        await _wait_for(lambda: bool(recorder.messages))
+        assert recorder.messages[0][2] == "second"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
