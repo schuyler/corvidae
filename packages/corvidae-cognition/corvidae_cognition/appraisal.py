@@ -14,8 +14,9 @@ lenses on offer; the claims and scores reach peers through
 ``on_appraisal_idle`` and are persisted to the outcome log, where the lens
 scores are the labels a trained readout head learns from (#141). Before a
 final reply is sent, ``should_send_response`` forks once on the draft to
-score the before-send offers and fires ``on_appraisal_before_send``; it
-never vetoes. Stage-1 appraisal, which scored text at the gates from English word
+score the before-send offers and fires ``on_appraisal_before_send``; the
+objections peers return refuse the draft, which is held for one revising
+turn (``corvidae_cognition.presend``, #1149). Stage-1 appraisal, which scored text at the gates from English word
 lists and a probe of memory's full-text index, was removed (#1185); the
 five-dimension appraisal vector, the correction flag, the importance prior
 built from them and memory's valence tag were removed as unused (#1189).
@@ -34,6 +35,7 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae_cognition.config_keys import warn_removed_keys
+from corvidae_cognition.presend import PreSendHold
 from corvidae_cognition.silence import decline_kind, is_decline
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
@@ -373,6 +375,9 @@ def _declined(channel, response_text: str, trace_id: str | None) -> bool:
         return False
 
 
+# The miss reason when forks are off for appraisal's stage.
+FORKS_OFF_REASON = "forks are not enabled for appraisal (agent.forks.enabled / agent.forks.stages)"
+
 # One lens on offer: (lens name, one-line question).
 LensOffer = tuple[str, str]
 # Shares over the offered lens names plus "none", summing to 1.
@@ -412,14 +417,15 @@ class AppraisalSpec:
     async def on_appraisal_before_send(
         self, channel, trace_id: str, text: str, annotations: dict,
         lenses: LensScores | None,
-    ) -> list[dict] | None:
+    ) -> list[str] | None:
         """Hear the scores of a final draft before it is sent.
 
         ``lenses`` is the normalized share per offered lens and "none", or
         None when the scoring fork missed. Return objections, a list of
-        dicts, or None. Appraisal discards the result and the send is never
-        held for it (#1192): an implementation that finds fault queues it
-        for the channel's next turn.
+        strings, or None. Appraisal concatenates them in hook-result order
+        and refuses the draft with them; a draft held in time is revised
+        once (#1149). A non-list result and a non-string item are dropped
+        with a warning.
         """
 
     @hookspec
@@ -446,7 +452,7 @@ class AppraisalPlugin(CorvidaePlugin):
     """
 
     # trace owns the hook stage 2 is reported on (#1179).
-    depends_on = frozenset({"persistence", "trace", "task"})
+    depends_on = frozenset({"persistence", "trace", "task", "held"})
     # Owns the on_appraisal_* hooks peers implement.
     hookspecs = AppraisalSpec
 
@@ -461,6 +467,16 @@ class AppraisalPlugin(CorvidaePlugin):
         # Same discipline for the originating row's message_log rowid: a
         # stage-2 fork runs only while that row is still in the window.
         self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
+        # The pre-send hold-and-revise state (#1149); built on first use
+        # because pm may arrive at on_init.
+        self._presend_hold: PreSendHold | None = None
+
+    @property
+    def _hold(self) -> PreSendHold:
+        """This plugin's ``PreSendHold``, created on first use."""
+        if self._presend_hold is None:
+            self._presend_hold = PreSendHold(self.pm, "appraisal")
+        return self._presend_hold
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -585,6 +601,18 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
+        """Tell the pre-send hold which turn is starting (#1149 R6)."""
+        self._hold.on_turn(channel, trace_id, annotations)
+
+    @hookimpl
+    async def on_held_admitted(
+        self, channel, source, trace_id, admitted_keys, duplicate_keys,
+    ) -> None:
+        """Tell the pre-send hold a batch was offered (#1149 R6)."""
+        await self._hold.on_admitted(channel, source, admitted_keys, duplicate_keys)
+
+    @hookimpl
     async def on_agent_response(
         self, channel, request_text, response_text, trace_id, annotations, logprobs,
     ) -> None:
@@ -595,7 +623,14 @@ class AppraisalPlugin(CorvidaePlugin):
         the claims stage 2 lists (#1031). Never for a decline (#420): the
         agent's choice to stay silent is not a response. The task is silent (``deliver=False``): its empty result triggers no
         on_notify and therefore no main-model turn (trap #10).
+
+        The pre-send hold learns the final's outcome first, before any early
+        return, so a declined revision still clears; a held trace gets no
+        stage 2 (#1149 R8).
         """
+        # Hold outcome first: True means this trace was held, so skip stage 2.
+        if await self._hold.on_final(channel, trace_id, response_text, annotations):
+            return
         if trace_id is None:
             return
         if _declined(channel, response_text, trace_id):
@@ -683,7 +718,7 @@ class AppraisalPlugin(CorvidaePlugin):
             # Report stage 2 on the trace (lens scores are #141's labels).
             # Absent entropy is omitted, never nulled. Observe dispatch logs
             # a listener's failure, naming the hook and the plugin.
-            record: dict = {"stage2": stage2}
+            record: dict = {"phase": "idle", "stage2": stage2}
             entropy = entropy_summary(logprobs)
             if entropy is not None:
                 record["entropy"] = entropy
@@ -719,7 +754,7 @@ class AppraisalPlugin(CorvidaePlugin):
         # Forks off for this stage (or no agent plugin) is a miss.
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
         if agent is None:
-            return "forks are not enabled for appraisal (agent.forks.enabled / agent.forks.stages)"
+            return FORKS_OFF_REASON
         # The originating row must be known and still in the window.
         rowid = self.get_originating_rowid(trace_id)
         conv = getattr(channel, "conversation", None)
@@ -787,13 +822,26 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_send_response(self, channel, text, emission, trace_id, annotations):
-        """Score a final draft's lenses before it is sent; never veto.
+        """Score a final draft's lenses before it is sent; refuse on objections.
 
-        Fails open: every Exception is caught and logged, and the answer is
-        always None (no opinion), so appraisal never holds a reply.
+        A non-final, a decline or a trace-less draft is not checked, and
+        neither is any final while a hold is outstanding on the channel (the
+        revision goes out unchecked, #1149 R6). Otherwise peers hear the
+        scores and the objections they return refuse the draft. Fails open:
+        every Exception is caught and logged, and the answer is None.
         """
         try:
-            await self._score_before_send(channel, text, emission, trace_id, annotations)
+            # Not a checkable final, or a hold is outstanding: no opinion.
+            if (
+                emission != "final" or trace_id is None or decline_kind(text) is not None
+                or self._hold.suppressed(channel.id)
+            ):
+                return None
+            objections = await self._score_before_send(
+                channel, text, trace_id, annotations)
+            if objections:
+                return await self._hold.refuse(
+                    channel, trace_id, text, annotations, objections)
         except Exception:
             logger.warning(
                 "before-send appraisal failed unexpectedly for trace %s on %s; "
@@ -802,18 +850,18 @@ class AppraisalPlugin(CorvidaePlugin):
             )
         return None
 
-    async def _score_before_send(self, channel, text, emission, trace_id, annotations) -> None:
-        """Fork once on the draft and fire ``on_appraisal_before_send``.
+    async def _score_before_send(
+        self, channel, text, trace_id, annotations,
+    ) -> list[str]:
+        """Fork once on the draft, fire ``on_appraisal_before_send`` and return
+        the objection texts peers answered.
 
-        Only a final that is not a decline and has a trace is scored
-        (``is_decline`` can't be used: the draft is not in the window yet).
         No offers fires nothing. A miss after that (forks off, the exchange
         out of the window, the fork failing or unusable) logs a warning and
-        fires the hook with ``lenses=None``. Runs under attribution
-        ``appraisal``. The hook's results are discarded.
+        fires the hook with ``lenses=None``. Reports the scores on
+        ``on_trace_record`` with ``"phase": "before_send"``. Runs under
+        attribution ``appraisal``.
         """
-        if emission != "final" or trace_id is None or decline_kind(text) is not None:
-            return
         token = set_attribution(
             stage="appraisal", channel_id=channel.id, trace_id=trace_id)
         try:
@@ -825,14 +873,47 @@ class AppraisalPlugin(CorvidaePlugin):
                     "are offered", trace_id, channel.id,
                     extra={"channel": channel.id, "trace_id": trace_id},
                 )
-                return
+                return []
             lenses = await self._fork_before_send(channel, trace_id, text, offer)
-            await self.pm.ahook.on_appraisal_before_send(
+            # Report the scores (None on a miss, so a miss is countable).
+            await self.pm.ahook.on_trace_record(
+                trace_id=trace_id, channel_id=channel.id, source="appraisal",
+                origin=None, record={"phase": "before_send", "lenses": lenses},
+            )
+            results = await self.pm.ahook.on_appraisal_before_send(
                 channel=channel, trace_id=trace_id,
                 text=text, annotations=annotations, lenses=lenses,
             )
+            return self._collect_objections(results, trace_id, channel)
         finally:
             reset_attribution(token)
+
+    def _collect_objections(self, results: list, trace_id: str, channel) -> list[str]:
+        """The objection strings of the hook results, in hook-result order.
+
+        Any plugin may implement the hook and its output is not trusted: a
+        non-list result and a non-string item are dropped with a warning
+        naming the trace, the channel and the result type.
+        """
+        objections: list[str] = []
+        for result in results:
+            if result is None:
+                continue
+            if not isinstance(result, list):
+                logger.warning(
+                    "appraisal: on_appraisal_before_send result for trace %s on "
+                    "channel %s is a %s, not a list of objection strings; dropped",
+                    trace_id, channel.id, type(result).__name__)
+                continue
+            for item in result:
+                if not isinstance(item, str):
+                    logger.warning(
+                        "appraisal: on_appraisal_before_send item for trace %s on "
+                        "channel %s is a %s, not a string; dropped",
+                        trace_id, channel.id, type(item).__name__)
+                    continue
+                objections.append(item)
+        return objections
 
     async def _fork_before_send(
         self, channel, trace_id: str, text: str, offer: list[LensOffer],
@@ -880,8 +961,13 @@ class AppraisalPlugin(CorvidaePlugin):
 
     def _skip_before_send(self, channel, trace_id: str, reason: str, **kwargs) -> None:
         """Log that the before-send scoring missed, naming the point, trace,
-        channel and what was missing; peers are told there is no vector."""
-        logger.warning(
+        channel and what was missing; peers are told there is no vector.
+
+        Forks being off is stated once at ``on_start``, so per final it logs
+        at DEBUG only (#1169 R5.5).
+        """
+        level = logging.DEBUG if reason == FORKS_OFF_REASON else logging.WARNING
+        logger.log(level,
             "before-send appraisal skipped for trace %s on channel %s: %s; "
             "peers are told there is no lens vector",
             trace_id, channel.id, reason,
