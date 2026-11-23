@@ -59,6 +59,10 @@ pydle            # asyncio IRC client
 pyyaml           # YAML config parsing
 ```
 
+`uv.lock` is committed and pins every dependency, including the apluggy git
+commit; CI installs with `uv sync --locked`, so a stale lock fails the run
+(PRD §3.11.7).
+
 ## Hook Specifications
 
 Defined in `hooks.py`. All hooks are async (called via `pm.ahook`)
@@ -941,7 +945,10 @@ All operations are synchronous; no database access:
   re-roled: the window and `message_log` keep `role: system`. That matters
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
-  to stay cache-stable.
+  to stay cache-stable. The `user` default is gated on the harness
+  `memory_role` probe (`harness/driver.py`, the `buster-memrole` profile),
+  which checks the model still answers the person with the framed block as
+  the last user turn (PRD §3.3.7).
 
   Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
   these steps run unwrapped on every turn and an exception here is a
@@ -3863,7 +3870,9 @@ keeps a `syncMessage` — the account's own traffic echoed from another
 device signed into it — from being read as input and driving the agent in
 a loop. Attachments are downloaded under a size cap once the sender passes the
 allowlist, written under `signal.attachment_dir` and named in the message text
-(`[image: /abs/path]`); a refused sender's file is named, never fetched. Quotes, edits, and remote deletes fall out
+(`[image: /abs/path]`); a refused sender's file is named, never fetched.
+The download is signal-cli's `getAttachment` RPC, sent the attachment id
+only. Quotes, edits, and remote deletes fall out
 of the empty-text rule, since none of them carry a `message` field. A
 reaction does not fall out: it is caught just before that rule and handled as
 a reaction event (**Reaction events**, below). An
@@ -5045,7 +5054,10 @@ logs go to stderr or a log file.
 
 **Channels.** Sessions are `acp:<sessionId>`. `session/new` stores the
 client `cwd` on `channel.runtime_overrides["cwd"]` (transport metadata,
-not LLM config). Tool calls on ACP channels go through a swappable
+not LLM config). `cwd` and `tool_backend` are the runtime metadata keys
+(`RUNTIME_META_KEYS`, `corvidae/channel.py`): never merged into request
+bodies, and the agent's settings tool can neither set nor clear them
+(PRD §3.5.6). Tool calls on ACP channels go through a swappable
 `ToolBackend` (`LocalToolBackend` by default; see
 `corvidae/tools/backends.py`). The call bound sits above the backend: when it
 expires dispatch gives up and cancels `backend.run`, but a client-side backend
