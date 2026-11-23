@@ -245,6 +245,8 @@ class HeldContext(CorvidaePlugin):
         re-fired stub's turn can append. A pair whose flag is set already has a
         stub in flight, which will carry the batches, so only its mark clears.
         """
+        # Re-fire one stub per pair this channel marked for re-arm, skipping a
+        # pair whose stub is still in flight (that stub carries the batches).
         for pair in [p for p in self._rearm if p[0] == channel.id]:
             self._rearm.discard(pair)
             if pair in self._stub_pending:
@@ -471,6 +473,10 @@ class HeldContext(CorvidaePlugin):
                 extra={"channel": channel.id, "source": batch.source},
             )
         elif unlisted:
+            # A pushed batch keeps its unlisted entries for the next turn, with
+            # their keys still paired. Today every keyed batch is a `once`
+            # contribution, so the keys are None here; slicing them keeps the
+            # pairing correct for any keyed pushed batch a caller builds.
             kept = HeldBatch(
                 batch.source, [batch.entries[i] for i in unlisted],
                 [batch.keys[i] for i in unlisted] if batch.keys is not None else None,

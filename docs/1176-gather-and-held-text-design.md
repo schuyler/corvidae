@@ -861,3 +861,16 @@ Every gated Red test passes, and Green changed no Red assertion.
 | Edge: same text from two sources in one call | dropped: conflicts with F5 |
 | Edge: `_stub_info` / `_in_flight` growth | deferred: bounded by pairs and turns |
 | Test-order artifact (`unregistered llm stage`) | pre-existing on main; not this change |
+
+Round 2 (fresh cold reviewer, at `7b083e3`): **PASS**. I-1 and I-2 are fixed,
+with no recurrence. Ten mutations of `held.py` each fail only their intended
+test. Full suite: 6419 passed, 13 skipped, 2 xfailed. Non-blocking items:
+
+- **Fixed:** `turn_ended`'s loop has a block comment.
+- **Upstream concern, kept with a comment:** the keyed-leftover branch in
+  `_apply` is unreachable through the public API (every keyed batch is
+  `once`). It is one slice expression, kept so the keys stay paired with
+  their entries, and the comment says so. M7 ports R3.2's claim.
+- **Kept:** the count-text test holds a single batch.
+
+The Green gate passed.
