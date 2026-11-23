@@ -226,12 +226,13 @@ class WhatsAppPlugin(TransportPlugin):
         await self.pm.ahook.on_message(
             channel=channel, sender=sender, text=text, trace_id=mint_trace_id(),
         )
-        # Remember the id only after the agent has taken the message: a message
-        # dropped above (no text, no registry) must not burn its id, and neither
-        # must one whose on_message raised -- the read loop swallows that
-        # exception, so an early insert would turn a failed hand-over into a
-        # permanent duplicate. Safe after the await because notifications on one
-        # connection are serialized by the read loop.
+        # Remember the id only once the message has been handed over: a message
+        # dropped above (no text, no registry) keeps its id, so a replay of it
+        # is still delivered. Delivery is at-most-once: corvidae's hook guard
+        # (hooks.py#guarded) swallows a raising implementation, so this line runs
+        # even when the hand-over failed and a replay is then suppressed. That is
+        # the deliberate direction -- a duplicate turn is worse than a lost one,
+        # and an implementation that raised has usually seen the message.
         if wamid:
             self._seen[wamid] = None
             while len(self._seen) > SEEN_LIMIT:

@@ -327,10 +327,11 @@ class FlakyRecorder(Recorder):
 
 
 async def test_a_raising_recorder_does_not_kill_the_read_loop(tmp_path, caplog):
-    """corvidae's hook guard swallows a raising impl, so the await returns normally.
+    """A raising impl is swallowed by corvidae's hook guard: at-most-once.
 
-    That guard is why the wamid insert can sit after the await: the exception
-    never reaches the plugin. A later, distinct message must still arrive.
+    The guard converts the raise into a logged skip, so `await on_message`
+    returns normally and the wamid is remembered anyway. The failed message is
+    not redelivered; a later, distinct message still arrives.
     """
     sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
     await sidecar.start()
@@ -349,6 +350,9 @@ async def test_a_raising_recorder_does_not_kill_the_read_loop(tmp_path, caplog):
         await _wait_for(lambda: plugin._client is not None)
         await sidecar.notify("message", message)
         await _wait_for(lambda: recorder.failed)
+        # At-most-once, pinned: the guard swallowed the raise inside the await,
+        # so the id is remembered even though the hand-over failed.
+        await _wait_for(lambda: "R1" in plugin._seen, timeout=2)
         await sidecar.notify("message", {**message, "id": "R2", "text": "second"})
         await _wait_for(lambda: bool(recorder.messages))
         assert recorder.messages[0][2] == "second"
