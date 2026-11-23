@@ -338,9 +338,9 @@ class TestRendered:
     async def test_rendered_uses_the_agents_mid_system_role(self, make_env):
         """The re-roling the issue wants visible, and the one thing no test reached.
 
-        Hardcoding "system" in ``_mid_system_role`` passed all 34 tests, because
-        the stub agent has no ``mid_conversation_system_role`` and every expected
-        body passed ``"system"`` explicitly (#695 review).
+        Hardcoding "system" in ``_mid_system_role`` once passed all 34 tests,
+        because every expected body passed ``"system"`` explicitly (#695
+        review); this test sets the agent's role to "user" so it cannot.
         """
         env, _ = await panel_env(make_env)
         env.agent.mid_conversation_system_role = "user"

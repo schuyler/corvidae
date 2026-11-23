@@ -30,8 +30,8 @@ async def _setup(db, *, registry: ChannelRegistry | None = None):
     persistence.db = db
     pm.register(persistence, name="persistence")
     add_trace(pm)
-    # The kernel registry outcome_log resolves. A test that passes none gets
-    # one that holds CH, the channel most tests record against.
+    # The kernel registry outcome_log resolves (the test's own, or a new one),
+    # with CH, the channel most tests record against, added to it.
     known = add_kernel_registry(pm, registry)
     known.get_or_create(CH.transport, CH.scope)
     plugin = OutcomeLogPlugin()
