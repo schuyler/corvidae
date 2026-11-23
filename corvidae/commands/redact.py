@@ -53,7 +53,7 @@ _COVERAGE_NOTE = (
     "Coverage: redact reaches the message_log rows, any FTS index present, "
     "memory records (and their vectors) whose range covers a redacted "
     "message on that message's own channel, and the registered plugin "
-    "copies counted above. It does not reach the JSONL and daemon logs, "
+    "copies counted above. It does not reach the conversation JSONL logs or the daemon log, "
     "backups and exports, copies on other channels, the running daemon's "
     "context window, or restatements in later replies, memories, goals and "
     "notes. A running daemon's window still holds the text and a compaction "

@@ -1661,7 +1661,7 @@ line is plain text in the result, with no kernel header at all.
   #1126 (#1003), the free text of silence and `speak_up` reasons, the objection detail of
   lenses other plugins add (`critique.<name>.detail`, finding 23),
   exchanges whose
-  `message_rowid` is NULL (and outcome log lines of a trace with none), the JSONL logs and the daemon log, any copy
+  `message_rowid` is NULL (and outcome log lines of a trace with none), the conversation JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), copies on
   other channels (a read of the redacted message, a note or send that
   restates it, and whatever those channels consolidated from them), the

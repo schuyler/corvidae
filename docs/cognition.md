@@ -1724,7 +1724,7 @@ plugin in the tree (see [plugin-guide.md](plugin-guide.md)).
 
 Records what the reporting plugins say about each trace, in a file. Entry
 point name: `"outcome_log"`; depends on `"persistence"`, to find the session
-database's path. It implements `on_trace_record` and `resolve_trace_origin`
+database's path, and on `"trace"`, which owns the hooks it implements. It implements `on_trace_record` and `resolve_trace_origin`
 and has no config key.
 
 **The file.** Each record is one JSON line appended to
@@ -1748,7 +1748,8 @@ a source's records.
 `source: "outcome_log"`: `{"event": "admitted"}`, `{"event": "rejected"}`
 and `{"event": "persisted", "message_rowid": n}`. The origin is `user` for
 admitted and rejected, and `annotations.origin or "task"` for persisted. The
-first origin seen for a trace wins and its lines carry it.
+first origin seen for a trace wins and its later lines carry it; a
+reporter's line written before any origin is known carries `null`.
 
 **Origin index.** `resolve_trace_origin` answers from an in-memory LRU of
 65,536 traces (`ORIGIN_INDEX_MAX`), lost on restart. After 65,536 newer
@@ -1761,8 +1762,10 @@ the guard fails open and records. Rejections on known channels (the
 `limits` plugin's, say) are recorded, with no `message_rowid`.
 
 **When it cannot write.** An in-memory session database has no file to sit
-beside, so nothing is written and one WARNING names `daemon.session_db`. A
-failed append logs a WARNING naming the file, trace and source, and that
+beside, so nothing is written and one WARNING names `daemon.session_db`.
+While the session database is not open (before start, or after shutdown
+closed it) each record is lost with a WARNING saying the next one retries.
+A failed append logs a WARNING naming the file, trace and source, and that
 record is lost.
 
 **`exchange_log` is retired.** The plugin no longer creates or writes the
@@ -2294,7 +2297,7 @@ The hook runs on the composed prompt whatever the register's source, so a channe
 | `empty` | The final had no text and no tool calls; the kernel left it unsent without asking any gate |
 | `tool` | The model called `end_turn` (`silence.mode` `tool` or `both`). It records the call, not what followed: it is written when the tool runs, before the follow-up exists, so a model that then answers anyway still has this row. `silence_reason` carries the model's own words, cut at 200 characters |
 
-A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` the records go nowhere (`trace` warns at startup) and declines go unrecorded; the veto still works. A report that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
+A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` the records go nowhere (`trace` warns at startup) and declines go unrecorded; the veto still works. A listener that fails is logged by hook dispatch, naming the hook and the plugin; outcome_log's own failed append names the file, trace and source. A decline with no trace id logs a warning and records nothing.
 
 **The `end_turn` tool (`silence.mode`, #797).** Writing a literal `NO_REPLY` is an unusual thing for a chat-trained model to do, since such models are trained to alternate turns and answer. The hypothesis behind the tool is that a tool call is a shape they are trained to emit more readily; whether that holds is what the experiment measures (see The tool's record). With `silence.mode: tool` (or `both`) the plugin registers `end_turn(reason)` through `register_tools`, and the instruction says to call it on its own when nothing needs saying (`TOOL_FRAGMENT`; `both` adds a fallback to the token, `BOTH_FRAGMENT`). `token`, the default, registers no tool and behaves as before. A `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it has to mention `end_turn`.
 

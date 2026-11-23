@@ -1397,7 +1397,8 @@ deciding only what to newly append and in what order.
 **Outcome log.** The outcome log keeps every record reported about a
 trace (origin, originating row id, retrieval profile, lens scores,
 outcomes), from admission or rejection on, and never overwrites one, so
-each exchange can be reconstructed from its records. A rejected message
+each exchange can be reconstructed from its records; operator redaction
+alone may tombstone text in them. A rejected message
 keeps its records with no row id. Plugins report records as an event that
 other plugins may also hear. When the outcome log is disabled, the operator
 is told at startup which records are not kept.
