@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import re
 import time
 
 from pathlib import Path
@@ -52,8 +53,21 @@ DEFAULT_MEDIA_DIR = "state/whatsapp-media"
 #: number so one limit governs both directions.
 MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
+_NUMBER = re.compile(r"^\+?([0-9]+)")
+
+
+def _bare_number(value: str) -> str:
+    """Reduce a WhatsApp JID or phone number to its digits.
+
+    ``15551234567@s.whatsapp.net``, ``+15551234567`` and ``15551234567`` are the
+    same person, so the allowlist compares digits rather than whole JIDs.
+    """
+    match = _NUMBER.match(value.strip())
+    return match.group(1) if match else value.strip().lower()
+
+
 #: Default root the outbound tool may read files from.
-DEFAULT_SEND_ROOT = "state"
+DEFAULT_SEND_ROOT = "state/whatsapp-outbox"
 
 
 class WhatsAppPlugin(TransportPlugin):
@@ -72,6 +86,8 @@ class WhatsAppPlugin(TransportPlugin):
         self._socket_path: str | None = None
         self._media_root: Path = Path(DEFAULT_MEDIA_DIR)
         self._send_root: Path = Path(DEFAULT_SEND_ROOT)
+        #: Default-deny: a number not named here never reaches the agent.
+        self._allow: frozenset[str] = frozenset()
         self._client: SidecarClient | None = None
         self._connect_task: asyncio.Task | None = None
         self._session_state: str = "unknown"
@@ -109,6 +125,20 @@ class WhatsAppPlugin(TransportPlugin):
             raise ValueError(
                 "whatsapp: config field 'send_media_root' must be a non-empty path, "
                 f"got {send_root!r}"
+            )
+        allow = block.get("allow", [])
+        if isinstance(allow, str):
+            allow = [allow]
+        if not isinstance(allow, list) or any(not isinstance(a, str) or not a for a in allow):
+            raise ValueError(
+                "whatsapp: config field 'allow' must be a list of numbers or JIDs, "
+                f"got {allow!r}"
+            )
+        self._allow = frozenset(_bare_number(a) for a in allow)
+        if not self._allow:
+            logger.warning(
+                "whatsapp: whatsapp.allow is empty, so every message will be refused;"
+                " name the numbers that may talk to this account",
             )
         self._media_root = Path(media_dir)
         self._send_root = Path(send_root)
@@ -229,6 +259,15 @@ class WhatsAppPlugin(TransportPlugin):
     async def _on_incoming(self, message: dict) -> None:
         """Turn one inbound WhatsApp message into a channel message."""
         if message.get("from_me"):
+            return
+        # Default-deny, and before anything else: a stranger's message must
+        # neither create a channel nor trigger a media download.
+        sender_jid = message.get("sender_jid") or message.get("chat_jid") or ""
+        if _bare_number(sender_jid) not in self._allow:
+            logger.warning(
+                "whatsapp: refused a message from %s; it is not in whatsapp.allow",
+                sender_jid or "(unknown sender)",
+            )
             return
         # A reconnect replays unacked messages, so the same wamid can arrive
         # twice; the second copy must not start a second turn.

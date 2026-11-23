@@ -93,7 +93,7 @@ async def _plugin(tmp_path, *, config: dict | None = None):
     pm.register(recorder, name="recorder")
     plugin = WhatsAppPlugin()
     pm.register(plugin, name="whatsapp")
-    cfg = {"whatsapp": {"socket": str(tmp_path / "whatsapp.sock")}} if config is None else config
+    cfg = {"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"), "allow": [CHAT]}} if config is None else config
     await plugin.on_init(pm=pm, config=cfg)
     await plugin.on_start(config=cfg)
     return plugin, recorder, pm
@@ -183,7 +183,7 @@ async def test_a_media_only_message_names_the_fetched_file(tmp_path):
     await sidecar.start()
     plugin, recorder, _pm = await _plugin(
         tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
-                                       "media_dir": str(media_dir)}},
+                                       "media_dir": str(media_dir), "allow": [CHAT]}},
     )
     try:
         await _wait_for(lambda: plugin._client is not None)
@@ -210,7 +210,7 @@ async def test_a_media_path_outside_the_root_is_refused(tmp_path, caplog):
     await sidecar.start()
     plugin, recorder, _pm = await _plugin(
         tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
-                                       "media_dir": str(media_dir)}},
+                                       "media_dir": str(media_dir), "allow": [CHAT]}},
     )
     try:
         await _wait_for(lambda: plugin._client is not None)
@@ -406,7 +406,7 @@ async def test_a_raising_recorder_does_not_kill_the_read_loop(tmp_path, caplog):
     pm.register(recorder, name="recorder")
     plugin = WhatsAppPlugin()
     pm.register(plugin, name="whatsapp")
-    config = {"whatsapp": {"socket": str(tmp_path / "whatsapp.sock")}}
+    config = {"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"), "allow": [CHAT]}}
     await plugin.on_init(pm=pm, config=config)
     await plugin.on_start(config=config)
     message = {"id": "R1", "chat_jid": CHAT, "sender_jid": CHAT,
@@ -457,7 +457,7 @@ async def test_a_slow_media_fetch_does_not_let_the_next_message_overtake(tmp_pat
     await sidecar.start()
     plugin, recorder, _pm = await _plugin(
         tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
-                                       "media_dir": str(media_dir)}},
+                                       "media_dir": str(media_dir), "allow": [CHAT]}},
     )
     try:
         await _wait_for(lambda: plugin._client is not None)
@@ -510,7 +510,7 @@ async def test_send_media_sends_a_file_under_the_root(tmp_path):
     await sidecar.start()
     plugin, _recorder, _pm = await _plugin(
         tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
-                                       "send_media_root": str(root)}},
+                                       "send_media_root": str(root), "allow": [CHAT]}},
     )
     try:
         await _wait_for(lambda: plugin._client is not None)
@@ -536,7 +536,7 @@ async def test_send_media_refuses_a_path_outside_the_root(tmp_path):
     await sidecar.start()
     plugin, _recorder, _pm = await _plugin(
         tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
-                                       "send_media_root": str(root)}},
+                                       "send_media_root": str(root), "allow": [CHAT]}},
     )
     try:
         await _wait_for(lambda: plugin._client is not None)
@@ -544,6 +544,51 @@ async def test_send_media_refuses_a_path_outside_the_root(tmp_path):
         result = await plugin.send_whatsapp_media(f"whatsapp:{CHAT}", "/etc/passwd")
         assert "outside the allowed root" in result
         assert not [r for r in sidecar.requests if r["method"] == "send_media"]
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_stranger_is_refused_before_any_download(tmp_path, caplog):
+    """Default-deny (#1220 R2): a number not in whatsapp.allow reaches nothing."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.WARNING, logger="corvidae.whatsapp"):
+            await sidecar.notify("message", {
+                "id": "S1", "chat_jid": "15559999999@s.whatsapp.net",
+                "sender_jid": "15559999999@s.whatsapp.net", "from_me": False,
+                "text": "hello from a stranger", "ts": 8,
+                "media": [{"kind": "image", "name": "x", "mime": "image/png", "size": 9}],
+            })
+            await _wait_for(lambda: any("refused a message" in r.getMessage()
+                                        for r in caplog.records))
+        assert recorder.messages == []
+        assert not [r for r in sidecar.requests if r["method"] == "get_media"]
+        assert plugin._registry.get("whatsapp:15559999999@s.whatsapp.net") is None
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_the_allowlist_matches_digits_not_jid_spelling(tmp_path):
+    """A number written as +E.164 allows the same person as their JID."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "allow": ["+15551234567"]}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        await sidecar.notify("message", {
+            "id": "A1", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+            "text": "hi", "ts": 9,
+        })
+        await _wait_for(lambda: bool(recorder.messages))
+        assert recorder.messages[0][2] == "hi"
     finally:
         await plugin.on_stop()
         await sidecar.stop()
