@@ -136,6 +136,7 @@ class ForkLog:
     def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
         self._db_path = db_path
         self._sample_every = max(1, sample_every)
+        self._seen = 0
         self._db: aiosqlite.Connection | None = None
 
     async def open(self) -> None:
@@ -212,6 +213,11 @@ class ForkLog:
         input with no durable home.
         """
         db = await self._conn()
+        # Every Nth fork keeps its rendered prompt: the sampling rate is the
+        # only thing that costs text, and nothing else reads it.
+        self._seen += 1
+        if self._seen % self._sample_every == 0:
+            store_snapshot = True
         snapshot_sha = None
         system_sha = None
         if system_prompt:

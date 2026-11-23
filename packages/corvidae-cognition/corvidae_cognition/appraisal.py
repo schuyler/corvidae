@@ -499,6 +499,7 @@ class AppraisalPlugin(CorvidaePlugin):
         self._before_send_prompt = resolve_prompt(
             config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
         )
+        self._last_fork: dict[str, tuple[int, list[bytes]]] = {}
         self._fork_log = ForkLog(
             config.get("daemon", {}).get("session_db", "sessions.db"),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
@@ -532,11 +533,29 @@ class AppraisalPlugin(CorvidaePlugin):
         if log is None or not blocks:
             return
         try:
-            await log.record(
+            blocks_in = [digest_of(b) for b in blocks]
+            # Chain off the previous fork in this channel when the window only
+            # grew: store the appended tail, not the whole array again.
+            parent_id, parent_blocks = self._last_fork.get(channel.id, (0, []))
+            shared = 0
+            if parent_blocks:
+                while (
+                    shared < len(parent_blocks)
+                    and shared < len(blocks_in)
+                    and parent_blocks[shared] == blocks_in[shared]
+                ):
+                    shared += 1
+            chained = parent_blocks and shared == len(parent_blocks)
+            fork_id = await log.record(
                 stage=stage,
                 channel_id=channel.id,
                 messages=blocks,
-                digests=[digest_of(b) for b in blocks],
+                digests=blocks_in,
+                chain_parent=parent_id if chained else None,
+                chain_from=shared if chained else 0,
+                system_prompt=getattr(
+                    getattr(channel, "conversation", None), "system_prompt", None
+                ),
                 instruction=instruction,
                 question=question,
                 findings=findings,
@@ -545,6 +564,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 prompt_tokens=getattr(result, "prompt_tokens", None),
                 completion_tokens=getattr(result, "completion_tokens", None),
             )
+            self._last_fork[channel.id] = (fork_id, blocks_in)
         except Exception:
             logger.warning(
                 "appraisal: could not record a %s fork for %s (#1204)",
