@@ -247,3 +247,40 @@ async def test_the_link_state_is_read_from_state_not_connected(tmp_path, caplog)
         finally:
             await plugin.on_stop()
             await sidecar.stop()
+
+
+async def test_a_replayed_message_id_starts_one_turn(tmp_path, caplog):
+    """A reconnect replays unacked messages; the duplicate wamid is dropped (#1220)."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        message = {"id": "SAME1", "chat_jid": CHAT, "sender_jid": CHAT,
+                   "from_me": False, "text": "hello", "ts": 1}
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await sidecar.notify("message", message)
+            await _wait_for(lambda: bool(recorder.messages))
+            await sidecar.notify("message", message)
+            await asyncio.sleep(0.1)
+        assert len(recorder.messages) == 1
+        assert any("duplicate message SAME1" in r.getMessage() for r in caplog.records)
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_sidecar_that_stays_down_warns_once(tmp_path, caplog):
+    """One WARNING for a long outage, the rest at DEBUG — the log stays readable."""
+    config = {"whatsapp": {"socket": str(tmp_path / "absent.sock")}}
+    with caplog.at_level(logging.DEBUG, logger="corvidae.whatsapp"):
+        plugin, _recorder, _pm = await _plugin(tmp_path, config=config)
+        try:
+            await _wait_for(lambda: plugin._connect_failures >= 3, timeout=20)
+            warnings = [r for r in caplog.records
+                        if r.levelno == logging.WARNING and "cannot reach" in r.getMessage()]
+            assert len(warnings) == 1, [r.getMessage() for r in warnings]
+            assert any(r.levelno == logging.DEBUG and "still unreachable" in r.getMessage()
+                       for r in caplog.records)
+        finally:
+            await plugin.on_stop()

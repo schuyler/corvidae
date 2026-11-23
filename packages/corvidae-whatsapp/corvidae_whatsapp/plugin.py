@@ -12,6 +12,7 @@ sidecar never knows what a channel is.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
 
@@ -27,6 +28,16 @@ logger = logging.getLogger("corvidae.whatsapp")
 #: Seconds between reconnect attempts. The sidecar may be started after the
 #: daemon, or restarted under it, so a refusal is never fatal.
 RECONNECT_DELAY = 5.0
+
+#: Distinct WhatsApp message ids remembered for de-duplication. A reconnect
+#: replays unacked messages, so the same id can arrive twice; the window only
+#: has to cover a replay, not the channel's history.
+SEEN_LIMIT = 512
+
+#: Seconds between WARNINGs while the sidecar stays unreachable. Logging every
+#: attempt at WARNING trains the operator to skip WARNING lines; the first
+#: failure warns at once and the rest drop to DEBUG until this elapses.
+RECONNECT_WARN_INTERVAL = 300.0
 
 
 class WhatsAppPlugin(TransportPlugin):
@@ -47,6 +58,11 @@ class WhatsAppPlugin(TransportPlugin):
         self._connect_task: asyncio.Task | None = None
         self._session_state: str = "unknown"
         self._registry: ChannelRegistry | None = None
+        #: Message ids already handed to the agent, oldest first.
+        self._seen: collections.OrderedDict[str, None] = collections.OrderedDict()
+        #: Consecutive failed connect attempts, and when the last one warned.
+        self._connect_failures: int = 0
+        self._last_connect_warn: float = 0.0
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -99,13 +115,28 @@ class WhatsAppPlugin(TransportPlugin):
             try:
                 await client.connect()
             except (FileNotFoundError, ConnectionError, OSError) as exc:
-                logger.warning(
-                    "whatsapp: cannot reach the sidecar socket %s (%s); retrying in %.0fs."
-                    " Start it with: node services/whatsapp-sidecar/index.js",
-                    self._socket_path, type(exc).__name__, RECONNECT_DELAY,
-                )
+                self._connect_failures += 1
+                now = time.monotonic()
+                # First failure, and one every RECONNECT_WARN_INTERVAL after it,
+                # at WARNING; everything between at DEBUG with the count, so a
+                # sidecar that stays down does not bury the log.
+                if self._last_connect_warn == 0.0 or now - self._last_connect_warn >= RECONNECT_WARN_INTERVAL:
+                    self._last_connect_warn = now
+                    logger.warning(
+                        "whatsapp: cannot reach the sidecar socket %s (%s); retrying every %.0fs"
+                        " (attempt %d). Start it with: node services/whatsapp-sidecar/index.js",
+                        self._socket_path, type(exc).__name__, RECONNECT_DELAY,
+                        self._connect_failures,
+                    )
+                else:
+                    logger.debug(
+                        "whatsapp: sidecar still unreachable at %s (attempt %d, %s)",
+                        self._socket_path, self._connect_failures, type(exc).__name__,
+                    )
                 await asyncio.sleep(RECONNECT_DELAY)
                 continue
+            self._connect_failures = 0
+            self._last_connect_warn = 0.0
             self._client = client
             logger.info("whatsapp: connected to the sidecar at %s", self._socket_path)
             try:
@@ -164,6 +195,17 @@ class WhatsAppPlugin(TransportPlugin):
         """Turn one inbound WhatsApp message into a channel message."""
         if message.get("from_me"):
             return
+        # A reconnect replays unacked messages, so the same wamid can arrive
+        # twice; the second copy must not start a second turn.
+        wamid = message.get("id")
+        if wamid and wamid in self._seen:
+            logger.info("whatsapp: duplicate message %s in %s; ignored", wamid,
+                        message.get("chat_jid"))
+            return
+        if wamid:
+            self._seen[wamid] = None
+            while len(self._seen) > SEEN_LIMIT:
+                self._seen.popitem(last=False)
         chat_jid = message.get("chat_jid")
         text = message.get("text") or ""
         if not chat_jid:
