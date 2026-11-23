@@ -107,6 +107,12 @@ def prompt_sha256(messages: Sequence[dict]) -> bytes:
     return hashlib.sha256(blob).digest()
 
 
+def window_blocks(channel) -> list[dict]:
+    """The window a fork renders, as blocks; empty when there is none."""
+    conv = getattr(channel, "conversation", None)
+    return list(getattr(conv, "messages", None) or [])
+
+
 def digest_of(block: dict | str) -> bytes:
     """A rendered block's 16-byte digest.
 

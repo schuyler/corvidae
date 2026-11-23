@@ -111,6 +111,7 @@ from corvidae.context import (
     message_tokens,
     well_formed_calls,
 )
+from corvidae_cognition.fork_log import ForkRecorder, window_blocks
 from corvidae.fork import (
     ForkRefused,
     ViewInputs,
@@ -2030,6 +2031,10 @@ class MemoryPlugin(CorvidaePlugin):
         """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
+        self._fork_log = ForkRecorder(
+            config.get("daemon", {}).get("session_db", "sessions.db"),
+            sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+        )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(
             config,
@@ -2203,6 +2208,12 @@ class MemoryPlugin(CorvidaePlugin):
         await self._arm_retention()
 
     @hookimpl
+    async def _record_fork(self, **kwargs) -> None:
+        """Record one consolidation fork for #1204; never affects the result."""
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.record(**kwargs)
+
     async def on_stop(self) -> None:
         """Cancel the watches and timers, then tracked background tasks."""
         # First, before any await: no trigger may spawn after this point.
@@ -2404,6 +2415,11 @@ class MemoryPlugin(CorvidaePlugin):
         result = await agent.fork(
             channel, instruction, stage="consolidation", cut=cut,
             extra_body=CONSOLIDATION_EXTRA_BODY, **fork_kwargs,
+        )
+        await self._record_fork(
+            channel=channel, stage="consolidation", point="consolidation",
+            blocks=window_blocks(channel), instruction=instruction,
+            trace_id=None, result=result,
         )
         # Stamp the fork instruction (not the code-generated range
         # sentence, which quotes conversation text) and the model sent.
