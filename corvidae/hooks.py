@@ -1229,11 +1229,11 @@ class AgentSpec:
         concurrently, an implementation that raises is logged and counts as
         no opinion while its siblings' verdicts stand, and the reply waits
         for verdicts no longer than the allowance. A verdict that arrives
-        later decides nothing; a ``Refusal`` among them reaches the
-        channel's window as a framed CONTEXT row at its next turn, and wakes
-        no turn. The other firings are dispatched as before, with no
-        allowance, and one raising implementation there still discards
-        every verdict.
+        later decides nothing; a refusal among them (``Refusal``, or a bare
+        ``False`` with no reason given) reaches the channel's window as a
+        framed CONTEXT row at its next turn, and wakes no turn. The other
+        firings are dispatched as before, with no allowance, and one raising
+        implementation there still discards every verdict.
 
         Four firing sites, two modes:
 

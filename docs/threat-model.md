@@ -300,7 +300,8 @@ Six places:
   text echoed an injection, those 40 characters are promoted to the system
   role. `mid_conversation_system_role: user` covers it like the others.
 - A late check row (#1162): when a `should_send_response` check returns a
-  `Refusal` after the channel's check allowance ran out, the Agent appends
+  `Refusal`, or a bare `False` (#1201, reason `no reason given`), after the
+  channel's check allowance ran out, the Agent appends
   `[late check: <plugin>]` with the refusal's reason as a `role: system`
   CONTEXT row at the channel's next turn. The reason is plugin text, and a
   check that asks a model about the reply can echo what the window held,
