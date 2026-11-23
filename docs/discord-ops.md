@@ -235,7 +235,8 @@ What to expect:
 - The agent can decline to reply: with the `silence` plugin loaded, a final
   that contains `NO_REPLY` sends nothing (`silence.mode` `tool` or `both` adds an `end_turn` tool that leads to the same), which is
   how it stays quiet in a conversation that is not addressed to it.
-- A mention token is still stripped from the text.
+- A mention token reads as the mentioned user's `@name`, so the text keeps the
+  fact that a message was aimed at the bot (#1215).
 - If the intent is switched off in the portal, Discord refuses the
   connection with `PrivilegedIntentsRequired`; the message names the fix and
   appears in the usual `discord: connection error, retrying` log line.
