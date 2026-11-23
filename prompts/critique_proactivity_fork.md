@@ -8,6 +8,3 @@ Check:
 - If it falls under the user's list (their repos, core changes, system-level, irreversible decisions), the question is appropriate.
 
 Only object when the subject is clearly in the 'Mine' list and you asked anyway. An empty objections list is a good outcome.
-
-Do not call tools. Respond with a single JSON object, nothing else:
-{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}

@@ -180,11 +180,11 @@ async def test_chosen_before_send_lens_runs_inline_and_returns_its_objections(tm
         # Both records, under their own keys.
         outcomes = await _read_outcomes(env.recorder, "kb9")
         before = outcomes["critique_before_send"]
-        assert before["lens"] == "proactivity"
+        assert before["lenses"] == ["proactivity"]
         assert before["objections"] == 1
         assert before["sampled"] is False
         selection = outcomes["lens_selection_before_send"]
-        assert selection["lens"] == "proactivity"
+        assert selection["lenses"] == ["proactivity"]
         assert selection["sampled"] is False
     finally:
         await _teardown(env)
@@ -337,6 +337,10 @@ async def test_critique_keeps_the_originating_text_from_its_own_hook(tmp_path):
     env = await build_critique(tmp_path, PresentAppraisal(), chat_text=EMPTY)
     try:
         await _begin(env, "k14", text="ORIGINATING-TEXT-14")
+        # The idle fork is cut at the reply (#1190 I3), so the reply is recorded first.
+        await env.plugin.on_agent_response(
+            channel=env.channel, request_text="req", response_text="resp",
+            trace_id="k14", annotations={}, logprobs=None)
         await env.plugin.on_appraisal_idle(
             channel=env.channel, trace_id="k14", response_text="resp",
             annotations={}, lenses={"predictive": 1.0}, past_claims=None)

@@ -598,7 +598,7 @@ class TestRetentionDelivery:
         assert "NO_REPLY" in stub, stub
         assert "read" in stub.lower() and "append" in stub.lower(), stub
         assert "values/" in stub, "the filing turn must not guess the root"
-        assert all(e.startswith("[retention]") for e in kwargs["entries"]), kwargs["entries"]
+        assert all("[retention]" in e for e in kwargs["entries"]), kwargs["entries"]
         await _teardown(env)
 
     async def test_with_a_root_a_stylistic_finding_still_waits(self, tmp_path):
@@ -618,7 +618,7 @@ class TestRetentionDelivery:
         await _run_next_task(env.task)
         env.held.hold.assert_called_once()
         entries = env.held.hold.call_args.kwargs["entries"]
-        assert entries and all(e.startswith("[constrained]") for e in entries), entries
+        assert entries and all("[constrained]" in e for e in entries), entries
         env.held.hold_and_wake.assert_not_awaited()
         await _teardown(env)
 
@@ -795,14 +795,17 @@ class RenderingForkAgent(FakeForkAgent):
         super().__init__(*args, **kwargs)
         self.requests: list[list[dict]] = []
 
-    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None):
+    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None,
+                   **kwargs):
         from corvidae.fork import build_fork_prompt
 
         if channel.conversation is not None:
             self.requests.append(build_fork_prompt(
                 channel.conversation, cut, instruction, frozenset(), "system"))
+        # Whatever else the caller passes (max_tool_calls, yield_to_caller) goes on.
         return await super().fork(
-            channel, instruction, stage=stage, cut=cut, extra_body=extra_body)
+            channel, instruction, stage=stage, cut=cut, extra_body=extra_body,
+            **kwargs)
 
 
 def _row(role, content, rowid, **extra):
@@ -1158,7 +1161,7 @@ class TestProvenanceCritic:
             env.held.hold_and_wake.assert_awaited_once()
             kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
-            assert kwargs["entries"][0].startswith("[provenance]")
+            assert "[provenance]" in kwargs["entries"][0]
             # Other waking lenses' sentences (proactivity's, #1126) follow it.
             assert kwargs["stub_text"].startswith(PROVENANCE_NOTE)
         finally:
@@ -1351,7 +1354,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     agent._forks = ForksConfig(enabled=True, stages=frozenset({"appraisal", "critique"}))
     forks: list[dict] = []
 
-    async def fork(ch, instruction, *, stage, cut=None, extra_body=None):
+    async def fork(ch, instruction, *, stage, cut=None, extra_body=None, **_kw):
         forks.append({
             "instruction": instruction, "cut": cut,
             "request": build_fork_prompt(
@@ -1669,7 +1672,7 @@ class TestRetentionWakeNeedsARoot:
         }
         await env.plugin._record_and_register(
             env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
-            [objection], wake=False, origin=None,
+            [objection], wake=False, origin=None, reply_ref="",
         )
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
@@ -1690,7 +1693,7 @@ class TestRetentionWakeNeedsARoot:
             await self._register(env, root=None)
             env.held.hold_and_wake.assert_not_awaited()
             [entry] = env.held.hold.call_args.kwargs["entries"]
-            assert entry.startswith("[retention]") and "people/yoz.md" in entry, entry
+            assert "[retention]" in entry and "people/yoz.md" in entry, entry
         finally:
             await _teardown(env)
 
@@ -1714,7 +1717,7 @@ class TestCorrectionFindingsWait:
             await _run_next_task(env.task)
             env.held.hold_and_wake.assert_not_awaited()
             [call] = env.held.hold.call_args_list
-            assert call.kwargs["entries"][0].startswith("[provenance]"), call
+            assert "[provenance]" in call.kwargs["entries"][0], call
         finally:
             await _teardown(env)
 
@@ -1724,6 +1727,6 @@ class TestCorrectionFindingsWait:
         try:
             env.held.hold_and_wake.assert_not_awaited()
             entries = [e for c in env.held.hold.call_args_list for e in c.kwargs["entries"]]
-            assert any(e.startswith("[retention]") for e in entries), entries
+            assert any("[retention]" in e for e in entries), entries
         finally:
             await _teardown(env)

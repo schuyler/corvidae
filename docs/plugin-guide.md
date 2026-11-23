@@ -1563,7 +1563,7 @@ class MyPlugin(CorvidaePlugin):
         return result.text
 ```
 
-- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None, max_tool_calls=0)` returns
+- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None, max_tool_calls=0, yield_to_caller=None)` returns
   `ForkResult(text, message, usage, model)`. `model` is the model the fork
   request was sent with (`LLMClient.request_model(body)`, so an
   `extra_body["model"]` override shows), for plugins that record how their
@@ -1598,6 +1598,13 @@ class MyPlugin(CorvidaePlugin):
   malformed call, or a call id the fork has already seen, raises
   `ForkRefused`. `ForkResult.usage` covers only the last request; each
   request is metered on its own.
+- `yield_to_caller` (keyword-only, default `None`) is an async callback the
+  fork awaits after each tool round, before its next model request, outside
+  the lease, so a caller can hold the fork off the model while something else
+  needs it (critique waits for a user message on the channel). It is never
+  awaited before the first request or after the final reply. Raise from it to
+  abandon the fork: the exception propagates out of `fork`. It is a callback,
+  not a hook.
 - It mutates nothing, persists nothing and fires no hooks. With
   `max_tool_calls=0` it runs no tools: a reply with `tool_calls` (or a call
   written out as text) raises `ForkRefused`; no window or no
@@ -1620,9 +1627,9 @@ A plugin adds a critique lens by implementing CritiquePlugin's
 `on_critique_init(config, add_lens)` and calling
 `add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False,
 before_send=False))`.
-`fork_prompt` is the brief (critique appends the objections reply format);
+`fork_prompt` is the brief only: critique puts it in the lens's `## Lens: <name>` section and appends the reply format itself, one JSON key per lens, because every lens selected at a point shares one fork. Don't end the brief with a reply format of your own or tell the fork not to call tools;
 `appraisal_question` is one line the appraisal fork answers to
-decide whether this lens is the one worth running on an exchange; `wakes`
+decide whether this lens is worth running on an exchange (every lens that beats "none" runs); `wakes`
 says whether its non-empty objections wake the channel (default no: they
 wait as CONTEXT for the next turn). `before_send` (default `False`) also
 offers the lens on a final draft before it is sent, scored by the same
@@ -1642,6 +1649,15 @@ a broad one steals exchanges from the others. Operators can reword it with
 `critique.lens.<name>.appraisal_question`. Declare
 `optional_depends_on = frozenset({"critique"})`. The full contract and
 rejections are in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
+
+A lens that needs live context implements `transform_critique_prompt(channel,
+trace_id, lens_name, instruction)` and returns `instruction` with its text
+appended, or `None` for every other lens. `instruction` is one lens's section
+(its `## Lens: <name>` heading and brief), not the whole fork instruction,
+because the lenses at a point share one fork; the exchange quote and the reply
+format follow the sections and are not passed. A result that is not a string is
+ignored with a warning, and the fork uses the untransformed section
+([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt)).
 
 ### The view call
 

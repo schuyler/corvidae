@@ -37,9 +37,3 @@ receive your response:
 
 Only object where a misreading is plausible and consequential. An empty
 objections list is a good outcome, not a failure.
-
-Do not call tools. Respond with a single JSON object, nothing else:
-
-```json
-{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}
-```

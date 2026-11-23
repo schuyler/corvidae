@@ -172,6 +172,8 @@ agent:
 # critique:
 #   provenance:
 #     fork_prompt: "..."              # prompts/critique_provenance_fork.md
+#   max_tool_calls: 3                 # read-only tool calls the after-the-exchange critique fork may make (0 = none; static, #1190)
+#   fork_timeout: 120                 # seconds the whole lens fork may take, pauses included; past it the lens is a logged miss (static, #1190)
 #   sample_below_rate: 0.05           # chance a random lens runs when "none" wins the critique vector
 #   fallback_rate: 0.25               # without the appraisal plugin: chance one random lens runs at each of the two points (before send, after the exchange)
 #   retention:                        # #742: defaults to markdown_recall's root
@@ -179,11 +181,11 @@ agent:
 #   lens:
 #     # Each lens (the built-ins predictive, constrained, adversarial,
 #     # retention, proactivity, and those plugins add) has two static keys
-#     # (#1078). The stage-2 appraisal fork scores each lens's question; the
-#     # top one runs.
+#     # (#1078). The stage-2 appraisal fork scores each lens's question; every
+#     # lens above "none" runs, together in one fork.
 #     # predictive:
 #     #   appraisal_question: "..."     # one line the fork answers to score the lens
-#     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md
+#     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md (the brief only; critique adds the reply format)
 #     # planning:                     # the planning extra's lens (#1067)
 #     #   appraisal_question: "..."
 #     # alignment:                    # the alignment extra's lens (#914)

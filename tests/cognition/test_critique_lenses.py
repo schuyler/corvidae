@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.critique import FORKS_OFF_REASON, _JSON_TAIL
+from corvidae_cognition.critique import FORKS_OFF_REASON
 
 from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
@@ -377,8 +377,10 @@ class TestTransformCritiquePrompt:
             by_lens = {n: next(c["instruction"] for c in env.fork_agent.calls
                                if f"LENSBRIEF-{n}:" in c["instruction"])
                        for n in ("mine", "ctl")}
-            # Its own lens's fork got the transformed text; None passed ctl's through.
-            assert by_lens["mine"].endswith("XFORM-MARK")
+            # Its own lens's section got the transformed text (the exchange
+            # and the reply format follow the section, #1190); None passed
+            # ctl's through.
+            assert "XFORM-MARK" in by_lens["mine"]
             assert "XFORM-MARK" not in by_lens["ctl"]
             assert xform.seen.count("mine") == 1
 
@@ -406,11 +408,12 @@ class TestLensIsData:
             assert not callable(getattr(full, f.name)), f.name
         assert dataclasses.is_dataclass(Lens)
 
-    async def test_fork_prompt_override_replaces_the_brief_keeps_the_tail(
+    async def test_fork_prompt_override_replaces_the_brief_only(
         self, tmp_path,
     ):
-        """R3: critique.lens.<name>.fork_prompt replaces the brief; the JSON
-        tail stays."""
+        """R3 as #1190 changes it (was: replaces the brief, keeps the JSON
+        tail): critique.lens.<name>.fork_prompt replaces the brief in the
+        lens's section; the reply format is critique's, once per fork."""
         async with lens_env(
             tmp_path, _lens("mine"),
             config={"critique": {"lens": {"mine": {"fork_prompt": "OPERATOR-BRIEF-9z"}}}},
@@ -418,7 +421,8 @@ class TestLensIsData:
             await _judged_turn(env, "kr3", stage2=_wins("mine"))
             [call] = [c for c in env.fork_agent.calls if "OPERATOR-BRIEF-9z" in c["instruction"]]
             assert "LENSBRIEF-mine:" not in call["instruction"]
-            assert _JSON_TAIL in call["instruction"]
+            assert "## Lens: mine\nOPERATOR-BRIEF-9z" in call["instruction"]
+            assert call["instruction"].lower().count("single json object") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -489,13 +493,20 @@ class TestSameMachinery:
     async def test_exchange_out_of_window_skips_with_the_existing_line(
         self, tmp_path, caplog,
     ):
-        """R6: an exchange that left the window skips with the existing line
-        naming lens and trace, and records no outcome."""
+        """R6 (#1190 I3): a reply that left the window before the idle fork
+        skips with a line naming lens, trace and the cause, and records no
+        outcome. At idle the containment check is on the reply row."""
         caplog.set_level("WARNING")
         async with lens_env(tmp_path, _lens("mine")) as env:
-            # Row 1, the exchange's originating row, is not in this window.
-            env.channel.conversation = window_of(env.channel.id, [2, 50])
-            await _judged_turn(env, "kr6d", stage2=_wins("mine"))
+            # The reply is recorded while it is in the window ...
+            await _fire(env, "kr6d", response_text="resp")
+            # ... then leaves it before appraisal's idle pass lands.
+            env.channel.conversation = window_of(env.channel.id, [1, 50])
+            await _stage2_hook(
+                env, channel=env.channel, trace_id="kr6d", response_text="resp",
+                annotations={}, stage2=_wins("mine"),
+            )
+            await _drain(env)
             _assert_ran(env, mine=0)
             assert _warnings(caplog, "mine", "kr6d", "not in the window"), caplog.text
             await _no_outcome_for(env, "kr6d", "mine")

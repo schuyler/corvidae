@@ -10,12 +10,13 @@ its stub triggers.
 
 Two independent paths:
 
-  * At most one lens runs per exchange at each of two points: the built-ins
+  * At each of two points every selected lens runs, all in ONE fork: the built-ins
     (predictive / constrained / adversarial / retention / proactivity) and
     plugin lenses are offered to appraisal through its ``on_appraisal_prompts``
     hook, which scores them in a critique vector and tells critique through
     ``on_appraisal_idle`` (after the exchange) and ``on_appraisal_before_send``
-    (on the draft, before it is sent); the top one runs (#1078, #1169). Before
+    (on the draft, before it is sent); every lens whose share beats "none"'s
+    runs (#1078, #1169, #1190). Before
     send, retention is not offered and a plugin lens only when it declares
     ``before_send=True``; the before-send lens runs inline and its objections
     go back to appraisal, which refuses the draft on them and holds it for one
@@ -26,9 +27,14 @@ Two independent paths:
     bound (operator directive 3). Without an appraisal plugin (checked once,
     at ``on_start``) one random lens runs at each point on a share of
     exchanges, ``critique.fallback_rate``, and the provenance check is off.
-    The lens runs as a fork of the live window; a lens whose fork can't run (forks off, no
-    window, the exchange compacted out, the fork failed or its reply was
-    unusable) is skipped with a warning, like provenance, and makes no
+    The lenses run as one fork of the live window, each in its own
+    "## Lens: <name>" section, and the reply is keyed by lens. After the
+    exchange the fork may call read-only tools (``critique.max_tool_calls``),
+    waits while a user message waits on the channel, and is bounded by
+    ``critique.fork_timeout``; before send it calls none and does not wait.
+    A lens whose fork can't run (forks off, no window, the reply compacted
+    out, the fork failed, timed out or its reply was unusable or had no entry
+    for it) is skipped with a warning, like provenance, and makes no
     standalone call (PRD §3.8.5, #320). A run in which no lens ran records
     no outcome.
   * The provenance check (trap #4, redesigned in #155) runs when appraisal's
@@ -63,7 +69,7 @@ critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 
 The built-in and plugin lenses are chosen per exchange from the critique
 vector appraisal returns: each lens's one-line appraisal question is
-scored, and the top share runs unless "none" wins (#1078).
+scored, and every lens above "none" runs (#1078, #1190).
 ``critique.sample_below_rate`` and ``critique.fallback_rate`` resolve through
 ``resolve_tunable`` at decision time (operator directive 2); the questions and
 fork prompts are static config.
@@ -71,8 +77,10 @@ fork prompts are static config.
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import json
+import math
 import re
 import logging
 import random
@@ -111,6 +119,15 @@ SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative
 # critique.fallback_rate: the share of exchanges that run one random lens, at
 # each point, when no appraisal plugin is loaded (owner ruling, #1169).
 FALLBACK_RATE_DEFAULT = 0.25
+# critique.max_tool_calls: read-only tool calls an idle critique fork may make
+# (before send it makes none); critique.fork_timeout: seconds the whole fork
+# may take, pauses included. Both are static config, not tunables, so the
+# agent can't raise its own cap or deadline (#1190 I4).
+MAX_TOOL_CALLS_DEFAULT = 3
+FORK_TIMEOUT_DEFAULT = 120.0
+# Seconds between looks at the channel's waiting-message count while an idle
+# fork waits for the channel to clear (#1190 R5.3).
+YIELD_POLL_SECONDS = 1.0
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
 # critique.lens.proactivity.enabled: static config, not a tunable, so the
 # agent can't switch off the critic that checks it (#1126).
@@ -228,12 +245,22 @@ OBJECTION_SCHEMA = {
     },
     "required": ["objections"],
 }
-OBJECTION_EXTRA_BODY = {
-    "response_format": {
-        "type": "json_schema",
-        "json_schema": {"name": "critique_objections", "schema": OBJECTION_SCHEMA},
+
+
+def reply_extra_body(lenses: list[str]) -> dict:
+    """Response-format body for a no-tools critique fork: one property per
+    lens in the fork, each an ``OBJECTION_SCHEMA`` (the reply is keyed by lens)."""
+    schema = {
+        "type": "object",
+        "properties": {name: OBJECTION_SCHEMA for name in lenses},
+        "required": list(lenses),
     }
-}
+    return {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "critique_objections", "schema": schema},
+        }
+    }
 
 
 def provenance_extra_body(n: int) -> dict:
@@ -361,11 +388,10 @@ DEFAULT_PROMPTS = {
 # prompts/critique_*_fork.md; critique.lens.<lens>.fork_prompt (and
 # critique.provenance.fork_prompt) override them
 # from static config only (not runtime tunables), so set_settings can't
-# soften the critic it is checked by.
-_JSON_TAIL = (
-    "Do not call tools. Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}'
-)
+# soften the critic it is checked by. A lens prompt is a brief only: critique
+# appends one reply-format tail per fork (``_reply_tail``), because several
+# lenses share a fork and the tail depends on the fork (tools allowed or not,
+# one key per lens, #1190).
 _FORK_PROMPT_PREDICTIVE = (
     "[Self-critique: predictive] Pause the conversation here. Review the "
     "response you gave in the exchange that began with the message quoted "
@@ -379,7 +405,7 @@ _FORK_PROMPT_PREDICTIVE = (
     "- Did you silently resolve an ambiguity you should have surfaced or "
     "asked about?\n\n"
     "Only object where a misreading is plausible and consequential. An empty "
-    "objections list is a good outcome, not a failure.\n\n" + _JSON_TAIL
+    "objections list is a good outcome, not a failure."
 )
 _FORK_PROMPT_CONSTRAINED = (
     "[Self-critique: constrained] Pause the conversation here. Review the "
@@ -394,7 +420,7 @@ _FORK_PROMPT_CONSTRAINED = (
     "- Did you drop a stated constraint (a budget, a deadline, an exclusion) "
     "when forming your answer?\n\n"
     "Only object to concrete violations you can point at. An empty "
-    "objections list is a good outcome, not a failure.\n\n" + _JSON_TAIL
+    "objections list is a good outcome, not a failure."
 )
 _FORK_PROMPT_ADVERSARIAL = (
     "[Self-critique: adversarial] Pause the conversation here. In the "
@@ -410,7 +436,7 @@ _FORK_PROMPT_ADVERSARIAL = (
     "version over yours?\n\n"
     "Only object where the user's side genuinely holds up under the "
     "steelman. An empty objections list is a good outcome, not a "
-    "failure.\n\n" + _JSON_TAIL
+    "failure."
 )
 _FORK_PROMPT_PROVENANCE = (
     "[Self-critique: provenance] Pause the conversation here. Audit the "
@@ -467,7 +493,7 @@ _FORK_PROMPT_PROACTIVITY = (
     "- If it falls under the user's list (their repos, core changes, "
     "system-level, irreversible decisions), the question is appropriate.\n\n"
     "Only object when the subject is clearly in the 'Mine' list and you "
-    "asked anyway. An empty objections list is a good outcome.\n\n" + _JSON_TAIL
+    "asked anyway. An empty objections list is a good outcome."
 )
 
 _FORK_PROMPT_RETENTION = (
@@ -482,10 +508,9 @@ _FORK_PROMPT_RETENTION = (
     "Only flag facts that are durable, specific, and not already filed. "
     "An empty objections list is a good outcome.\n\n"
     "For each fact to file, name the file it belongs in and the exact "
-    "content to append, as a section to add rather than a rewrite.\n\n"
-    "Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "...", "file": "...", '
-    '"content": "...", "severity": 0.5}]}'
+    "content to append, as a section to add rather than a rewrite. An "
+    'objection for a fact to file reads {"claim": "...", "objection": "...", '
+    '"file": "...", "content": "...", "severity": 0.5}.'
 )
 DEFAULT_FORK_PROMPTS = {
     "predictive": _FORK_PROMPT_PREDICTIVE,
@@ -719,6 +744,36 @@ def _question_override_ok(question: object) -> bool:
             and question.splitlines() == [question])
 
 
+# Sentinel for "key not configured" (None could be a configured value).
+_UNSET = object()
+
+
+def _is_tool_cap(value: object) -> bool:
+    """A valid ``critique.max_tool_calls``: a whole number >= 0 (not a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_timeout(value: object) -> bool:
+    """A valid ``critique.fork_timeout``: a positive finite number (not a bool)."""
+    return (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value > 0
+    )
+
+
+# (key, validator, what is accepted, default) for the two static fork bounds.
+FORK_BOUND_KEYS = (
+    ("critique.max_tool_calls", _is_tool_cap, "a whole number ≥ 0", MAX_TOOL_CALLS_DEFAULT),
+    ("critique.fork_timeout", _is_timeout, "a positive finite number of seconds",
+     FORK_TIMEOUT_DEFAULT),
+)
+
+
+class _ForkStale(Exception):
+    """Raised from the fork's yield callback when the channel compacted while
+    the fork ran: its lenses are a miss (#1190 R5.3)."""
+
+
 class CritiqueSpec:
     """Hooks the critique plugin owns."""
 
@@ -740,12 +795,15 @@ class CritiqueSpec:
     async def transform_critique_prompt(
         self, channel, trace_id: str, lens_name: str, instruction: str,
     ) -> str:
-        """Transform a lens's fork instruction before its fork runs.
+        """Transform one lens's section of a fork instruction before the fork runs.
 
-        Fires once per lens fork in ``_fork_lens``, after the instruction is
-        assembled (the brief, the exchange quote and any built-in extra
-        text) and before the containment check and ``agent.fork``.
-        ``lens_name`` names the lens being forked.
+        The selected lenses at a point share one fork (#1190), so this fires
+        once per lens in ``_fork_lenses``, on that lens's section: its
+        ``## Lens: <name>`` heading, the brief and any built-in extra text
+        (the retention root). The exchange quote and the reply format follow
+        the sections and are not passed, so an implementer returns a section,
+        not a whole prompt. It runs before the containment check and
+        ``agent.fork``. ``lens_name`` names the lens the section belongs to.
 
         Resolution: ``firstresult`` over a trylast seed (CritiquePlugin's
         own implementation) that returns ``instruction`` unchanged. A plain
@@ -758,8 +816,8 @@ class CritiqueSpec:
         LIFO, but apluggy wrappers are sync generators and cannot await.
 
         A raising implementer is logged at WARNING naming the lens, the
-        channel and the trace, and the fork runs with the untransformed
-        instruction.
+        channel and the trace, and the fork runs with that lens's
+        untransformed section.
         """
 
 
@@ -1037,12 +1095,21 @@ class CritiquePlugin(CorvidaePlugin):
     @staticmethod
     def _value_problems(config: dict) -> list[str]:
         """One message per ``critique.lens.<name>.appraisal_question``
-        override that is not one non-blank line of text (#1127), and for a
-        ``critique.lens.proactivity.enabled`` that is not a bool (#1126)."""
+        override that is not one non-blank line of text (#1127), for a
+        ``critique.lens.proactivity.enabled`` that is not a bool (#1126), and
+        for a ``critique.max_tool_calls`` or ``critique.fork_timeout`` that is
+        not what ``FORK_BOUND_KEYS`` accepts (#1190)."""
+        # The two fork bounds come first: they don't live under critique.lens,
+        # so the early return below must not skip them (#1190).
+        problems: list[str] = []
+        for key, valid, accepted, _default in FORK_BOUND_KEYS:
+            value = config_value(config, key, _UNSET)
+            if value is not _UNSET and not valid(value):
+                problems.append(f"{key} {value!r} must be {accepted}")
         lens_block = config_value(config, "critique.lens", None)
         if not isinstance(lens_block, dict):
-            return []
-        problems = [
+            return problems
+        problems += [
             f"critique.lens.{name}.appraisal_question {value['appraisal_question']!r} "
             "must be one line, non-empty: it is one line of the block the "
             "appraisal fork reads"
@@ -1067,14 +1134,11 @@ class CritiquePlugin(CorvidaePlugin):
             )
             for name in DEFAULT_FORK_PROMPTS
         }
-        # An added lens: operator override or its own brief, plus critique's
-        # JSON tail (the objection schema is critique's parsing contract).
+        # An added lens: the operator's override or its own brief, as written
+        # (critique appends the reply format once per fork, not per lens).
         for name, added in self._lenses.items():
-            prompts[name] = (
-                resolve_prompt(
-                    config, self._fork_prompt_key(name), added.lens.fork_prompt)
-                + "\n\n" + _JSON_TAIL
-            )
+            prompts[name] = resolve_prompt(
+                config, self._fork_prompt_key(name), added.lens.fork_prompt)
         return prompts
 
     def _offers(self, trigger: str) -> list[tuple[str, str]]:
@@ -1270,7 +1334,7 @@ class CritiquePlugin(CorvidaePlugin):
                     # "none won" sample below threshold.
                     objections = await self._run_before_send(
                         channel, trace_id, text, annotations,
-                        self._random_lens(offered), False)
+                        [self._random_lens(offered)], False)
                     # Objections refuse the draft; the hold decides at the final.
                     if objections:
                         return await self._hold.refuse(
@@ -1342,9 +1406,9 @@ class CritiquePlugin(CorvidaePlugin):
         if not self._appraisal and self._rng.random() < self._fallback_rate(channel):
             offered = [name for name, _ in self._offers("idle")]
             if offered:
-                await self._enqueue_lens(
+                await self._enqueue_lenses(
                     channel, trace_id, annotations, request_text, response_text,
-                    self._random_lens(offered), sampled=False)
+                    [self._random_lens(offered)], sampled=False)
 
     @hookimpl
     async def on_held_admitted(
@@ -1425,84 +1489,41 @@ class CritiquePlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
 
-    async def _enqueue_lens(
+    async def _enqueue_lenses(
         self, channel, trace_id, annotations, request_text, response_text,
-        name: str, *, sampled: bool,
+        names: list[str], *, sampled: bool,
     ) -> None:
-        """Enqueue the silent task running the one chosen lens: a built-in
-        through ``_run_critique``, a plugin lens through ``_run_added_lenses``."""
+        """Enqueue the one silent task that forks the chosen lenses together."""
         text_in = self._originating_text(trace_id, request_text)
         origin = (annotations or {}).get("origin")
 
-        if name in BUILTIN_LENSES:
-            async def _work() -> str:
-                await self._run_critique(
-                    channel, trace_id, text_in, response_text, [name], sampled,
-                    origin=origin)
-                return ""
-
-            await self._enqueue(channel, trace_id, annotations, "critique", _work)
-            return
-
-        async def _work_added() -> str:
-            await self._run_added_lenses(
-                channel, trace_id, text_in, response_text, [(name, sampled)],
+        # The task body: one fork for every chosen lens, built-in or added.
+        async def _work() -> str:
+            await self._run_lenses(
+                channel, trace_id, text_in, response_text, names, sampled,
                 origin=origin)
             return ""
 
-        await self._enqueue(channel, trace_id, annotations, "critique:lenses", _work_added)
-
-    async def _run_added_lenses(
-        self, channel, trace_id, originating_text, response_text,
-        selected: list[tuple[str, bool]], *, origin: str | None,
-    ) -> None:
-        """Fork each selected added lens through the built-ins' own path,
-        record ``{"critique": {name: ...}}`` for those that ran and register
-        their objections without waking (an added lens only waits)."""
-        token = set_attribution(
-            stage="critique", channel_id=channel.id, trace_id=trace_id
-        )
-        try:
-            per_lens: dict[str, dict] = {}
-            objections: list[dict] = []
-            for name, sampled in selected:
-                # A miss was already logged by _fork_lens; nothing is recorded.
-                objs = await self._fork_lens(
-                    channel, name, trace_id, originating_text, response_text)
-                if objs is None:
-                    continue
-                entry: dict = {"objections": len(objs), "sampled": sampled}
-                if objs:
-                    entry["detail"] = objs
-                per_lens[name] = entry
-                objections.extend(objs)
-            if not per_lens:
-                return
-            await self._record_and_register(
-                channel, trace_id, {"critique": per_lens}, objections, wake=False,
-                origin=origin,
-            )
-        finally:
-            reset_attribution(token)
+        await self._enqueue(channel, trace_id, annotations, "critique", _work)
 
     def _random_lens(self, offered: list[str]) -> str:
         """One of the offered lens names, drawn with the injectable RNG."""
         return self._rng.choice(offered)
 
-    def _choose_lens(
+    def _choose_lenses(
         self, trace_id: str, channel: Any, vector: dict | None, offered: list[str],
         reason: str, warn: bool,
-    ) -> tuple[str | None, bool, str]:
-        """``(lens, sampled, basis)`` for one exchange.
+    ) -> tuple[list[str], bool, str]:
+        """``(lenses, sampled, basis)`` for one exchange.
 
-        The winner is the highest share in ``vector`` over the offered lenses
-        and "none"; "none" wins any tie it is part of, and among lenses the
-        earliest offered wins. No usable vector, or a winner that is no
-        longer offered, counts as "none". When "none" wins,
-        ``critique.sample_below_rate`` may still draw a random offered lens
+        Selected is every offered lens whose share in ``vector`` is higher than
+        "none"'s, in offer order; "none" wins any tie it is part of. No usable
+        vector counts as "none", and so does a name the vector holds that is
+        no longer offered (warned about, once per name). When "none" wins,
+        ``critique.sample_below_rate`` may still draw one random offered lens
         (the standing false-negative experiment, operator directive 3).
         """
-        lens: str | None = None
+        lenses: list[str] = []
         basis = "none"
         if vector is None:
             basis = "no_vector"
@@ -1514,32 +1535,29 @@ class CritiquePlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
         else:
-            # Offer order first, then any name the vector holds that is not
-            # offered any more (a reload changed the offer in between).
-            order = [*offered, *(k for k in vector if k not in offered and k != "none")]
-            best = max([vector.get("none", 0.0), *(vector.get(k, 0.0) for k in order)])
-            if vector.get("none", 0.0) < best:
-                winner = next(k for k in order if vector.get(k, 0.0) == best)
-                if winner in offered:
-                    lens, basis = winner, "vector"
-                else:
+            none_share = vector.get("none", 0.0)
+            lenses = [k for k in offered if vector.get(k, 0.0) > none_share]
+            if lenses:
+                basis = "vector"
+            # A reload changed the offer between scoring and now: a name that
+            # beat "none" but is no longer offered is dropped, loudly.
+            for name, share in vector.items():
+                if name != "none" and name not in offered and share > none_share:
                     logger.warning(
-                        "critique lens selection for trace %s on %s: %r won the "
-                        "vector but is no longer offered; treating as none",
-                        trace_id, channel.id, winner,
+                        "critique lens selection for trace %s on %s: %r beat "
+                        "none in the vector but is no longer offered; dropping it",
+                        trace_id, channel.id, name,
                         extra={"channel": channel.id, "trace_id": trace_id},
                     )
         sampled = False
-        if lens is None and offered:
+        if not lenses and offered:
             rate = resolve_tunable(
                 channel, self.config, "critique.sample_below_rate",
                 SAMPLE_BELOW_RATE_DEFAULT,
             )
             if self._rng.random() < rate:
-                lens, sampled = self._random_lens(offered), True
-        return lens, sampled, basis
-
-
+                lenses, sampled = [self._random_lens(offered)], True
+        return lenses, sampled, basis
 
     # ------------------------------------------------------------------
     # The provenance check (trap #4, #155)
@@ -1554,7 +1572,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_appraisal_before_send(self, channel, trace_id, text, annotations, lenses):
-        """Run the lens the draft's scores chose, inline, before the send.
+        """Run the lenses the draft's scores chose, inline, in one fork, before the send.
 
         ``lenses`` None (the scoring fork missed) is "no vector", sampled at
         ``critique.sample_below_rate`` like an idle miss. The choice is
@@ -1564,7 +1582,7 @@ class CritiquePlugin(CorvidaePlugin):
         the objection texts (or None): appraisal refuses the draft on them.
         """
         offered = [name for name, _ in self._offers("before_send")]
-        lens, sampled, basis = self._choose_lens(
+        chosen, sampled, basis = self._choose_lenses(
             trace_id, channel, lenses if isinstance(lenses, dict) else None,
             offered, "the before-send scoring produced no vector",
             # Appraisal already warned about a missed vector.
@@ -1572,15 +1590,15 @@ class CritiquePlugin(CorvidaePlugin):
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}
-        if lens is not None:
-            selection["lens"] = lens
+        if chosen:
+            selection["lenses"] = chosen
         await self.pm.ahook.on_trace_record(
             trace_id=trace_id, channel_id=channel.id, source="critique",
             origin=None, record={"lens_selection_before_send": selection},
         )
-        if lens is not None:
+        if chosen:
             return await self._run_before_send(
-                channel, trace_id, text, annotations, lens, sampled) or None
+                channel, trace_id, text, annotations, chosen, sampled) or None
         return None
 
     @hookimpl
@@ -1593,8 +1611,9 @@ class CritiquePlugin(CorvidaePlugin):
         Stage 2 (a model) has listed the claims the reply makes about the
         past. An eligible exchange with at least one claim gets one silent
         provenance task; the task gathers the evidence and forks the window
-        to judge it. The same stage-2 reply scored the offered lenses: the
-        top one (never another exchange's) runs as a second silent task, and the choice is recorded.
+        to judge it. The same stage-2 reply scored the offered lenses: those above
+        "none" (never another exchange's) run together as a second silent
+        task, one fork, and the choice is recorded.
         ``lenses`` and ``past_claims`` are both None when stage 2 missed.
         """
         if not self._eligible(trace_id):
@@ -1618,7 +1637,7 @@ class CritiquePlugin(CorvidaePlugin):
         # problem choosing can't cost the provenance check its turn.
         offered = [name for name, _ in self._offers("idle")]
         missed = lenses is None and past_claims is None
-        lens, sampled, basis = self._choose_lens(
+        chosen, sampled, basis = self._choose_lenses(
             trace_id, channel, lenses if isinstance(lenses, dict) else None,
             offered,
             "stage 2 produced no vector" if missed
@@ -1627,46 +1646,48 @@ class CritiquePlugin(CorvidaePlugin):
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}
-        if lens is not None:
-            selection["lens"] = lens
+        if chosen:
+            selection["lenses"] = chosen
         await self.pm.ahook.on_trace_record(
             trace_id=trace_id, channel_id=channel.id, source="critique",
             origin=None, record={"lens_selection": selection},
         )
-        if lens is not None:
-            await self._enqueue_lens(
-                channel, trace_id, annotations, None, response_text, lens,
+        if chosen:
+            await self._enqueue_lenses(
+                channel, trace_id, annotations, None, response_text, chosen,
                 sampled=sampled)
 
     async def _run_before_send(
-        self, channel, trace_id, text, annotations, lens: str, sampled: bool,
+        self, channel, trace_id, text, annotations, lenses: list[str], sampled: bool,
     ) -> list[str]:
-        """Fork one lens on the draft and return its objection texts; inline.
+        """Fork the lenses once on the draft and return their objection texts; inline.
 
-        Records ``outcomes.critique_before_send = {lens, objections, sampled,
+        Records ``outcomes.critique_before_send = {lenses, objections, sampled,
         detail?}`` under its own key, so the idle run never overwrites it. A
-        lens fork that misses records nothing, as at idle, and returns no
+        fork that misses records nothing, as at idle, and returns no
         objections. The caller refuses the draft on the texts (#1149); nothing
-        is held here.
+        is held here. Each text names the draft it judges (R5.4).
         """
         token = set_attribution(
             stage="critique", channel_id=channel.id, trace_id=trace_id
         )
         try:
-            # A miss was already logged by _fork_lens; nothing is recorded.
-            objs = await self._fork_lens(
-                channel, lens, trace_id, self._originating_text(trace_id, None),
+            # A miss was already logged by _fork_lenses; nothing is recorded.
+            found = await self._fork_lenses(
+                channel, lenses, trace_id, self._originating_text(trace_id, None),
                 text, point="before_send")
-            if objs is None:
+            if not found:
                 return []
-            entry: dict = {"lens": lens, "objections": len(objs), "sampled": sampled}
+            objs = [o for objections in found.values() for o in objections]
+            entry: dict = {"lenses": list(found), "objections": len(objs), "sampled": sampled}
             if objs:
                 entry["detail"] = objs
             await self.pm.ahook.on_trace_record(
                 trace_id=trace_id, channel_id=channel.id, source="critique",
                 origin=None, record={"critique_before_send": entry},
             )
-            return [self._format_objection(o) for o in objs]
+            ref = f"on your draft «{quote(text)}»: "
+            return [self._format_objection(o, ref) for o in objs]
         finally:
             reset_attribution(token)
 
@@ -1764,9 +1785,9 @@ class CritiquePlugin(CorvidaePlugin):
             # Empty runs stay count-only.
             if objections:
                 prov["detail"] = objections
-            outcome = {"provenance": prov}
             await self._record_and_register(
-                channel, trace_id, outcome, objections, wake=True, origin=origin)
+                channel, trace_id, {"provenance": prov}, objections, wake=True,
+                origin=origin, reply_ref=f"on your reply «{quote(response_text)}»: ")
         finally:
             reset_attribution(token)
 
@@ -1878,58 +1899,59 @@ class CritiquePlugin(CorvidaePlugin):
     # The silent task body
     # ------------------------------------------------------------------
 
-    async def _run_critique(
-        self, channel, trace_id, originating_text, response_text, lenses, sampled,
-        *, origin: str | None,
+    async def _run_lenses(
+        self, channel, trace_id, originating_text, response_text, lenses: list[str],
+        sampled: bool, *, origin: str | None,
     ) -> None:
-        """Run each selected built-in lens, record the outcome (nothing
-        when no lens ran), register
-        non-empty verdicts.
+        """Fork the selected lenses once, record what ran, register the findings.
+
+        The built-ins' keys (``lenses``, ...) and each added lens's
+        ``<name>`` entry share one ``{"critique": {...}}`` record;
+        nothing is recorded when no lens
+        ran. Added lenses only wait (``_waking_lenses``); the per-lens wake
+        split is done in ``_record_and_register``.
 
         Attribution is set inside the body (usage rows join to the exchange
         for WP2.10). Empty objections record the outcome and re-enter NOTHING
-        (the silent mode exists for exactly this); see _record_and_register.
+        (the silent mode exists for exactly this).
         """
         token = set_attribution(
             stage="critique", channel_id=channel.id, trace_id=trace_id
         )
         try:
-            # Forks off for the stage skips the whole run once, with no outcome.
-            if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
-                logger.warning(
-                    "critique lenses %s skipped for trace %s on channel %s: %s; "
-                    "no outcome recorded",
-                    lenses, trace_id, channel.id, FORKS_OFF_REASON,
-                    extra={"channel": channel.id, "trace_id": trace_id},
-                )
+            # A miss was already logged by _fork_lenses, per lens.
+            found = await self._fork_lenses(
+                channel, lenses, trace_id, originating_text, response_text,
+                point="idle")
+            if not found:
                 return
-            objections: list[dict] = []
-            ran: list[str] = []
-            for lens in lenses:
-                # A fork of the live window; a lens whose fork misses was
-                # already logged by _fork_lens and is skipped alone.
-                objs = await self._fork_lens(
-                    channel, lens, trace_id, originating_text, response_text,
-                )
-                if objs is None:
+            objections = [o for objs in found.values() for o in objs]
+            # One critique record per run, so a reader keeping the last
+            # record per key loses nothing: the built-ins' keys and each
+            # added lens's entry sit side by side (RESERVED_LENS_NAMES keeps
+            # lens names off the built-ins' keys).
+            crit: dict = {}
+            built_in = [name for name in found if name in BUILTIN_LENSES]
+            if built_in:
+                built_in_objs = [o for name in built_in for o in found[name]]
+                crit.update({
+                    "lenses": built_in,
+                    "objections": len(built_in_objs),
+                    "sampled_below_threshold": sampled,
+                })
+                if built_in_objs:
+                    crit["detail"] = built_in_objs
+            # Each added lens that ran: its own entry, keyed by name.
+            for name, objs in found.items():
+                if name in BUILTIN_LENSES:
                     continue
-                ran.append(lens)
-                objections.extend(objs)
-
-            # Nothing ran: record nothing (like provenance's skip).
-            if not ran:
-                return
-            crit = {
-                "lenses": ran,
-                "objections": len(objections),
-                "sampled_below_threshold": sampled,
-            }
-            if objections:
-                crit["detail"] = objections
-            outcome = {"critique": crit}
+                entry: dict = {"objections": len(objs), "sampled": sampled}
+                if objs:
+                    entry["detail"] = objs
+                crit[name] = entry
             await self._record_and_register(
-                channel, trace_id, outcome, objections, wake=False, origin=origin,
-            )
+                channel, trace_id, {"critique": crit}, objections, wake=False, origin=origin,
+                reply_ref=f"on your reply «{quote(response_text)}»: ")
         finally:
             reset_attribution(token)
 
@@ -1982,15 +2004,18 @@ class CritiquePlugin(CorvidaePlugin):
         return frozenset(waking)
 
     async def _record_and_register(
-        self, channel, trace_id, outcome, objections, *, wake: bool,
-        origin: str | None,
+        self, channel, trace_id, outcome: dict, objections, *, wake: bool,
+        origin: str | None, reply_ref: str,
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
         The outcome is reported on ``on_trace_record`` (source
-        ``critique``) as its own record. Provenance records under its own
-        key, so a reader merging a trace's critique records never loses the
-        stylistic run's ``critique``.
+        ``critique``) as its own record: a lens run's one ``critique``
+        record (the built-ins' keys beside each added lens's entry), or
+        provenance's, under its own key so a reader merging a trace's
+        critique records never loses the lenses' ``critique``. ``reply_ref``
+        prefixes every registered finding so it names the reply (or draft)
+        it judges (PRD Critique 4).
         Non-empty objections re-enter through the held-text store as CONTEXT.
         With ``wake`` (provenance) they register under
         origin="critique" and fire the critique wake stub; without it
@@ -2028,13 +2053,13 @@ class CritiquePlugin(CorvidaePlugin):
             if waking:
                 await held.hold_and_wake(
                     channel, origin="critique", source="critique",
-                    entries=[self._format_objection(o) for o in waking],
+                    entries=[self._format_objection(o, reply_ref) for o in waking],
                     stub_text=self._wake_stub(),
                 )
             if waiting:
                 await held.hold(
                     channel, source="critique",
-                    entries=[self._format_objection(o) for o in waiting],
+                    entries=[self._format_objection(o, reply_ref) for o in waiting],
                 )
         except Exception:
             logger.warning(
@@ -2073,92 +2098,209 @@ class CritiquePlugin(CorvidaePlugin):
             return "the exchange is not in the window"
         return agent
 
-    async def _fork_lens(
-        self, channel, lens, trace_id, originating_text, response_text,
-        point: str = "idle",
-    ) -> list[dict] | None:
-        """One built-in or plugin lens as a fork of the full window; None (a logged
-        skip) on any miss.
+    def _bound(self, key: str) -> Any:
+        """The value of static fork bound ``key`` (``FORK_BOUND_KEYS``).
 
-        The exchange is named by its opening message and the response the
-        user was sent (which can differ from the window's last assistant
-        message, e.g. the max-turns fallback). At ``point`` "before_send"
-        ``response_text`` is the draft instead, quoted whole on one line
-        ("the reply you are about to send, in full"); everything else is
-        shared.
-
-        Containment is checked per lens, after the last await that builds
-        the instruction: an earlier lens's fork is an await, during which
-        the agent loop can compact the exchange out of the window.
-        Agent.fork renders the prompt before its own first await, so the
-        check and the render see the same window.
+        An unset key is its default. A value that failed validation (it can
+        only arrive by config reload, which warns) is replaced by the default
+        here, with a warning naming key and value, so a bad value never
+        reaches ``fork``.
         """
-        # Forks may be switched off between lenses (a config reload).
-        if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
-            self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
-            return None
-        prompt = self._fork_prompts[lens]
-        if point == "before_send":
-            reply = (
-                "the reply you are about to send, in full: "
-                f"«{quote(response_text, len(response_text))}»")
-        else:
-            reply = f"the response you sent began «{quote(response_text)}»"
-        instruction = (
-            f"{prompt}\n\nThe exchange began with the message "
-            f"«{quote(originating_text)}», and {reply}."
+        _key, valid, accepted, default = next(b for b in FORK_BOUND_KEYS if b[0] == key)
+        value = config_value(self.config, key, _UNSET)
+        if value is _UNSET:
+            return default
+        if valid(value):
+            return value
+        logger.warning(
+            "critique: %s %r must be %s; using the default %r - fix agent.yaml",
+            key, value, accepted, default,
         )
+        return default
+
+    async def _wait_quiet(self, agent, channel) -> None:
+        """Return once no user message waits on ``channel`` (polling)."""
+        while agent.waiting_messages().get(channel.id):
+            await asyncio.sleep(YIELD_POLL_SECONDS)
+
+    @staticmethod
+    def _reply_tail(lenses: list[str], cap: int) -> str:
+        """The reply format, appended once per fork: one JSON key per lens.
+
+        With a tool cap above 0 the fork may search first; at 0 it is told
+        not to call tools (and the grammar enforces the format).
+        """
+        keys = ", ".join(
+            f'"{name}": {{"objections": [{{"claim": "...", "objection": "...", '
+            f'"severity": 0.5}}]}}' for name in lenses)
+        lead = (
+            f"You may search with the read-only tools you have, at most {cap} "
+            "calls, before you answer. Then respond with"
+            if cap > 0 else "Do not call tools. Respond with")
+        return (
+            f"{lead} a single JSON object, nothing else, with one key per lens "
+            f"above (an empty objections list is a good answer):\n{{{keys}}}")
+
+    async def _fork_lenses(
+        self, channel, lenses: list[str], trace_id, originating_text, response_text,
+        *, point: str,
+    ) -> dict[str, list[dict]] | None:
+        """The ``lenses`` as ONE fork of the window: lens name -> its objections
+        (lens-tagged) for each lens the reply covered; None (logged skips, one
+        per lens) when the whole fork missed.
+
+        The instruction is one ``## Lens: <name>`` section per lens (each
+        through ``transform_critique_prompt``), the exchange named by its
+        opening message and the response the user was sent (which can differ
+        from the window's last assistant message, e.g. the max-turns
+        fallback), and one reply-format tail. At ``point`` "before_send"
+        ``response_text`` is the draft, quoted whole, the fork calls no tools,
+        never waits and is not cut. At "idle" the fork waits for the channel to
+        be quiet before it renders (it must not render mid-turn), is cut at the
+        reply (I3), may call up to ``critique.max_tool_calls`` read-only tools,
+        pauses between rounds while a user message waits, and misses if the
+        channel compacts meanwhile. ``critique.fork_timeout`` bounds all of it.
+
+        Containment is checked after the last await that builds the
+        instruction; Agent.fork renders the prompt before its own first await,
+        so the check and the render see the same window.
+        """
+        # Forks may be switched off between exchanges (a config reload).
+        agent = fork_agent(self.pm if hasattr(self, "pm") else None, "critique")
+        if agent is None:
+            for lens in lenses:
+                self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
+            return None
+        idle = point == "idle"
+        cap = self._bound("critique.max_tool_calls") if idle else 0
+        timeout = self._bound("critique.fork_timeout")
+        # Set once the pre-render wait is over: tells a deadline that hit
+        # while the channel was still busy from one that hit after it.
+        forking = False
+        try:
+            async with asyncio.timeout(timeout) as deadline:
+                if idle:
+                    await self._wait_quiet(agent, channel)
+                forking = True
+                sections = [await self._lens_section(channel, lens, trace_id) for lens in lenses]
+                if idle:
+                    reply = f"the response you sent began «{quote(response_text)}»"
+                else:
+                    reply = (
+                        "the reply you are about to send, in full: "
+                        f"«{quote(response_text, len(response_text))}»")
+                instruction = (
+                    "\n\n".join(sections)
+                    + f"\n\nThe exchange began with the message "
+                    f"«{quote(originating_text)}», and {reply}.\n\n"
+                    + self._reply_tail(lenses, cap)
+                )
+                # Containment: idle cuts at the reply, before send needs the
+                # exchange in the window; a string is the reason to skip.
+                target = self._provenance_fork(channel, trace_id) if idle else (
+                    self._fork_target(channel, trace_id))
+                if isinstance(target, str):
+                    for lens in lenses:
+                        self._skip_lens(channel, lens, trace_id, target)
+                    return None
+                agent, cut = target if idle else (target, None)
+                epoch = self._compactions.get(channel.id, 0)
+
+                async def stay_quiet() -> None:
+                    """Between rounds: wait out a waiting message, then stop
+                    the fork if the channel compacted since it started."""
+                    await self._wait_quiet(agent, channel)
+                    if self._compactions.get(channel.id, 0) != epoch:
+                        raise _ForkStale
+
+                result = await agent.fork(
+                    channel, instruction, stage="critique", cut=cut,
+                    extra_body=None if cap > 0 else reply_extra_body(lenses),
+                    max_tool_calls=cap,
+                    yield_to_caller=stay_quiet if idle else None)
+                # A compaction during the last request is a miss too.
+                if idle and self._compactions.get(channel.id, 0) != epoch:
+                    raise _ForkStale
+                parsed = _parse_json_block(result.text)
+        except _ForkStale:
+            for lens in lenses:
+                self._skip_lens(
+                    channel, lens, trace_id, "the channel compacted while the fork ran")
+            return None
+        except Exception as exc:
+            # Only the deadline's own expiry is a timeout miss; a TimeoutError
+            # from inside the request is a fork failure like any other.
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                reason = (
+                    f"the fork exceeded critique.fork_timeout ({timeout} s)" if forking
+                    else f"the channel stayed busy past critique.fork_timeout ({timeout} s)")
+                for lens in lenses:
+                    self._skip_lens(channel, lens, trace_id, reason)
+                return None
+            for lens in lenses:
+                self._skip_lens(
+                    channel, lens, trace_id,
+                    f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                    exc_info=True,
+                )
+            return None
+        # Per lens: its key in the reply; a lens the reply left out skips alone.
+        found: dict[str, list[dict]] = {}
+        for lens in lenses:
+            entry = parsed.get(lens)
+            if not isinstance(entry, dict):
+                self._skip_lens(
+                    channel, lens, trace_id, "the fork's reply had no entry for this lens")
+                continue
+            found[lens] = self._objections_from_entry(entry, lens)
+        return found
+
+    async def _lens_section(self, channel, lens: str, trace_id) -> str:
+        """One lens's ``## Lens:`` section of the fork instruction, after
+        ``transform_critique_prompt``; a failing transform leaves the section
+        as built (it must not cost the lenses their fork)."""
+        section = f"## Lens: {lens}\n{self._fork_prompts[lens]}"
         if lens == "retention":
             # The lens has to name a file, so it has to know where they live.
             root = self._retention_root() or ""
-            instruction += (
+            section += (
                 f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
                 "file you name is a path under it."
             )
-        # Plugins may transform the instruction (e.g. append the goal list);
-        # firstresult over the seed, so the result is one string. A failing
-        # transform must not cost the lens its fork.
+        # Plugins may transform the section (e.g. append the goal list);
+        # firstresult over the seed, so the result is one string.
         if self.pm is not None:
             try:
                 transformed = await self.pm.ahook.transform_critique_prompt(
                     channel=channel, trace_id=trace_id,
-                    lens_name=lens, instruction=instruction,
+                    lens_name=lens, instruction=section,
                 )
-                if transformed is not None:
-                    instruction = transformed
+                if isinstance(transformed, str):
+                    section = transformed
+                elif transformed is not None:
+                    # The hook is firstresult, so anything but a string is an
+                    # implementer (or a pm without the spec) breaking its contract.
+                    logger.warning(
+                        'transform_critique_prompt returned %s, not a string, for '
+                        'lens %s on trace %s on channel %s; the fork uses the '
+                        'untransformed section',
+                        type(transformed).__name__, lens, trace_id, channel.id,
+                        extra={'channel': channel.id, 'trace_id': trace_id},
+                    )
             except Exception:
                 logger.warning(
                     'transform_critique_prompt failed for lens %s on trace %s '
-                    'on channel %s; the fork uses the untransformed instruction',
+                    'on channel %s; the fork uses the untransformed section',
                     lens, trace_id, channel.id, exc_info=True,
                     extra={'channel': channel.id, 'trace_id': trace_id},
                 )
-        # Containment check; a string is the reason the lens must skip.
-        agent = self._fork_target(channel, trace_id)
-        if isinstance(agent, str):
-            self._skip_lens(channel, lens, trace_id, agent)
-            return None
-        # Fork and parse; any failure or unusable reply skips this lens.
-        try:
-            result = await agent.fork(
-                channel, instruction, stage="critique", extra_body=OBJECTION_EXTRA_BODY
-            )
-            return self._objections_from_text(result.text, lens)
-        except Exception as exc:
-            self._skip_lens(
-                channel, lens, trace_id,
-                f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                exc_info=True,
-            )
-            return None
+        return section
 
     @staticmethod
-    def _objections_from_text(text: str, lens: str) -> list[dict]:
-        """Parse a lens reply into lens-tagged objections; raises on bad output."""
-        parsed = _parse_json_block(text)
-        objs = parsed.get("objections") or []
+    def _objections_from_entry(entry: dict, lens: str) -> list[dict]:
+        """One lens's reply entry as lens-tagged objections."""
         result: list[dict] = []
-        for o in objs:
+        for o in entry.get("objections") or []:
             if isinstance(o, dict) and (o.get("claim") or o.get("objection")):
                 result.append({**o, "lens": lens})
         return result
@@ -2203,11 +2345,12 @@ class CritiquePlugin(CorvidaePlugin):
         return objections, supported
 
     @staticmethod
-    def _format_objection(o: dict) -> str:
+    def _format_objection(o: dict, reply_ref: str) -> str:
+        """One finding as held text, led by ``reply_ref`` (the reply or draft it judges)."""
         claim = o.get("claim", "").strip()
         objection = o.get("objection", "").strip()
         lens = o.get("lens", "critique")
-        head = f"[{lens}] " if lens else ""
+        head = f"{reply_ref}[{lens}] " if lens else reply_ref
         line = f"{head}{claim} — {objection}" if claim and objection else f"{head}{claim or objection}"
         # The retention lens says where the fact goes; without these the
         # agent would have to guess (#742).

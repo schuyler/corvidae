@@ -812,8 +812,10 @@ What bounds it:
   text, raises `ForkRefused`.
 
 **Read-only tool calls in a fork (#1190).** A caller can let a fork make up
-to `max_tool_calls` calls, and critique is meant to be that caller, after
-the exchange. The fork dispatches only tools whose registering plugin sets
+to `max_tool_calls` calls. Critique's after-the-exchange lens fork is that
+caller: it passes `critique.max_tool_calls` (default 3; static config, so the
+agent can't raise it) and runs under `critique.fork_timeout` (default 120 s,
+wall clock). The before-send fork and provenance pass none. The fork dispatches only tools whose registering plugin sets
 `reads_only = True`: tools that change no stored state, access statistics
 included, and send nothing anywhere but the operator's configured model
 providers. In this tree that is `search_memory` and `search_transcripts`.

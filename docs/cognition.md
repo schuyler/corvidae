@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | The admission policy for held text: dedupes it against the window, budgets it per source and drops it past a TTL (the kernel's `held` store frames and appends it); gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Appraises each exchange once the agent has answered, in a fork of the window: the reply's claims about the past and the critique vector |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; every lens chosen for an exchange runs in one fork of the window, which is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
 | `TracePlugin` | `trace` | The protocol plugin that owns `on_trace_record` and `resolve_trace_origin`, the hooks the reporting plugins fire; warns at startup when nothing records what they report |
 | `OutcomeLogPlugin` | `outcome_log` | Appends every trace record to `<session db stem>.outcomes.jsonl` beside the session database |
@@ -2125,7 +2125,7 @@ and the lenses it added before the raise are kept.
 | Field | Meaning |
 |---|---|
 | `name` | Matches `^[a-z][a-z0-9_]*$`; it names the lens's config keys and its outcome entry |
-| `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.lens.<name>.fork_prompt` replaces the brief (static config, reloaded like the built-ins' prompts) |
+| `fork_prompt` | The brief only. Critique appends the reply format (one JSON key per lens in the fork), so it is critique's, not the author's. `critique.lens.<name>.fork_prompt` replaces the brief (static config, reloaded like the built-ins' prompts) |
 | `appraisal_question` | One non-empty line the appraisal fork answers to score this lens against the others and "none" (see below). `critique.lens.<name>.appraisal_question` replaces it (static config) |
 | `before_send` | Default `False`. `True` also offers the lens on a draft before it is sent (see below); `False` keeps it to the after-the-exchange point. Must be a bool |
 | `wakes` | Default `False`. `True` makes the lens's non-empty objections wake the channel (PRD §3.7 Critique 4); `False` queues them as CONTEXT for the next turn |
@@ -2154,8 +2154,9 @@ vector, not by a rule the lens carries.
 
 ### How a lens is chosen: the critique vector (#1078)
 
-At most one built-in or plugin lens runs at each of two points per
+Every built-in or plugin lens that beats "none" runs at each of two points per
 exchange: before the reply is sent, on the draft, and after the exchange.
+The lenses selected at a point run together in one fork (below).
 The built-ins (`predictive`, `constrained`, `adversarial`, `retention` while a
 knowledge base root is known, and `proactivity` while
 `critique.lens.proactivity.enabled`) and every added lens are *offered* to
@@ -2199,10 +2200,11 @@ wake the channel; the other built-ins wait.
   `on_appraisal_idle` (the before-send vector reaches it through
   `on_appraisal_before_send` and is not stored by appraisal).
 - **The choice.** In `on_appraisal_idle`, after the provenance check, and
-  in `on_appraisal_before_send` on the draft's scores, critique takes the highest share over the offered lenses and `none` from
-  *this* exchange's vector, never another exchange's. `none` wins any tie it is part of; among lenses the earliest
-  in offer order wins. A winner no longer offered (a reload changed the
-  offer in between) counts as `none`, with a warning. No usable vector also
+  in `on_appraisal_before_send` on the draft's scores, critique selects, from
+  *this* exchange's vector (never another exchange's), every offered lens
+  whose share is higher than `none`'s, in offer order. `none` wins any tie it is part of. A lens that
+  beat `none` but is no longer offered (a reload changed the
+  offer in between) is dropped, with a warning. No usable vector also
   counts as `none`: when the scoring produced nothing, a warning names the
   trace (before send with appraisal loaded, that warning is appraisal's own
   skip warning and critique does not warn again; with forks off on the
@@ -2226,7 +2228,7 @@ wake the channel; the other built-ins wait.
   trace is not judged afterwards. The provenance check never runs here; it
   runs after the exchange only. Critique's own `should_send_response` keeps
   the `NO_REPLY` veto and nothing else when appraisal is registered. Its
-  `before_send` record (`critique_before_send`) is written as before.
+  `before_send` record (`critique_before_send`) carries `lenses`, a list, where it carried `lens`; one fork covers all the selected lenses, with no tools. Its objections open with `on your draft «…»: `.
 - **No appraisal plugin.** Critique asks `pm.has_plugin("appraisal")` once,
   at `on_start`. Without it there is no vector to read, so one INFO line at
   startup names the fallback, and at each point (before send, on a final
@@ -2244,8 +2246,8 @@ wake the channel; the other built-ins wait.
   (`on_trace_record`, `source: critique`; `lens_selection_before_send` for the
   before-send point, and `critique_before_send` for the run's outcome)
   whether or not a lens runs, so a `none` is countable:
-  `{"lens": "<name>", "sampled": false, "basis": "vector"}`. `lens` is
-  omitted when nothing ran. `basis` is `"vector"` when a lens won the vector,
+  `{"lenses": ["<name>", ...], "sampled": false, "basis": "vector"}`. `lenses` is
+  omitted when nothing was selected (it was `lens`, a single name, before #1190). `basis` is `"vector"` when a lens won the vector,
   `"none"` when the vector was usable and `none` won (also after a sampled
   draw), and `"no_vector"` when there was no usable vector.
 
@@ -2253,7 +2255,7 @@ Two consequences. With appraisal loaded, the stylistic lenses start after
 stage 2 lands (or on the draft's scores), not at `on_agent_response`, so a stage-2 miss (forks off, the exchange left the
 window, an unusable reply) also costs the exchange its lens: fork misses
 are more likely to skip a lens than before. And planning and alignment no
-longer have a 10% rate of their own: they run when their question wins, plus
+longer have a 10% rate of their own: they run when their share beats "none"'s, plus
 their share of the `sample_below_rate` draw.
 
 **Writing a question.** One line, phrased about the exchange the fork just
@@ -2265,24 +2267,55 @@ same. Questions compete, so a lens whose question is broader than its brief
 steals exchanges from the others. Reword the question, not a threshold, to
 tune how often a lens runs.
 
-**Running and delivery.** When a plugin lens is chosen, critique enqueues
-one silent `critique:lenses` task (a built-in lens runs through its own
-`critique` task). Each lens is a fork of the live window
-with the containment check, exactly as a stylistic lens: forks off, or the
-exchange gone from the window, skips it with the stylistic lenses' warning
-and records nothing. A lens that ran reports, in a critique record,
+**Running and delivery.** After the exchange, critique enqueues one silent
+`critique` task for all the lenses chosen, built-in and added. It makes one
+fork of the live window with the containment check: forks off, or the
+exchange gone from the window, skips every lens with a warning naming it
+and records nothing.
+
+**The shared fork (#1190).** The instruction is one `## Lens: <name>` section
+per selected lens, the quote of the exchange, and one reply format that asks for
+a single JSON object with one key per lens (`{"<lens>": {"objections": [...]}}`).
+A lens whose key is missing from the reply, or is not an object, is skipped
+alone, with a warning; an unparseable reply skips them all. Each lens keeps
+its own wake setting; their outcomes share one `critique` record (below). Before send,
+the fork makes no tool calls and does not wait. After the exchange:
+
+- It waits before it renders, and again before each request that follows a tool
+  round, while a user message waits on the channel (polled once a second), so it
+  never takes the model from a turn in flight.
+- It sees the window cut at the reply, not later turns that landed while it
+  waited (PRD §3.8). A reply that was not recorded or not persisted is a miss,
+  as for provenance, which is newly true of the lenses: they used to run. A
+  compaction since the reply, or during the fork, is a miss too.
+- It may call read-only tools, up to `critique.max_tool_calls` (default 3), then
+  must answer. With tools allowed the fork sends no `response_format`, so the
+  reply is parsed from text; with none it does.
+- `critique.fork_timeout` (default 120 s) bounds the whole fork, wall clock,
+  pauses included. Past it, or a channel busy past it before the fork starts,
+  every lens is skipped with a warning naming lens, channel and trace; nothing is
+  recorded. The provenance fork has no deadline.
+
+A lens that ran reports, in a critique record,
 
 ```json
 {"critique": {"<name>": {"objections": 1, "sampled": false, "detail": [...]}}}
 ```
 
-(`detail` only when there are objections), merged beside the stylistic
-run's keys. Its objections, tagged `[<name>]`, re-enter through
+(`detail` only when there are objections), in the same `critique`
+record as the built-in lenses' keys (`"lenses": [...], "objections": n, ...`)
+when both ran in one fork: one record per run, so OutcomeLogPlugin's last-line-per-key rule
+loses nothing.
+Its objections, tagged `[<name>]`, re-enter through
 `held.hold` as framed CONTEXT at the channel's next turn and wake
 nothing, unless the lens declares `wakes=True` (PRD §3.7 Critique 4): a
 waking lens's objections re-enter at the turn its stub triggers, under the
 same silence default as provenance's, and still wake nothing on a
-critique-origin turn. Redaction doesn't reach
+critique-origin turn. Each finding names the reply it judges: it opens
+`on your reply «<start of the reply>»: ` (`on your draft «<start of the draft>»: ` for a
+before-send finding, since the reply may be sent by the time it lands), so
+the agent can tell which of its replies a late finding is about (PRD §3.7
+Critique 4). Redaction doesn't reach
 `critique.<name>.detail` yet; redaction is on hold (#1005).
 
 ### CritiquePlugin: lens context from other plugins (`transform_critique_prompt`)
@@ -2292,11 +2325,14 @@ lens needs the open goal list) adds it per fork through
 `transform_critique_prompt(channel, trace_id, lens_name, instruction) -> str`,
 which CritiquePlugin owns and declares in its `hookspecs` (#1067).
 
-It fires once per lens fork in `_fork_lens`: for every built-in lens
-(proactivity included, #1126) and every added lens, but not provenance,
-which builds its own fork. It runs after the instruction is assembled (the
-brief with critique's JSON tail, the exchange quote, and retention's
-knowledge base root) and before the containment check, so a slow
+It fires once per lens in `_fork_lenses`, on that lens's section of the fork
+instruction: for every built-in lens (proactivity included, #1126) and every
+added lens, but not provenance, which builds its own fork. The lenses at a
+point share one fork (#1190), so the instruction is one `## Lens: <name>`
+section per lens, then the exchange quote, then one reply format. The hook
+receives the section (its heading, the brief, and retention's knowledge base
+root) and not the quote or the reply format, so an implementer returns a
+section, not a whole prompt. It runs before the containment check, so a slow
 implementer can't let the exchange leave the window unnoticed.
 
 Resolution is `firstresult` over a trylast seed, CritiquePlugin's own
@@ -2307,12 +2343,13 @@ implementers answer only for their own prefix; the order pluggy calls them
 in then can't change the result. A plain implementer may await.
 `@hookimpl(wrapper=True)` implementers compose around the result, LIFO, but
 apluggy wrappers are sync generators and can't await. Return the
-instruction with your text appended rather than rewritten: the brief's
-reply format is critique's parsing contract.
+section with your text appended rather than rewritten. A result that is
+not a string is ignored, with a warning naming the lens, trace and channel,
+and the fork uses the untransformed section.
 
 An implementer that raises is logged at WARNING naming the lens, the trace
-and the channel, with the traceback, and the lens forks with the
-untransformed instruction.
+and the channel, with the traceback, and the lens's section stays
+untransformed.
 
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 

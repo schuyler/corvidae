@@ -372,3 +372,73 @@ async def test_fork_tool_calls_fire_no_hooks_and_are_attributed(keyed_agent, cap
     assert (rec.stage, rec.channel, rec.trace_id, rec.tool) == (
         "consolidation", channel.id, "trace-a7", "lookup",
     )
+
+
+# yield_to_caller (#1190 PR 2) ------------------------------------------------
+
+
+async def test_yield_to_caller_runs_between_rounds_not_before_the_first_request(keyed_agent):
+    """The callback is awaited after each round's tool results and before the
+    next model request; never before the first request, and not after the
+    final reply."""
+    plugin, channel, client = keyed_agent
+    lookup, writer = _make_tools([])
+    _install_tools(plugin, lookup=lookup, writer=writer)
+    seen = _script(client, [
+        _call_reply(_make_tool_call("c1", "lookup", {})),
+        _call_reply(_make_tool_call("c2", "lookup", {})),
+        _make_text_response("verdict"),
+    ])
+    # How many requests had been sent each time the callback ran.
+    sent_at_yield: list[int] = []
+
+    async def pause() -> None:
+        sent_at_yield.append(len(seen))
+
+    result = await plugin.fork(
+        channel, INSTRUCTION, stage="consolidation", max_tool_calls=2,
+        yield_to_caller=pause)
+
+    assert result.text == "verdict"
+    # After request 1 and after request 2; not at 0 (before the first), not 3.
+    assert sent_at_yield == [1, 2]
+
+
+async def test_yield_to_caller_is_not_awaited_by_a_fork_without_tool_rounds(keyed_agent):
+    """A fork that answers at once has no round boundary, so the callback never runs."""
+    plugin, channel, client = keyed_agent
+    _script(client, [_make_text_response("verdict")])
+    calls: list[int] = []
+
+    async def pause() -> None:
+        calls.append(1)
+
+    await plugin.fork(
+        channel, INSTRUCTION, stage="consolidation", max_tool_calls=2,
+        yield_to_caller=pause)
+    assert calls == []
+
+
+async def test_exception_from_yield_to_caller_propagates_out_of_fork(keyed_agent, caplog):
+    """An exception from the callback ends the fork: it propagates, no further
+    request is sent, and the stage's "stage done" line says ok=False."""
+    plugin, channel, client = keyed_agent
+    lookup, writer = _make_tools([])
+    _install_tools(plugin, lookup=lookup, writer=writer)
+    seen = _script(client, [
+        _call_reply(_make_tool_call("c1", "lookup", {})),
+        _make_text_response("never sent"),
+    ])
+
+    async def stale() -> None:
+        raise RuntimeError("channel went stale")
+
+    with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+        with pytest.raises(RuntimeError, match="channel went stale"):
+            await plugin.fork(
+                channel, INSTRUCTION, stage="consolidation", max_tool_calls=2,
+                yield_to_caller=stale)
+
+    assert len(seen) == 1
+    [done] = [r for r in caplog.records if r.getMessage() == "stage done"]
+    assert done.ok is False
