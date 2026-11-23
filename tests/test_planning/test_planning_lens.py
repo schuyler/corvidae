@@ -208,7 +208,9 @@ class TestGoalsImplementsTheHook:
         orphan: DEBUG, not WARNING, because goals lists corvidae_planning
         in optional_depends_on."""
         install_plugin_hookspecs(goals.pm)
-        with caplog.at_level(logging.DEBUG):
+        # Name the logger: a test that configured logging earlier in the run
+        # can leave "corvidae" at INFO, which a root-only level would not lift.
+        with caplog.at_level(logging.DEBUG, logger="corvidae.plugin_manager"):
             report_orphan_hookimpls(goals.pm)
         about_hook = [r for r in caplog.records if HOOK in r.getMessage()]
         assert [r.levelno for r in about_hook] == [logging.DEBUG]

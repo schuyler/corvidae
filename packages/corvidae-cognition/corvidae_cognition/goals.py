@@ -317,10 +317,11 @@ class GoalsPlugin(CorvidaePlugin):
         )
 
     async def open_goals(self) -> list[dict]:
-        """Open goals (not retired), front of the queue first. For the heartbeat's review.
+        """Open goals (not retired), front of the queue first. For the heartbeat's
+        review and the planning lens (resolve_corvidae_planning_goals).
 
-        Each is {"id", "age_seconds", "summary"}: the goal's id, age
-        since creation on the kernel clock, and its text.
+        Each is {"id", "age_seconds", "summary", "status"}: the goal's id,
+        age since creation on the kernel clock, its text and its status.
         """
         db = await self._require_db()
         now = self._now()

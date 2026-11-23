@@ -32,7 +32,7 @@ GUIDE = 'docs/plugin-guide.md, "Plugin boundaries"'
 # The name recorded for a call whose first argument is not a string literal.
 DYNAMIC = "<dynamic>"
 
-# The calls that predate the rule: file (relative to the repo) -> plugin name
+# The calls that predated the rule (empty since #1181): file (relative to the repo) -> plugin name
 # -> (how many calls, the issue that removes them). Lower a count, or delete
 # the entry, in the change that removes a call.
 ALLOWED: dict[str, dict[str, tuple[int, str]]] = {}

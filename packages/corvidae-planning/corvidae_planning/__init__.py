@@ -85,7 +85,8 @@ class PlanningLensPlugin(CorvidaePlugin):
         if not self.pm.has_plugin("goals"):
             logger.info(
                 "planning lens: no goals plugin loaded, so planning forks "
-                "run without the goal list",
+                "run without the goal list; enable goals to list them, or "
+                "list corvidae_planning under plugins.disabled",
             )
 
     @hookimpl

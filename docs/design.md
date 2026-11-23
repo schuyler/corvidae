@@ -5117,16 +5117,23 @@ held-text store like any added lens's. The agent decides whether to act; the len
 changes no goal.
 
 Its `transform_critique_prompt` implementation appends the open goal list
-(`GoalsPlugin.open_goals()`) to the planning fork's instruction, one
+to the planning fork's instruction, one
 `#<id>: «<text>»` line per goal, with each text flattened to one line and
 capped by `corvidae.fork.quote`, or a line saying the list is empty. It
-answers only for `planning`. If the list can't be read, it logs a WARNING
-naming the trace and the channel and the fork runs without it.
+answers only for `planning`. It asks for the list through a hook it owns
+(#1181), `resolve_corvidae_planning_goals() -> list[dict] | None`
+(`PlanningSpec`), which goals implements by returning `open_goals()`. Each
+dict has at least `id` and `summary`; an empty list means goals answered
+and none are open, and `None` means no goals plugin answered. Planning never
+looks goals up. If the goals implementation raises, planning logs a WARNING
+naming the trace and the channel and the fork runs without the list.
 
 The plugin declares `optional_depends_on = {"critique", "goals"}`, so a
 config that disables either still starts: without critique its hookimpls
 are reported at `DEBUG` and nothing runs; without goals the fork runs
-without the list and each planning fork logs a WARNING saying so. Install the
+without the list, and planning's `on_start` logs one INFO line saying so.
+Goals lists `corvidae_planning` in its own `optional_depends_on`, so with
+planning absent its implementation of the hook is reported at `DEBUG`. Install the
 planning extra to load it, list `corvidae_planning` under
 `plugins.disabled` to switch it off, and override the brief with
 `critique.lens.planning.fork_prompt`.
