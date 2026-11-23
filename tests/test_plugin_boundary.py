@@ -38,10 +38,8 @@ DYNAMIC = "<dynamic>"
 ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
     "packages/corvidae-cognition/corvidae_cognition/critique.py": {
         "appraisal": (2, "#1169"),
-        "funnel": (1, "#1176"),
     },
     "packages/corvidae-cognition/corvidae_cognition/memory.py": {
-        "funnel": (1, "#1176"),
     },
     "packages/corvidae-planning/corvidae_planning/__init__.py": {
         "goals": (1, "#1181"),
