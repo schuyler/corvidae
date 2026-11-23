@@ -178,3 +178,62 @@ async def test_evict_drops_text_and_never_a_row(log):
     row = await _row(log, fork_ids[0])
     assert row["label"] == "declined"
     assert row["prompt_sha256"] == prompt_sha256(MESSAGES)
+
+
+async def _record_with(log, digests, *, parent=None, chain_from=0, channel="discord:1"):
+    return await log.record(
+        stage="appraisal",
+        channel_id=channel,
+        messages=MESSAGES,
+        digests=digests,
+        chain_parent=parent,
+        chain_from=chain_from,
+    )
+
+
+async def test_a_chain_resolves_to_the_full_block_list(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    a, b, c = digest_of("a"), digest_of("b"), digest_of("c")
+    first = await _record_with(log, [a, b])
+    second = await _record_with(log, [c], parent=first, chain_from=2)
+
+    assert await log.resolve_chain(first) == [a, b]
+    assert await log.resolve_chain(second) == [a, b, c]
+
+
+async def test_a_window_reset_starts_a_new_chain(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    a, d = digest_of("a"), digest_of("d")
+    first = await _record_with(log, [a])
+    after_compaction = await _record_with(log, [d])
+    later = await _record_with(
+        log, [digest_of("e")], parent=after_compaction, chain_from=1
+    )
+
+    assert await log.resolve_chain(after_compaction) == [d]
+    assert await log.resolve_chain(later) == [d, digest_of("e")]
+    assert await log.resolve_chain(first) == [a]
+
+
+async def test_a_evicted_ancestor_makes_its_descendants_unreconstructable(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    a = digest_of("a")
+    first = await _record_with(log, [a])
+    second = await _record_with(log, [digest_of("b")], parent=first, chain_from=1)
+    await log.mark_unreconstructable([first])
+
+    assert await log.resolve_chain(second) is None
+    assert await log.resolve_chain(first) is None
+
+
+async def test_a_length_mismatch_is_not_papered_over(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _record_with(log, [digest_of("a")])
+    broken = await _record_with(
+        log, [digest_of("b")], parent=first, chain_from=7
+    )
+    assert await log.resolve_chain(broken) is None
