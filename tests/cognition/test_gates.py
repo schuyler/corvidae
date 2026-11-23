@@ -29,7 +29,7 @@ from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
+from helpers import add_kernel_registry, build_plugin_and_channel, drain, drain_task_queue, sent_texts
 from tests.cognition.trace_helpers import TraceRecorder, add_trace
 from llm_response_fixtures import (
     _make_mixed_response,
@@ -411,6 +411,9 @@ class TestOrigin:
             await init_db(db)
             gate, _log, channel = await _gate()
             pm = gate.pm
+            # outcome_log resolves the kernel registry (#1180) and records
+            # only for channels it holds, so the registry holds this one.
+            add_kernel_registry(pm).channels[channel.id] = channel
             # A real outcome_log on a file DB admits "old"; gates never saw it.
             persistence = PersistencePlugin()
             persistence.db = db

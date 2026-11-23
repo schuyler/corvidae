@@ -31,8 +31,12 @@ async def goals(tmp_path):
     db = await aiosqlite.connect(str(tmp_path / "goals.db"))
     await db.execute(GOALS_DDL)
     await db.commit()
-    pm = Mock()
-    pm.get_plugin.return_value.now.return_value = 1000.0
+    # A real plugin manager: goals resolves "clock" with get_dependency (#1180).
+    from corvidae.hooks import create_plugin_manager
+    from fake_clock import install_kernel_clock
+
+    pm = create_plugin_manager()
+    install_kernel_clock(pm, start=1000.0)
     plugin = GoalsPlugin(pm=pm)
     plugin._require_db = AsyncMock(return_value=db)
     plugin.db = db

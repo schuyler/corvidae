@@ -42,7 +42,7 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
 from tests.cognition.trace_helpers import TraceRecorder
-from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
+from helpers import add_kernel_registry, CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 
 EMPTY_VERDICT = json.dumps({"objections": []})
@@ -157,6 +157,8 @@ async def build_critique(
     await init_db(db)
 
     pm = create_plugin_manager()
+    # outcome_log resolves the kernel registry with get_dependency (#1180).
+    add_kernel_registry(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
