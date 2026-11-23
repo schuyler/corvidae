@@ -37,6 +37,20 @@ def _no_exit_watchdog_in_process(monkeypatch):
     monkeypatch.setattr(corvidae.runtime, "arm_exit_watchdog", lambda timeout: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_locale_adoption_in_process(monkeypatch):
+    """Never adopt the developer's locale inside the pytest process.
+
+    ``run_daemon`` adopts LC_TIME, and the acp CLI tests reach it in-process;
+    a developer's LANG would then leak into every later test's date strings.
+    ``adopt_system_locale`` is unit-tested through ``corvidae.system_locale``,
+    which this does not patch.
+    """
+    import corvidae.runtime
+
+    monkeypatch.setattr(corvidae.runtime, "adopt_system_locale", lambda: None)
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-eval", action="store_true", default=False,

@@ -28,8 +28,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import sqlite3
+import unicodedata
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from importlib.metadata import entry_points
@@ -117,10 +117,37 @@ def _extract_sample_token(text: bytes | str) -> str | None:
             return None
     if not isinstance(content, str):
         return None
-    # Find words of 4+ alpha characters; skip tombstone text
-    words = [w for w in re.findall(r"[a-zA-Z]{4,}", content)
-             if w.lower() not in {"redacted", "operator", "that", "this", "with"}]
-    return words[0] if words else None
+    # The first term (a run of letters, marks and numbers) of 3+ characters
+    # that holds a letter and is not part of the tombstone text: 3 is the
+    # shortest term a trigram index can match, and a MATCH is a substring
+    # match, so a sample inside the tombstone would always report a false hit.
+    tombstone = _MEMORY_TOMBSTONE.casefold()
+    for run in _term_runs(content):
+        term = "".join(run)
+        if (len(term) >= 3
+                and any(unicodedata.category(c).startswith("L") for c in term)
+                and term.casefold() not in tombstone):
+            return term
+    return None
+
+
+def _term_runs(text: str) -> list[list[str]]:
+    """Maximal runs of characters whose Unicode category is L*, M* or N*.
+
+    Duplicated from the cognition search-term split because the kernel may
+    not import corvidae_cognition.
+    """
+    runs: list[list[str]] = []
+    current: list[str] = []
+    for ch in text:
+        if unicodedata.category(ch)[0] in "LMN":
+            current.append(ch)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return runs
 
 
 async def _verify_fts_clean(

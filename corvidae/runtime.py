@@ -52,6 +52,7 @@ from corvidae.shutdown import (
     parse_shutdown_timeouts,
 )
 from corvidae.spill import NotificationSpill
+from corvidae.system_locale import adopt_system_locale
 from corvidae.tool_collection import (
     parse_max_agent_depth,
     parse_read_file_window_fraction,
@@ -583,6 +584,9 @@ def run_daemon(runtime: Runtime) -> None:
     The single entry-point helper for serve, cli and acp, so none of them can
     hang on a leaked non-daemon thread after shutdown.
     """
+    # Adopt LC_TIME before asyncio.run starts any thread (setlocale is not
+    # thread-safe), so dates and the web region follow the system locale.
+    adopt_system_locale()
     # Arming happens inside the coroutine so it also covers asyncio.run's
     # up-to-300 s default-executor join.
     asyncio.run(runtime.run(exit_watchdog=True))

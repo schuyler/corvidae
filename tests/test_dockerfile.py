@@ -180,7 +180,7 @@ def test_runtime_installs_the_locales_package(runtime):
     """The locale definitions come from the `locales` package, installed
     without recommends as the file's other apt steps do."""
     runs = " ".join(_instructions(runtime, "RUN"))
-    assert re.search(r"apt-get install[^&;]*--no-install-recommends[^&;]*\blocales\b", runs), runs
+    assert re.search(r"apt-get[^&;]*--no-install-recommends[^&;]*\blocales\b", runs), runs
 
 
 def test_runtime_compiles_the_named_locale_with_localedef(runtime):

@@ -70,6 +70,19 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash corvidae \
     && mkdir /data \
     && chown corvidae:corvidae /data
 
+# Locale for dates and the web-search region (#1186). `docker build
+# --build-arg LOCALE=de_DE.UTF-8 .` compiles that locale (use the ll_CC.UTF-8
+# spelling); the default C.UTF-8 keeps English-named dates and no region. The
+# argument is LOCALE, not LANG: the base image's ENV LANG would shadow an ARG LANG.
+ARG LOCALE=C.UTF-8
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && if [ "$LOCALE" != "C.UTF-8" ]; then \
+         localedef -i "${LOCALE%%.*}" -f "${LOCALE#*.}" "$LOCALE"; \
+       fi
+ENV LANG=$LOCALE
+
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/tiktoken-cache /app/tiktoken-cache
 

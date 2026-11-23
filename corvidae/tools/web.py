@@ -7,6 +7,8 @@ import asyncio
 import aiohttp
 from ddgs import DDGS
 
+from corvidae.system_locale import web_region
+
 # Appended to response text when it exceeds max_response_bytes.
 TRUNCATION_INDICATOR = "[truncated]"
 # Error string returned when the HTTP request exceeds the configured timeout.
@@ -109,7 +111,7 @@ async def web_search(query: str, max_results: int | None = _SEARCH_MAX) -> str:
     def _do_search():
         results = []
         with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=max_results):
+            for r in ddgs.text(query, region=web_region(), max_results=max_results):
                 title = r.get("title", "")
                 url = r.get("href", "")
                 snippet = r.get("body", "")
