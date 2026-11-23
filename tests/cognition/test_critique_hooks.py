@@ -24,12 +24,9 @@ nothing on it.
 
 import json
 import logging
-import re
-from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-
 from tests.cognition.test_critique import (
     FixedRng,
     _fire,
