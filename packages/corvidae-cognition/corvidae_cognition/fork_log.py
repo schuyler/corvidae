@@ -551,3 +551,85 @@ class ForkLog:
         await db.execute("DELETE FROM fork_block WHERE sha256 = ?", (sha,))
         await db.commit()
         return len(row["text"])
+
+
+class ForkRecorder:
+    """A plugin's view of the fork log: one connection, per-channel chains.
+
+    The chaining state is per recorder because a chain only extends within one
+    conversation; the failure counter is here so a caller can escalate.
+    """
+
+    def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
+        self.log = ForkLog(db_path, sample_every=sample_every)
+        self._last: dict[str, tuple[int, list[bytes]]] = {}
+
+    @property
+    def write_failures(self) -> int:
+        return self.log.write_failures
+
+    async def close(self) -> None:
+        await self.log.close()
+
+    async def record(
+        self,
+        *,
+        channel,
+        stage: str,
+        point: str | None,
+        blocks: list[dict],
+        lens_id: str | None = None,
+        instruction: str,
+        trace_id: str | None = None,
+        result=None,
+        question: str | None = None,
+        findings: list[dict] | None = None,
+    ) -> int | None:
+        """Record one fork; returns the row id, or None when nothing was written.
+
+        Never raises: a corpus hole must not change what the fork returned.
+        """
+        if not blocks:
+            return None
+        try:
+            own = [digest_of(b) for b in blocks]
+            parent_id, parent_blocks = self._last.get(channel.id, (0, []))
+            shared = 0
+            while (
+                shared < len(parent_blocks)
+                and shared < len(own)
+                and parent_blocks[shared] == own[shared]
+            ):
+                shared += 1
+            chained = bool(parent_blocks) and shared == len(parent_blocks)
+            conv = getattr(channel, "conversation", None)
+            fork_id = await self.log.record(
+                stage=stage,
+                point=point,
+                channel_id=channel.id,
+                messages=blocks,
+                digests=own,
+                chain_parent=parent_id if chained else None,
+                chain_from=shared if chained else 0,
+                instruction=instruction,
+                lens_id=lens_id,
+                question=question,
+                findings=findings,
+                verdict=getattr(result, "text", None),
+                trace_id=trace_id,
+                prompt_tokens=getattr(result, "prompt_tokens", None),
+                completion_tokens=getattr(result, "completion_tokens", None),
+                system_prompt=getattr(conv, "system_prompt", None),
+            )
+            self._last[channel.id] = (fork_id, own)
+            return fork_id
+        except Exception:
+            self.log.write_failures += 1
+            logger.log(
+                logging.ERROR if self.log.write_failures == 1 else logging.WARNING,
+                "fork_log: could not record a %s fork for %s, %s write failure(s)"
+                " so far (#1204)",
+                stage, getattr(channel, "id", "?"), self.log.write_failures,
+                exc_info=True,
+            )
+            return None

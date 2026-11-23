@@ -447,8 +447,8 @@ async def test_a_failed_capture_logs_an_error_and_counts_it(tmp_path, caplog):
         async def boom(**kwargs):
             raise RuntimeError("disk full")
 
-        env.appraisal._fork_log.record = boom
-        with caplog.at_level(logging.ERROR, logger="corvidae.appraisal"):
+        env.appraisal._fork_log.log.record = boom
+        with caplog.at_level(logging.ERROR, logger="corvidae.fork_log"):
             result = await _send(env, "a reply")
         assert result is None, "a capture failure must not hold or alter the send"
         assert env.appraisal._fork_log.write_failures == 1

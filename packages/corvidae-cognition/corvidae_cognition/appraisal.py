@@ -31,7 +31,7 @@ import math
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
-from corvidae_cognition.fork_log import ForkLog, digest_of
+from corvidae_cognition.fork_log import ForkRecorder
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
@@ -499,8 +499,7 @@ class AppraisalPlugin(CorvidaePlugin):
         self._before_send_prompt = resolve_prompt(
             config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
         )
-        self._last_fork: dict[str, tuple[int, list[bytes]]] = {}
-        self._fork_log = ForkLog(
+        self._fork_log = ForkRecorder(
             config.get("daemon", {}).get("session_db", "sessions.db"),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
         )
@@ -511,72 +510,16 @@ class AppraisalPlugin(CorvidaePlugin):
         if log is not None:
             await log.close()
 
-    async def _record_fork(
-        self,
-        *,
-        channel,
-        stage: str,
-        point: str | None = None,
-        blocks: list[dict],
-        instruction: str,
-        trace_id: str | None,
-        result,
-        question: str | None = None,
-        findings: list[dict] | None = None,
-    ) -> None:
-        """Record one fork for #1204; never let a logging failure break it.
+    async def _record_fork(self, **kwargs) -> None:
+        """Record one fork for #1204; the recorder never raises.
 
         ``blocks`` is the window the fork rendered. v1 hashes the window, not
         the fully rendered request: the tool schemas and the mid-conversation
         role are applied inside ``agent.fork`` and are not part of this hash.
         """
         log = getattr(self, "_fork_log", None)
-        if log is None or not blocks:
-            return
-        try:
-            blocks_in = [digest_of(b) for b in blocks]
-            # Chain off the previous fork in this channel when the window only
-            # grew: store the appended tail, not the whole array again.
-            parent_id, parent_blocks = self._last_fork.get(channel.id, (0, []))
-            shared = 0
-            if parent_blocks:
-                while (
-                    shared < len(parent_blocks)
-                    and shared < len(blocks_in)
-                    and parent_blocks[shared] == blocks_in[shared]
-                ):
-                    shared += 1
-            chained = parent_blocks and shared == len(parent_blocks)
-            fork_id = await log.record(
-                stage=stage,
-                point=point,
-                channel_id=channel.id,
-                messages=blocks,
-                digests=blocks_in,
-                chain_parent=parent_id if chained else None,
-                chain_from=shared if chained else 0,
-                system_prompt=getattr(
-                    getattr(channel, "conversation", None), "system_prompt", None
-                ),
-                instruction=instruction,
-                question=question,
-                findings=findings,
-                verdict=getattr(result, "text", None),
-                trace_id=trace_id,
-                prompt_tokens=getattr(result, "prompt_tokens", None),
-                completion_tokens=getattr(result, "completion_tokens", None),
-            )
-            self._last_fork[channel.id] = (fork_id, blocks_in)
-        except Exception:
-            log.write_failures += 1
-            # A corpus that stopped growing is a hole in every later query, so
-            # the first failure on a channel is an ERROR, not a warning.
-            logger.log(
-                logging.ERROR if log.write_failures == 1 else logging.WARNING,
-                "appraisal: could not record a %s fork for %s, %s write"
-                " failure(s) so far (#1204)",
-                stage, channel.id, log.write_failures, exc_info=True,
-            )
+        if log is not None:
+            await log.record(**kwargs)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

@@ -1430,6 +1430,21 @@ class TestProvenanceRealPath:
         finally:
             await _real_path_teardown(env)
 
+    async def test_the_provenance_fork_writes_a_fork_log_row(self, tmp_path):
+        """#1204: critique's capture lands through the real fork path."""
+        env = await _real_path_env(tmp_path, [CUE_FREE_REPLY], [CLAIM])
+        try:
+            await _say(env, "when is it due?")
+            async with env.db.execute(
+                "SELECT stage, point, instruction FROM fork_log"
+            ) as cur:
+                rows = await cur.fetchall()
+            points = {(r[0], r[1]) for r in rows}
+            assert ("critique", "provenance") in points
+            assert ("appraisal", "after-send") in points
+        finally:
+            await _real_path_teardown(env)
+
     async def test_supporting_earlier_row_is_put_in_front_of_the_fork(self, tmp_path):
         env = await _real_path_env(tmp_path, ["Noted.", CLAIM_REPLY], [CLAIM])
         try:
