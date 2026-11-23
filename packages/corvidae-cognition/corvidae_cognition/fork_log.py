@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS fork_log (
     completion_tokens INTEGER,
     cached_tokens INTEGER,
     snapshot_sha256 TEXT,
+    system_sha256 TEXT,
     chain_parent INTEGER,
     chain_from INTEGER NOT NULL DEFAULT 0,
     reconstructable INTEGER NOT NULL DEFAULT 1
@@ -198,8 +199,9 @@ class ForkLog:
         """
         db = await self._conn()
         snapshot_sha = None
+        system_sha = None
         if system_prompt:
-            await self.store_block(system_prompt)
+            system_sha = await self.store_block(system_prompt)
         if store_snapshot:
             snapshot_sha = await self.store_block(
                 json.dumps(list(messages), ensure_ascii=False)
@@ -212,8 +214,8 @@ class ForkLog:
                 window_first_rowid, window_last_rowid, window_cut,
                 prompt_sha256, renderer_sha, findings_json, verdict, label,
                 latency_ms, prompt_tokens, completion_tokens, cached_tokens,
-                snapshot_sha256, chain_parent, chain_from
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                snapshot_sha256, system_sha256, chain_parent, chain_from
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 stage,
@@ -238,6 +240,7 @@ class ForkLog:
                 completion_tokens,
                 cached_tokens,
                 snapshot_sha,
+                system_sha,
                 chain_parent,
                 chain_from,
             ),
@@ -342,7 +345,7 @@ class ForkLog:
             "SELECT coalesce(sum(length(findings_json)), 0) +"
             " coalesce(sum(length(instruction)), 0) +"
             " coalesce(sum(length(question_text)), 0) AS n FROM fork_log",
-            "SELECT coalesce(sum(bytes), 0) AS n FROM fork_block",
+            "SELECT coalesce(sum(length(text)), 0) AS n FROM fork_block",
         ):
             async with db.execute(sql) as cur:
                 row = await cur.fetchone()
@@ -382,21 +385,19 @@ class ForkLog:
                 "SELECT sha256 FROM fork_block ORDER BY created_at"
             ) as cur:
                 blocks = list(await cur.fetchall())
-            stranded = False
             for row in blocks:
                 if used <= max_bytes:
                     break
                 dropped = await self._drop_block(row["sha256"])
-                if dropped:
-                    stranded = True
+                if not dropped:
+                    continue
                 used -= dropped
                 freed += dropped
-            if stranded:
-                # Text a fork needs but no longer has: the rows say so, rather
-                # than looking reconstructable from a snapshot they never had.
+                # Only the rows that named this text lose reconstructability.
                 await db.execute(
                     "UPDATE fork_log SET reconstructable = 0"
-                    " WHERE snapshot_sha256 IS NULL"
+                    " WHERE system_sha256 = ?",
+                    (row["sha256"],),
                 )
                 await db.commit()
         return freed
