@@ -768,7 +768,7 @@ persona, with the agent's tool schemas in the prompt. Injection that could
 already steer the summarizer or critic as pasted content can now address
 it as the agent, in the agent's voice, and the outputs are persistence: a
 memory record, a summary the agent later reads as its own words, a score
-or objection in `exchange_log`.
+or objection in the outcome log.
 
 What bounds it:
 
@@ -832,7 +832,7 @@ never declared, and markdown_recall's search is reached through
   That bound holds only while they stay locked; PRD principle 15 lets the
   operator unlock them (finding 13).
 - A fork mutates nothing in the window and fires no hooks; only the
-  stage's existing write (memory row, summary, `exchange_log` merge)
+  stage's existing write (memory row, summary, outcome log line)
   happens, as it would standalone.
 
 Critique independence is the open question: a critic that shares the
@@ -1109,7 +1109,7 @@ What each kind of unlock costs:
   thing it checks (finding 2). An injection can rewrite how the agent
   summarizes, consolidates and scores its own exchanges, under its own
   persona, and the results persist: a summary it later reads as its own
-  words, a memory record, an `exchange_log` score. Unlocking fork
+  words, a memory record, an outcome log score. Unlocking fork
   instructions also removes a bound finding 8 relies on. In the tree, each
   memory record written since stamping carries a stamp (earlier rows read
   NULL) (`prompt_hash`, `mode`, `model`, with the
@@ -1576,17 +1576,17 @@ line is plain text in the result, with no kernel header at all.
   Zulip channel tells the model it may answer `NO_REPLY` to send nothing (or,
   with `silence.mode` `tool` or `both`, call `end_turn`), and
   a message that says "don't reply to this" may be enough. The worst case is
-  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. This is accepted for now, not prevented: the withheld reply is stored `unsent` and recorded as `no_reply`, the cost is one re-prompt, and an exact-match veto would instead leak the token to users whenever the model writes anything beside it. Narrowing the match without that leak is #902. A decline is a row in `exchange_log` with
-  `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
+  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. This is accepted for now, not prevented: the withheld reply is stored `unsent` and recorded as `no_reply`, the cost is one re-prompt, and an exact-match veto would instead leak the token to users whenever the model writes anything beside it. Narrowing the match without that leak is #902. A decline is a `silence` record in the outcome log
+  (`silence` is `no_reply` or `empty`) only when `outcome_log` is loaded
   and the turn has a trace id, so look there to find them. With
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
   a second route to the same effect: an injected "don't reply" can get the
   tool called. The tool is in the tool list of every channel and refuses on
-  any that isn't conversational. The record is `outcomes.silence = "tool"`,
+  any that isn't conversational. The record is `silence = "tool"`,
   written when the tool is called, so it shows the call and not whether the
-  follow-up stayed silent. `outcomes.silence_reason` is the model's own words,
+  follow-up stayed silent. `silence_reason` is the model's own words,
   steerable by an injection, cut at 200 characters and stored in
-  `exchange_log.outcomes`, which is for offline analysis; check before routing
+  the outcome log, which is for offline analysis; check before routing
   it into a prompt. It adds no capability: the agent could already stay quiet by sending an empty final,
   and nothing it can reach changes. A custom `register_prompt`, or an empty
   one, does not remove the instruction. If a channel must always answer,
@@ -1633,11 +1633,19 @@ line is plain text in the result, with no kernel header at all.
   with sqlite-vec) makes every form refuse until the cognition extra is
   reinstalled (#198). That keeps a half-finished redaction from happening,
   at the cost of the only deletion path while the extra is missing.
-- `exchange_log` copies conversation text into two places: stage-2
-  `past_claims` (quoted from the reply) and the objection detail critique
-  records in `outcomes`. Through the `exchange_log` scrubber the cognition
-  extra registers under `corvidae.redact`, `corvidae redact` scrubs the
-  claims and the provenance and built-in lens critique detail (#160). A plugin that keeps its own copy of conversation text
+- The outcome log, `<session db stem>.outcomes.jsonl` beside the session
+  database, holds conversation-derived text with no access control beyond
+  the file's permissions: stage-2 `past_claims` (quoted from the reply),
+  the objection and claim text critique records, and the free-text reasons
+  in silence records and `speak_up`. Databases written before the file
+  existed keep the same text in `exchange_log` rows. The file is not
+  rotated, so it grows with use and keeps what it was given; treat it like
+  the session database when backing up or exporting. Through the
+  `outcome_log_jsonl` and `exchange_log` scrubbers the cognition extra
+  registers under `corvidae.redact`, `corvidae redact` scrubs the claims
+  and the provenance and built-in lens critique detail (#160), not the
+  silence and `speak_up` reasons. The file scrubber rewrites the file, so
+  stop the daemon first. A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
@@ -1646,14 +1654,14 @@ line is plain text in the result, with no kernel header at all.
   row for it (#654: the insert checks the flag itself), but the funnel may
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
-  `exchange_log`, the owning exchange's claims are tombstoned with their
+  both, the owning exchange's claims are tombstoned with their
   counts kept (but not when the message was coalesced into a burst
   answered by a later message's turn, #423). What `redact` still doesn't
   reach: proactivity's objection detail in `outcomes` written before
-  #1126 (#1003), the objection detail of
+  #1126 (#1003), the free text of silence and `speak_up` reasons, the objection detail of
   lenses other plugins add (`critique.<name>.detail`, finding 23),
   exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  `message_rowid` is NULL (and outcome log lines of a trace with none), the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), copies on
   other channels (a read of the redacted message, a note or send that
   restates it, and whatever those channels consolidated from them), the

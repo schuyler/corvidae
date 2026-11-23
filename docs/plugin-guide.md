@@ -130,7 +130,7 @@ Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP
 exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
 ```
 
-The entry-point name labels the surface in the CLI output (`2 exchange_log rows`) and in skip notices. The object is an async function:
+The entry-point name labels the surface in the CLI output (`2 outcome_log_jsonl rows`) and in skip notices. The object is an async function:
 
 ```python
 async def redact_my_table(
@@ -1328,7 +1328,7 @@ two peers points is a design choice that a string lookup hides.
 `get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
 list does not cover, and on an entry that covers more calls than remain.
 The list holds the calls that predate the rule, each with the issue that
-removes it: `outcome_log` (#1179), `appraisal` (#1169, #1175), `memory`
+removes it: `appraisal` (#1169, #1175), `memory`
 (#1175), `goals` (#1181), the funnel (#1176, below) and the kernel plugins,
 which still need `depends_on` and `get_dependency` (#1180). When you remove
 a call, lower its count or delete its entry in the same change. New work
@@ -1356,11 +1356,14 @@ Who owns a spec follows from that:
 - **A plugin asking others for a value, with its own fallback:** the asker
   owns a `resolve_` hook.
 - **Many callers:** a *protocol plugin* can own the hook. It declares the
-  spec and has no behaviour of its own, so depending on it costs a caller
-  nothing. It needs no implementation of its own hook, except that a
+  spec and has next to no behaviour of its own, so depending on it costs a
+  caller nothing. It needs no implementation of its own hook, except that a
   `transform_` hook still needs the owner's `trylast` seed (above). A
   protocol plugin must live in a distribution every caller can depend on.
-  None exists yet; #1179 introduces the first.
+  `trace` (`corvidae_cognition/trace.py`) is the first: it owns
+  `on_trace_record` and `resolve_trace_origin`. Its one behaviour is a
+  startup warning, when the optional sink `outcome_log` is not loaded,
+  naming the reporters whose records go unwritten.
 - **The kernel takes a hook when its callers span distributions that should
   not depend on one another**, not because there are many of them.
 
@@ -1379,9 +1382,10 @@ hooks.
 **No plugin reads another plugin's tables.** Table and column names are not
 a contract; raw SQL on a peer's table is a service call with no interface.
 Prefer pushing the data on an event, so no read is needed; otherwise ask
-through a `resolve_` hook the reader owns or depends on. The tree does not
-comply yet: gates reads `origin` from outcome_log's `exchange_log`
-(#1169, #1179), and appraisal reads `exchange_log` (#1175, #1179).
+through a `resolve_` hook the reader owns or depends on. The tree
+complies for this rule: appraisal's read of `exchange_log` went with the
+removal of the appraisal vector, and gates' went when it began asking
+`resolve_trace_origin`.
 
 **Hint the types on both sides.** The spec carries the return annotation, as
 the kernel's do (`resolve_channel(...) -> "Channel | None"` in
@@ -1401,7 +1405,9 @@ Two cases, two log levels:
   plugin and the fallback, in the form `critique: no appraisal loaded,
   lenses are chosen at random`. An absent optional plugin is a configuration
   the operator chose, not a fault, and a warning on every call teaches the
-  operator to ignore warnings.
+  operator to ignore warnings. `trace` is the deliberate exception: when
+  `outcome_log` is not loaded it warns once at start, at WARNING, because
+  the owner asked that a disabled outcome log not drop records silently.
 - **A loaded provider that failed:** WARNING, each time. That is a rescue in
   the sense of AGENTS.md "Error handling and messages".
 

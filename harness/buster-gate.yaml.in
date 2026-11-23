@@ -9,7 +9,7 @@
 # reaches IRC.
 # After a daemon restart the driver asks for the code: only a window that
 # reloaded the withheld row can answer, and a user-origin reply is never
-# withheld. appraisal, outcome_log and gates are on; the rest of the
+# withheld. appraisal, outcome_log and gates are on (the trace plugin always loads); the rest of the
 # cognition set stays off as in the default profile.
 
 llm:

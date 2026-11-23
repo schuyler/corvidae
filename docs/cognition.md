@@ -35,9 +35,10 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `AppraisalPlugin` | `appraisal` | Appraises each exchange once the agent has answered, in a fork of the window: the reply's claims about the past and the critique vector |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
-| `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
+| `TracePlugin` | `trace` | The protocol plugin that owns `on_trace_record` and `resolve_trace_origin`, the hooks the reporting plugins fire; warns at startup when nothing records what they report |
+| `OutcomeLogPlugin` | `outcome_log` | Appends every trace record to `<session db stem>.outcomes.jsonl` beside the session database |
 | `GatePlugin` | `gates` | The decide gate: withholds every emission of an origin the operator made quiet (with the agent's `speak_up` hatch), and switches progress and thinking emissions off |
-| `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
+| `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in the outcome log. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
 | `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, a capped goals list and pick rule), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
@@ -57,7 +58,8 @@ as before the split.
 They own these tables in `sessions.db`: `memory`, `memory_fts`,
 `memory_vec`, `memory_prompt`, `embedding_meta`,
 `consolidation_watermark`, `retention_meta`, `retrieval_log`,
-`retrieval_candidate`, `exchange_log` and `goals`.
+`retrieval_candidate` and `goals`. `exchange_log` is no longer created or
+written (see "OutcomeLogPlugin"); rows already in an old database stay as history.
 
 **One object crosses the line.** `MemoryPlugin` creates `message_fts` and
 two triggers, `message_log_ai` and `message_log_au`, on the kernel's
@@ -341,7 +343,7 @@ forks run under the channel id. The key lands in `usage_log.lease_key`.
 
 ### Corrupt `exchange_log` rows
 
-A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
+These are history rows from before the outcome log moved to a file. A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
 is not an envelope object) can only come from an out-of-band write.
 `corvidae redact`'s scrubber skips such a row with one WARNING naming the
 trace id and channel (#311) and finishes over the others. A row the scrubber skips keeps its
@@ -1692,71 +1694,94 @@ above; dry-run without the flag).
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
 
+### TracePlugin (`packages/corvidae-cognition/corvidae_cognition/trace.py`)
+
+The protocol plugin for trace records. Entry point name: `"trace"`. It owns
+two hooks and implements neither:
+
+- `on_trace_record(trace_id, channel_id, source, origin, record)`, an
+  observe hook. A reporter fires it to say one fact about a trace. `source`
+  is the reporter's plugin name and `origin` is the trace's origin when the
+  reporter holds one, else `None`. `record` is a JSON-shaped dict whose shape
+  belongs to the source.
+- `resolve_trace_origin(trace_id) -> str | None`, a firstresult hook that
+  asks for a trace's origin when the asker no longer holds it.
+
+`source` is a contract: listeners select records by it, so renaming a
+reporter breaks them. `appraisal`, `critique`, `gates`, `memory` and
+`silence` name `trace` in `depends_on` and fire the hook with their own
+plugin name as `source` and `origin=None`. Disabling `trace` makes startup
+fail naming a dependent.
+
+It has one behaviour. At start, if `outcome_log` is not loaded, it logs one
+WARNING naming the loaded plugins whose `depends_on` names `trace` (their
+records are not written) and saying to remove `outcome_log` from
+`plugins.disabled`. With no such plugin loaded, as in
+`agent.minimal.yaml.example`, it says nothing. It is the first protocol
+plugin in the tree (see [plugin-guide.md](plugin-guide.md)).
+
 ### OutcomeLogPlugin (`packages/corvidae-cognition/corvidae_cognition/outcome_log.py`)
 
-Owns the `exchange_log` table — one row per exchange (everything one
-trace covers, keyed by its `trace_id`), accumulating the
-retrieval/appraisal/outcome profile used to correlate memory retrieval,
-appraisal, and critique for calibration. Entry point name:
-`"outcome_log"`; depends on `"persistence"`.
+Records what the reporting plugins say about each trace, in a file. Entry
+point name: `"outcome_log"`; depends on `"persistence"`, to find the session
+database's path. It implements `on_trace_record` and `resolve_trace_origin`
+and has no config key.
 
-Implements the message-lifecycle hooks (`on_message_admitted`,
-`on_message_rejected`, `on_message_persisted`) to record the identity row
-for every exchange (origin, channel, originating message rowid). The
-remaining columns — retrieval score/raw similarity/hit count, the
-stage-2 appraisal JSON, and merged outcomes — are filled in by
-`MemoryPlugin`, `AppraisalPlugin`, `CritiquePlugin`, `GatePlugin` and
-`SilencePlugin` through the writer API below, not by `OutcomeLogPlugin`
-itself. The `probe_score` column, and the `stage1` and `stage1_out` keys of
-the appraisal JSON, hold stage-1 appraisal's output on rows written before
-#1185; nothing writes them now, and the column stays until schema
-migrations exist (#14).
+**The file.** Each record is one JSON line appended to
+`<session db stem>.outcomes.jsonl` beside the session database file
+(`sessions.db` gives `sessions.outcomes.jsonl`). A line has the keys `ts`,
+`trace_id`, `channel_id`, `source`, `origin` and `record`. A trace has many
+lines, one per fact, so a reader groups by `trace_id` and takes the last
+line per top-level key of a source's records. The old `json_patch()`
+merge was recursive, so a reporter that split one key's nested fields
+across two records would read differently; none does today. There is no rotation. The record shapes are the
+ones the reporters used for `exchange_log.outcomes` (gates: `send`,
+`suppressed`, `speak_up`; silence: `silence`, `silence_reason`; critique:
+`lens_selection`, `critique`, `provenance`; memory: `retrieval_top_score`,
+`retrieval_top_similarity`, `retrieval_hit_count`; appraisal: `stage2` and,
+when computed, `entropy`).
 
-A message refused by a transport gate (an allowlist refusing a stranger)
-leaves no row: both insert paths (`record_exchange` and `upsert_exchange`)
-skip any channel the `ChannelRegistry` does not hold, so no writer
-(`on_message_rejected`, the gates) can grow
-`exchange_log` or leave a refused sender's channel id behind. With no
-registry plugin the guard fails open and records. Rejections on known
-channels (the `limits` plugin's, say) keep their `gate: rejected` row, with a null
-`message_rowid`.
+Elsewhere on this page, `outcomes.<key>` is shorthand for a top-level key of
+a source's records.
 
-It also registers the `exchange_log` scrubber (`redact_exchange_log`)
-under the `corvidae.redact` entry-point group. When `corvidae redact`
-tombstones a message, the owning exchange's stage-2 `past_claims` text is
-tombstoned (claim and query counts kept), and so is the provenance and
-built-in lens objection detail in its `outcomes` (see "Operator redaction" in
-[design.md](design.md)). The detail of
-lenses other plugins add (`critique.<name>.detail`), and proactivity's
-detail written before #1126 under `outcomes.proactivity` (#1003), are not
-reached;
-redaction is on hold (#1005).
+**Its own records.** From the message-lifecycle hooks it writes lines with
+`source: "outcome_log"`: `{"event": "admitted"}`, `{"event": "rejected"}`
+and `{"event": "persisted", "message_rowid": n}`. The origin is `user` for
+admitted and rejected, and `annotations.origin or "task"` for persisted. The
+first origin seen for a trace wins and its lines carry it.
 
-The table is created in `on_start` when the DB is already open. At boot it
-usually isn't (persistence starts after outcome_log, since `on_start` is
-LIFO), so the plugin logs one plain WARNING (`exchange_log table creation
-deferred until the first write: persistence DB not open yet`) and creates
-the table on the first write. A DDL or migration failure with the DB open
-is still logged at WARNING with its traceback.
+**Origin index.** `resolve_trace_origin` answers from an in-memory LRU of
+65,536 traces (`ORIGIN_INDEX_MAX`), lost on restart. After 65,536 newer
+traces an evicted trace resolves to `None`; the gate treats that as `task`.
 
-Writer API (used by other plugins, not hooks):
+A message refused by a transport gate (an allowlist refusing a stranger) is
+not recorded: a channel the `ChannelRegistry` does not hold is skipped, so
+no refused sender's channel id lands in the file. With no registry plugin
+the guard fails open and records. Rejections on known channels (the
+`limits` plugin's, say) are recorded, with no `message_rowid`.
 
-- `record_exchange(trace_id, channel_id, origin=None, message_rowid=None)`
-  — idempotent insert (`INSERT OR IGNORE`).
-- `update_exchange(trace_id, **columns)` — guarded update of the
-  nullable profile columns only; unknown or immutable column names raise
-  `ValueError` (SQL is never built from arbitrary kwargs). The JSON
-  columns `outcomes` and `appraisal` merge rather than overwrite, through
-  SQLite's `json_patch()` in a single statement, so concurrent writers
-  never lose each other's keys (PRD §3.7 Outcome log).
-- `upsert_exchange(trace_id, channel_id, origin=None, **columns)` —
-  create-or-update in one call: `INSERT OR IGNORE` the identity row, then
-  a guarded update applying `**columns`. For gate-time writers (e.g.
-  `GatePlugin`'s records) that run before or race
-  `on_message_admitted`/`on_message_persisted`'s own inserts — without it,
-  those hooks' `INSERT OR IGNORE` would no-op against a row that doesn't
-  exist yet, silently dropping the gate-path columns. Idempotent and
-  write-order independent.
+**When it cannot write.** An in-memory session database has no file to sit
+beside, so nothing is written and one WARNING names `daemon.session_db`. A
+failed append logs a WARNING naming the file, trace and source, and that
+record is lost.
+
+**`exchange_log` is retired.** The plugin no longer creates or writes the
+table, and its writer API (`record_exchange`, `update_exchange`,
+`upsert_exchange`) is gone. Rows in an old database stay as history, and
+`redact_exchange_log` still scrubs them.
+
+**Redaction.** The plugin registers two scrubbers under the
+`corvidae.redact` entry-point group: `exchange_log` for the history rows and
+`outcome_log_jsonl` for the file. The file scrubber tombstones appraisal
+`stage2.past_claims`, and critique `provenance` and `critique`
+`detail[*].claim` and `objection` text, in the records of the trace that
+owns each redacted message (the trace with the largest persisted
+`message_rowid` at or below the id, on that channel). See "Operator
+redaction" in [design.md](design.md) and [redaction.md](redaction.md). The
+detail of lenses other plugins add, and the free text of `silence_reason`
+and `speak_up` reasons, are not reached. Stop the daemon before redacting:
+the scrubber rewrites the file through a temp file and `os.replace`, so a
+line appended between its read and the replace is lost.
 
 ### AppraisalPlugin (`packages/corvidae-cognition/corvidae_cognition/appraisal.py`)
 
@@ -1794,8 +1819,8 @@ established before the exchange, with up to 3 short search phrases. A
 missing or malformed field reads as no claims; malformed entries are
 dropped with a warning; it's capped at 5 claims. When critique has lenses on
 offer, stage 2 also returns `lenses`, the critique vector (see "How a lens is
-chosen" under CritiquePlugin below). The result is merged into
-the `appraisal` envelope's `stage2` key; the lens scores kept there are
+chosen" under CritiquePlugin below). The result is reported to
+the outcome log as the `stage2` key of an appraisal record; the lens scores kept there are
 the labels a trained readout head for lens selection would learn from (#141). Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
 annotations, stage2`, outside the appraisal attribution. Every enqueued stage
@@ -2085,7 +2110,8 @@ wake the channel; the other built-ins wait.
   there is no vector to read, so `on_agent_response` runs one random
   offered lens per exchange, built-ins and plugin lenses alike, as the
   degrade-to-spec path (PRD §3.2).
-- **Record.** The choice is written to `exchange_log.outcomes.lens_selection`
+- **Record.** The choice is reported as the `lens_selection` key of a critique record
+  (`on_trace_record`, `source: critique`)
   whether or not a lens runs, so a `none` is countable:
   `{"lens": "<name>", "sampled": false, "basis": "vector"}`. `lens` is
   omitted when nothing ran. `basis` is `"vector"` when a lens won the vector,
@@ -2113,7 +2139,7 @@ one silent `critique:lenses` task (a built-in lens runs through its own
 `critique` task). Each lens is a fork of the live window
 with the containment check, exactly as a stylistic lens: forks off, or the
 exchange gone from the window, skips it with the stylistic lenses' warning
-and records nothing. A lens that ran records, in `exchange_log.outcomes`,
+and records nothing. A lens that ran reports, in a critique record,
 
 ```json
 {"critique": {"<name>": {"objections": 1, "sampled": false, "detail": [...]}}}
@@ -2160,8 +2186,8 @@ untransformed instruction.
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
 The decide gate (PRD §3.7 Output gate). Entry point name: `"gates"`;
-`depends_on` is empty, and it reads `outcome_log` and `persistence`
-fail-soft. It withholds an emission on its origin and the operator's
+`depends_on` is `trace`; it fires `on_trace_record` and asks
+`resolve_trace_origin` for an origin it no longer holds. It withholds an emission on its origin and the operator's
 switches. The engagement gate and the decide gate's salience floor were
 removed with stage-1 appraisal (#1185), so this plugin has no inbound hook
 and withholds no final from an origin that is not quiet.
@@ -2169,12 +2195,10 @@ and withholds no final from an origin that is not quiet.
 **Origin.** Read from propagated state, never inferred: `annotations["origin"]`
 when a producer stamped one (the scheduler stamps `reminder`,
 `HeartbeatPlugin` stamps `heartbeat`, the funnel stamps `critique`), else `user` for a trace the
-plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin
-`exchange_log` already holds for the trace (so a user exchange whose trace
+plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin `resolve_trace_origin` returns for the trace (so a user exchange whose trace
 fell out of the LRU during a long tool cycle is still `user`), else `task`.
 Tool cycles carry the item's annotations forward, so an exchange keeps its origin
-through its tool calls. The gate never passes its derived origin to
-`upsert_exchange`, so it can't relabel a row. The origin is looked up only
+through its tool calls. The gate reports with `origin=None`, so it can't relabel a trace. The origin is looked up only
 when a quiet origin is configured.
 
 **The decide gate** (`should_send_response`):
@@ -2184,7 +2208,7 @@ when a quiet origin is configured.
 - `progress` / `thinking`: vetoed when `gate.send.allow_progress` /
   `gate.send.allow_thinking` (both default true) are off, recorded as
   `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
-  never writes the outcome log; the vetoing plugin does.
+  never writes the outcome log; the vetoing plugin reports it.
 - `error`: withheld only from a quiet origin (below, #936); otherwise no
   opinion.
 - Anything else: no opinion.
@@ -2217,8 +2241,8 @@ whatever the list holds, so an origin added by hot reload has its hatch
 without a restart (tools are collected only at startup, #925; with nothing
 quiet, the call lifts nothing). Calling it marks the turn's trace as
 surfaced (a bounded LRU of 1024, never cleared explicitly, because a final's
-thinking is gated after the final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
-only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
+thinking is gated after the final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; reported
+with the turn's trace id). A surfaced quiet final
 is then sent, recorded as `outcomes.send = {emission, origin, vetoed: false,
 reason: "surfaced", surfaced: true}`. Progress and thinking sent in
 the same response as the `speak_up` call are gated before the tool runs and
@@ -2248,7 +2272,7 @@ with untrusted participants.
 
 ### SilencePlugin (`packages/corvidae-cognition/corvidae_cognition/silence.py`)
 
-SilencePlugin lets the agent end a turn without saying anything, on any channel, including a turn that answers a user directly. Entry point name: `"silence"`; `depends_on` is empty and `outcome_log` is optional.
+SilencePlugin lets the agent end a turn without saying anything, on any channel, including a turn that answers a user directly. Entry point name: `"silence"`; `depends_on` is `trace`.
 
 The test for staying quiet is Grice's: does the agent have anything true, relevant and worth saying to add? "thanks, night!" and "lol ok" fail it; a question passes. The decision is the model's, made in the turn, and it is driven by the system prompt rather than by a score: a channel only gets the option if its prompt says so.
 
@@ -2262,21 +2286,21 @@ The hook runs on the composed prompt whatever the register's source, so a channe
 
 **The veto.** `should_send_response` returns `False` for a `final` emission whose text contains `NO_REPLY` (a containment check, not an exact match), on every turn origin. The kernel stores the row as `unsent` with the not-sent marker, so on later turns the model can see it stayed silent instead of believing it spoke. Nothing reaches the transport. A final that mentions the token in passing (e.g. "reply with NO_REPLY to stop") is also dropped — a known tradeoff of the containment design. Only `final` is covered: a `NO_REPLY` that shows up as progress text beside tool calls goes out. A veto that raises fails open, with a warning, and the text is sent.
 
-**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text contains `NO_REPLY` (the same test as the veto) or is empty, the plugin writes `outcomes.silence` on that trace's `exchange_log` row, from a background task so the reply path never waits on the write connection:
+**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text contains `NO_REPLY` (the same test as the veto) or is empty, the plugin reports `silence` in a `silence` record for that trace, from a background task so the reply path never waits on the write:
 
-| `outcomes.silence` | Meaning |
+| `silence` | Meaning |
 |---|---|
 | `no_reply` | The model's final was `NO_REPLY`, or contained it, and the veto kept it unsent |
 | `empty` | The final had no text and no tool calls; the kernel left it unsent without asking any gate |
-| `tool` | The model called `end_turn` (`silence.mode` `tool` or `both`). It records the call, not what followed: it is written when the tool runs, before the follow-up exists, so a model that then answers anyway still has this row. `outcomes.silence_reason` carries the model's own words, cut at 200 characters |
+| `tool` | The model called `end_turn` (`silence.mode` `tool` or `both`). It records the call, not what followed: it is written when the tool runs, before the follow-up exists, so a model that then answers anyway still has this row. `silence_reason` carries the model's own words, cut at 200 characters |
 
-A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` there is nowhere to write and declines go unrecorded; the veto still works. A write that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
+A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` the records go nowhere (`trace` warns at startup) and declines go unrecorded; the veto still works. A report that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
 
 **The `end_turn` tool (`silence.mode`, #797).** Writing a literal `NO_REPLY` is an unusual thing for a chat-trained model to do, since such models are trained to alternate turns and answer. The hypothesis behind the tool is that a tool call is a shape they are trained to emit more readily; whether that holds is what the experiment measures (see The tool's record). With `silence.mode: tool` (or `both`) the plugin registers `end_turn(reason)` through `register_tools`, and the instruction says to call it on its own when nothing needs saying (`TOOL_FRAGMENT`; `both` adds a fallback to the token, `BOTH_FRAGMENT`). `token`, the default, registers no tool and behaves as before. A `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it has to mention `end_turn`.
 
 **What the tool does, and what it cannot.** The tool has no kernel support, so it does not end the turn: the loop calls the model again after any tool result. The result therefore says `Nothing was sent. Your next message must be exactly NO_REPLY and nothing else.`, and the veto withholds that echo *when the model complies*. If it writes anything else (a near miss, a sign-off, a real answer), that text is sent. The call is the decision and the echo is mechanical; it costs one more model call, which a backend that reuses the cached prompt prefix makes cheap. The tool refuses on a channel whose transport isn't conversational, including a channel no transport owns (an `Error:` result naming the channel and saying to answer normally), and with no channel context.
 
-**The tool's record.** It writes `outcomes.silence = "tool"` and `outcomes.silence_reason` when the tool is called, from a tracked task like the other records, only when `outcome_log` is loaded and the turn has a trace id. The turn's own final is then never recorded over it, whether it was withheld or sent. A `tool` row therefore means "called", not "stayed silent"; count rows against the wind-down messages to measure whether the model uses the tool, and read the sent rows to see whether the follow-up complied.
+**The tool's record.** It reports `silence = "tool"` and `silence_reason` when the tool is called, from a tracked task like the other records, when the turn has a trace id. The turn's own final is then never recorded over it, whether it was withheld or sent. A `tool` row therefore means "called", not "stayed silent"; count rows against the wind-down messages to measure whether the model uses the tool, and read the sent rows to see whether the follow-up complied.
 
 **Known limits.**
 - Text the model writes alongside the call goes out as progress, because the progress gate runs before the tool executes and receives no tool calls. The tool's description says to call it alone.
@@ -2336,7 +2360,7 @@ runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin follows the general conventions: critique judges it like any other
-turn (#1031), `gate.send.quiet_origins` can make it quiet, and `exchange_log`
+turn (#1031), `gate.send.quiet_origins` can make it quiet, and the outcome log
 records it.
 
 **Its window.** The window grows beat by beat and is bounded by ordinary

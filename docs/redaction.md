@@ -57,9 +57,13 @@ In short, `corvidae redact` reaches:
 - memory records on each redacted message's own channel whose range covers
   it: summary tombstoned, `redacted = 1`, removed from the index, vector
   deleted;
-- every table a plugin has registered a scrubber for. The cognition package
-  registers `exchange_log` (`past_claims` and the `provenance` and
-  `critique` sections of `outcomes` detail) and `retrieval_candidate`.
+- every table or file a plugin has registered a scrubber for. The cognition
+  package registers `outcome_log_jsonl`, which rewrites
+  `<session db stem>.outcomes.jsonl` (appraisal `stage2.past_claims` and the
+  `provenance` and `critique` detail text in the records of the trace that
+  owns each redacted message); `exchange_log`, the same text in history rows
+  that databases written before the file still hold; and
+  `retrieval_candidate`.
 
 Every completed run, real or `--dry-run`, ends with a notice naming what it
 does not reach and pointing here.
@@ -77,9 +81,16 @@ does not reach and pointing here.
   could write it back into new rows. Stop the daemon before redacting.
 - Restatements: later replies, memory records outside the covered range,
   goals, notes and critique objections that paraphrase the message.
-- `exchange_log` rows whose `message_rowid` is NULL.
-- Proactivity objection detail in `exchange_log.outcomes` written before
-  #1126 (#1003).
+- `exchange_log` rows whose `message_rowid` is NULL, and outcome log lines of
+  a trace with no persisted message at or below the redacted id on its
+  channel.
+- Free text the outcome log holds outside the scrubbed fields: the reasons in
+  `silence_reason` and in `speak_up`.
+- The outcome log's own lines are rewritten, not edited in place: stop the
+  daemon first, or a line appended between the scrubber's read and its
+  replace is lost.
+- Proactivity objection detail written before #1126, under
+  `outcomes.proactivity` in `exchange_log` rows or the outcome log (#1003).
 - Objection detail of lenses other plugins add (`critique.<name>.detail`,
   threat model finding 23).
 - The `past_claims` of the turn that answered a coalesced burst, when an
