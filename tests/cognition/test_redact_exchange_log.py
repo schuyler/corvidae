@@ -25,7 +25,26 @@ from corvidae.commands.redact import (
     redact_memory_id,
     redact_messages,
 )
-from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
+from corvidae_cognition.outcome_log import redact_exchange_log
+
+# exchange_log as daemons before #1179 created it. Nothing creates the table
+# any more; its rows stay in old databases as history, and this scrubber
+# still reaches them.
+EXCHANGE_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS exchange_log (
+    trace_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    origin TEXT,
+    message_rowid INTEGER,
+    created_at REAL NOT NULL,
+    retrieval_top_score REAL,
+    retrieval_top_similarity REAL,
+    retrieval_hit_count INTEGER,
+    probe_score REAL,
+    appraisal TEXT,
+    outcomes TEXT
+)
+"""
 
 from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
