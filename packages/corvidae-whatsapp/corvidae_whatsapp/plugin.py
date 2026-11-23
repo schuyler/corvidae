@@ -48,6 +48,13 @@ MEDIA_UNAVAILABLE = -32003
 #: any path outside it, so a sidecar bug cannot turn into an arbitrary read.
 DEFAULT_MEDIA_DIR = "state/whatsapp-media"
 
+#: The sidecar caps inbound media at 25 MiB; the outbound tool uses the same
+#: number so one limit governs both directions.
+MAX_MEDIA_BYTES = 25 * 1024 * 1024
+
+#: Default root the outbound tool may read files from.
+DEFAULT_SEND_ROOT = "state"
+
 
 class WhatsAppPlugin(TransportPlugin):
     """The WhatsApp transport.
@@ -64,6 +71,7 @@ class WhatsAppPlugin(TransportPlugin):
     def __init__(self) -> None:
         self._socket_path: str | None = None
         self._media_root: Path = Path(DEFAULT_MEDIA_DIR)
+        self._send_root: Path = Path(DEFAULT_SEND_ROOT)
         self._client: SidecarClient | None = None
         self._connect_task: asyncio.Task | None = None
         self._session_state: str = "unknown"
@@ -96,7 +104,14 @@ class WhatsAppPlugin(TransportPlugin):
                 f"got {media_dir!r}"
             )
         self._socket_path = socket_path
+        send_root = block.get("send_media_root", DEFAULT_SEND_ROOT)
+        if not isinstance(send_root, str) or not send_root:
+            raise ValueError(
+                "whatsapp: config field 'send_media_root' must be a non-empty path, "
+                f"got {send_root!r}"
+            )
         self._media_root = Path(media_dir)
+        self._send_root = Path(send_root)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -311,6 +326,99 @@ class WhatsAppPlugin(TransportPlugin):
             return Path(path).resolve().is_relative_to(self._media_root.resolve())
         except OSError:
             return False
+
+    # Outbound files ---------------------------------------------------------
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        """Offer the agent one way to send a file, when this transport is configured.
+
+        An inert plugin has no sidecar to send through, so it registers nothing.
+        """
+        if self._socket_path is not None:
+            tool_registry.append(self.send_whatsapp_media)
+
+    async def send_whatsapp_media(
+        self, channel_id: str, path: str, caption: str = "",
+    ) -> str:
+        """Send a file to a WhatsApp chat, with an optional caption.
+
+        Args:
+            channel_id: The target chat in "whatsapp:<jid>" form.
+            path: The file to send, relative to whatsapp.send_media_root (or an
+                absolute path inside it). Paths outside that root are refused.
+            caption: Optional text to send with the file. Pass "" for none.
+
+        Returns:
+            A confirmation naming the file and chat, or an error saying what was
+            wrong and what to do next.
+        """
+        if not isinstance(channel_id, str) or not channel_id:
+            return "Could not send: channel_id must be a non-empty string."
+        if not isinstance(path, str) or not path.strip():
+            return "Could not send: path must be a non-empty string."
+        if caption is None:
+            caption = ""
+        if not isinstance(caption, str):
+            return "Could not send: caption must be a string."
+        if self._registry is None:
+            return (
+                f"Could not send: the channel registry is not available for "
+                f"{channel_id!r}; retry once corvidae has finished starting."
+            )
+        if channel_id.partition(":")[0] != self.transport:
+            return (
+                f"Could not send: {channel_id!r} is not a WhatsApp channel; "
+                f"the target must be 'whatsapp:<jid>'."
+            )
+        channel = self._registry.get(channel_id)
+        if channel is None:
+            return (
+                f"Could not send: {channel_id!r} is not a known WhatsApp chat; "
+                f"only a chat that has messaged this account is known."
+            )
+        if self._client is None:
+            return (
+                "Could not send: the sidecar is not connected; start it and "
+                "retry once WhatsApp shows as linked."
+            )
+
+        root = self._send_root.resolve()
+        try:
+            target = Path(path)
+            candidate = (root / target) if not target.is_absolute() else target
+            target = candidate.resolve()
+            if not target.is_relative_to(root):
+                return (
+                    f"Could not send: {path!r} is outside the allowed root {root}; "
+                    f"put the file there or set whatsapp.send_media_root."
+                )
+            if not target.is_file():
+                return (
+                    f"Could not send: {target} is not a file; check it exists "
+                    f"under {root}."
+                )
+            size = target.stat().st_size
+        except (OSError, ValueError) as exc:
+            return (
+                f"Could not send: cannot read {path!r} ({type(exc).__name__}); "
+                f"check the path and its permissions."
+            )
+        if size > MAX_MEDIA_BYTES:
+            return (
+                f"Could not send: {target.name} is {size} bytes, over the "
+                f"{MAX_MEDIA_BYTES} byte limit the sidecar accepts."
+            )
+        try:
+            await self._client.call("send_media", {
+                "chat_jid": channel.scope, "path": str(target), "caption": caption,
+            })
+        except SidecarError as exc:
+            if exc.code == MEDIA_UNAVAILABLE:
+                return f"Could not send: {target.name} was not accepted ({exc.state})."
+            self._log_sidecar_error(f"send_media on {channel_id}", exc)
+            return f"Could not send: {target.name} to {channel_id} failed; see the log."
+        return f"Sent {target.name} to {channel_id}."
 
     # Outbound ---------------------------------------------------------------
 

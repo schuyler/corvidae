@@ -498,3 +498,52 @@ async def test_a_media_message_without_an_id_is_named_not_sent_as_null(tmp_path,
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+async def test_send_media_sends_a_file_under_the_root(tmp_path):
+    """The tool passes an absolute path inside the root and the caption through."""
+    root = tmp_path / "state"
+    root.mkdir()
+    report = root / "report.pdf"
+    report.write_bytes(b"%PDF-1.4")
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "send_media_root": str(root)}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        channel = plugin._registry.get_or_create("whatsapp", CHAT)
+        result = await plugin.send_whatsapp_media(
+            f"whatsapp:{CHAT}", "report.pdf", "the numbers",
+        )
+        assert result.startswith("Sent report.pdf")
+        sent = [r for r in sidecar.requests if r["method"] == "send_media"]
+        assert sent[0]["params"] == {
+            "chat_jid": CHAT, "path": str(report), "caption": "the numbers",
+        }
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_send_media_refuses_a_path_outside_the_root(tmp_path):
+    """A path outside send_media_root never reaches the sidecar."""
+    root = tmp_path / "state"
+    root.mkdir()
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "send_media_root": str(root)}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        plugin._registry.get_or_create("whatsapp", CHAT)
+        result = await plugin.send_whatsapp_media(f"whatsapp:{CHAT}", "/etc/passwd")
+        assert "outside the allowed root" in result
+        assert not [r for r in sidecar.requests if r["method"] == "send_media"]
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
