@@ -27,6 +27,7 @@ from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
+from tests.cognition.trace_helpers import TraceRecorder, add_trace
 from helpers import stub_llm_config, with_chat_llm
 from corvidae_cognition.memory import SQLITE_VEC_KNN_MAX, MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
@@ -113,6 +114,8 @@ async def build_retrieval_env(config=None, db_path=":memory:"):
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
+    # Memory reports its retrieval profile through on_trace_record.
+    add_trace(pm)
 
     llm = LLMPlugin()
     pm.register(llm, name="llm")
@@ -570,16 +573,6 @@ class TestRecallBenchmark:
 # --- #66: raw similarity logged alongside the decayed score ---
 
 
-class _ExchangeRecorder:
-    """outcome_log stand-in that records update_exchange kwargs per key."""
-
-    def __init__(self):
-        self.updates: list[tuple[str, dict]] = []
-
-    async def update_exchange(self, trace_id, **fields):
-        self.updates.append((trace_id, fields))
-
-
 class TestRetrievalLogSimilarity:
     async def test_top_similarity_is_raw_similarity_of_top_ranked(self):
         """top_similarity is the undecayed similarity; top_score stays decayed."""
@@ -609,11 +602,11 @@ class TestRetrievalLogSimilarity:
             assert await cursor.fetchall() == [(None,)]
         await db.close()
 
-    async def test_similarity_copied_into_exchange_log(self):
-        """update_exchange receives retrieval_top_similarity under the key."""
+    async def test_similarity_reported_on_the_trace(self):
+        """on_trace_record receives retrieval_top_similarity under the key."""
         memory, embedder, channel, conv, db = await build_retrieval_env()
-        recorder = _ExchangeRecorder()
-        memory.pm.register(recorder, name="outcome_log")
+        recorder = TraceRecorder()
+        memory.pm.register(recorder, name="trace_recorder")
         await seed_memory(db, channel.id,
                           "kestrel moved the rain gauge to the north fence")
         conv.append({"role": "user", "content": "where is the rain gauge?"})
@@ -625,9 +618,9 @@ class TestRetrievalLogSimilarity:
             "SELECT top_similarity FROM retrieval_log"
         ) as cursor:
             (logged,) = await cursor.fetchone()
-        assert len(recorder.updates) == 1
-        key, fields = recorder.updates[0]
-        assert key == "ex-sim"
+        [report] = recorder.by_source("memory")
+        assert report["trace_id"] == "ex-sim"
+        fields = report["record"]
         assert fields["retrieval_hit_count"] == 1
         assert fields["retrieval_top_similarity"] == logged
         assert logged is not None

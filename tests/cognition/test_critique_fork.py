@@ -33,13 +33,12 @@ async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=No
     env.pm.register(agent, name="agent")
     env.channel.conversation = window_of(env.channel.id, list(window_rowids))
     env.channel.runtime_overrides.update(overrides or {})
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, annotations={})
     await env.plugin._run_critique(
         env.channel, "k", QUESTION, RESPONSE, lenses, False, origin=None)
     # None when no lens ran (nothing is recorded for an all-miss run).
-    outcome = ((await _read_outcomes(env.db, "k")) or {}).get("critique")
+    outcome = ((await _read_outcomes(env.recorder, "k")) or {}).get("critique")
     await _teardown(env)
     return env, outcome
 
@@ -233,7 +232,7 @@ async def _assert_skipped(env, agent, caplog, reason, fork_calls=0):
     assert record.levelname == "WARNING" and "kp" in message and reason in message
     assert len(agent.calls) == fork_calls
     assert env.stub.chat_calls == []
-    assert "provenance" not in (await _read_outcomes(env.db, "kp") or {})
+    assert "provenance" not in (await _read_outcomes(env.recorder, "kp") or {})
 
 
 def _forks_off(env, ex, agent):
@@ -415,7 +414,7 @@ async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
     try:
         assert _funnel_entries(env) == [
             f"[provenance] {_claims(3)[1]['claim']} \u2014 nothing says so"]
-        outcomes = await _read_outcomes(env.db, "kp")
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 2, "objections": 1,
             "detail": [{"claim": _claims(3)[1]["claim"],
@@ -439,7 +438,7 @@ async def test_all_supported_records_the_outcome_and_registers_nothing(tmp_path)
     env, agent = await _verdict_run(tmp_path, verdicts_text(True, True, True))
     try:
         env.funnel.ingest_and_wake.assert_not_awaited()
-        outcomes = await _read_outcomes(env.db, "kp")
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 3, "objections": 0}
     finally:
@@ -452,7 +451,7 @@ async def test_unsupported_provenance_outcome_carries_detail(tmp_path):
         tmp_path, _verdicts(_v(1), _v(2, reason="nothing says so",
                               supported=False)), n=2)
     try:
-        outcomes = await _read_outcomes(env.db, "kp")
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"]["objections"] == 1
         assert outcomes["provenance"]["detail"] == [
             {"claim": _claims(2)[1]["claim"], "objection": "nothing says so",

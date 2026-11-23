@@ -230,7 +230,7 @@ class TestSelection:
         try:
             await _judged_turn(env, "kt2", vector)
             assert env.fork_agent.calls == []
-            selection = (await _read_outcomes(env.db, "kt2"))["lens_selection"]
+            selection = (await _read_outcomes(env.recorder, "kt2"))["lens_selection"]
             assert "lens" not in selection
             assert selection["sampled"] is False
             assert selection["basis"] == "none"
@@ -534,11 +534,10 @@ async def _appraise(tmp_path, reply, offer=OFFER, fork_prompt="Score it."):
     await env.appraisal.on_config_reload(new_config)
     if offer is not None:
         env.appraisal.set_lens_offer(lambda: offer)
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is it Friday?", annotations={})
     await env.appraisal._run_stage2(env.channel, "k", "is it Friday?", "yes, Friday", None)
-    stored = ((await _read_appraisal(env.db, "k")) or {}).get("stage2")
+    stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown_appraisal(env)
     return env, agent, stored
 
@@ -594,7 +593,7 @@ class TestChoiceRecorded:
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt8", {"mine": 0.7, "none": 0.3})
-            outcomes = await _read_outcomes(env.db, "kt8")
+            outcomes = await _read_outcomes(env.recorder, "kt8")
             assert outcomes["lens_selection"] == {
                 "lens": "mine", "sampled": False, "basis": "vector"}
         finally:
@@ -664,7 +663,7 @@ class TestLensVector:
             await _judged_turn(env, "kt7", stage2=None)
             assert _warnings(caplog, "kt7", "vector"), caplog.text
             assert env.fork_agent.calls == []
-            selection = (await _read_outcomes(env.db, "kt7"))["lens_selection"]
+            selection = (await _read_outcomes(env.recorder, "kt7"))["lens_selection"]
             assert selection == {"sampled": False, "basis": "no_vector"}
         finally:
             await _teardown(env)
@@ -684,7 +683,7 @@ class TestSampling:
         try:
             await _judged_turn(env, "kt9", {"mine": 0.1, "none": 0.9})
             assert _marker_runs(env, "LENSBRIEF-mine:") == 1
-            outcomes = await _read_outcomes(env.db, "kt9")
+            outcomes = await _read_outcomes(env.recorder, "kt9")
             assert outcomes["critique"]["mine"]["sampled"] is True
             selection = outcomes["lens_selection"]
             assert (selection["lens"], selection["sampled"]) == ("mine", True)

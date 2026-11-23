@@ -30,6 +30,7 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
 from helpers import FakeForkAgent, window_of
+from tests.cognition.trace_helpers import TraceRecorder, add_trace
 
 
 # A stage-2 reply as the fork now asks for it: the reply's claims about the
@@ -77,6 +78,9 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     persistence.db = db
     pm.register(persistence, name="persistence")
 
+    # The trace protocol plugin and a listener, before any reporter.
+    recorder = TraceRecorder()
+    add_trace(pm, recorder)
     outcome = OutcomeLogPlugin()
     pm.register(outcome, name="outcome_log")
     await outcome.on_init(pm=pm, config={})
@@ -114,6 +118,7 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, appraisal=appraisal, task=task_plugin,
         outcome=outcome, llm=llm, stub=stub, channel=channel, agent=agent,
+        recorder=recorder,
     )
 
 
@@ -146,12 +151,16 @@ async def _originate(env, trace_id, rowid=1, text="the user asked"):
     )
 
 
-async def _read_appraisal(db, key):
-    async with db.execute(
-        "SELECT appraisal FROM exchange_log WHERE trace_id = ?", (key,)
-    ) as cursor:
-        row = await cursor.fetchone()
-    return json.loads(row[0]) if row and row[0] else None
+async def _read_appraisal(recorder, key):
+    """The appraisal records fired for trace ``key``, merged in order with the
+    last write per top-level key winning; None when it fired none."""
+    records = [r["record"] for r in recorder.by_source("appraisal") if r["trace_id"] == key]
+    if not records:
+        return None
+    merged: dict = {}
+    for record in records:
+        merged.update(record)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +314,6 @@ class TestTrigger:
 
     async def test_task_body_sets_appraisal_attribution(self, tmp_path):
         env = await build_env(tmp_path)
-        # Seed the row so update_exchange lands.
-        await env.outcome.record_exchange("k3", env.channel.id, origin="user")
         await _originate(env, "k3")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
@@ -330,7 +337,6 @@ class TestTrigger:
 class TestStage2Persist:
     async def test_stage2_persisted_under_key(self, tmp_path):
         env = await build_env(tmp_path)
-        await env.outcome.record_exchange("kp", env.channel.id, origin="user")
         await _originate(env, "kp")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
@@ -338,36 +344,12 @@ class TestStage2Persist:
             logprobs=None,
         )
         await _run_next_task(env.task)
-        env_appraisal = await _read_appraisal(env.db, "kp")
+        env_appraisal = await _read_appraisal(env.recorder, "kp")
         assert env_appraisal["stage2"] == json.loads(VALID_STAGE2_JSON)
         await _teardown(env)
 
-    async def test_merge_not_overwrite_keeps_stage1_and_stage1_out(self, tmp_path):
-        """After stage 2 lands on an exchange already carrying stage1 +
-        stage1_out, the envelope still contains all three."""
-        env = await build_env(tmp_path)
-        await env.outcome.upsert_exchange(
-            "km", env.channel.id, "user",
-            appraisal={"stage1": {"salience": 0.3}, "stage1_out": {"salience": 0.4}},
-        )
-        await _originate(env, "km")
-        await env.appraisal.on_agent_response(
-            channel=env.channel, request_text="req", response_text="resp",
-            trace_id="km", annotations={},
-            logprobs=None,
-        )
-        await _run_next_task(env.task)
-        envelope = await _read_appraisal(env.db, "km")
-        assert envelope["stage1"] == {"salience": 0.3}
-        assert envelope["stage1_out"] == {"salience": 0.4}
-        assert envelope["stage2"] == json.loads(VALID_STAGE2_JSON)
-        await _teardown(env)
-
-    async def test_malformed_output_keeps_stage1_no_exception(self, tmp_path):
+    async def test_malformed_output_records_no_stage2_no_exception(self, tmp_path):
         env = await build_env(tmp_path, chat_text="not json at all")
-        await env.outcome.upsert_exchange(
-            "kbad", env.channel.id, "user", appraisal={"stage1": {"salience": 0.5}},
-        )
         await _originate(env, "kbad")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
@@ -376,13 +358,12 @@ class TestStage2Persist:
         )
         # Must not raise.
         await _run_next_task(env.task)
-        envelope = await _read_appraisal(env.db, "kbad")
-        assert envelope == {"stage1": {"salience": 0.5}}  # stage2 absent
+        envelope = await _read_appraisal(env.recorder, "kbad")
+        assert "stage2" not in (envelope or {})  # stage2 absent
         await _teardown(env)
 
     async def test_entropy_persisted_when_logprobs_present(self, tmp_path):
         env = await build_env(tmp_path)
-        await env.outcome.record_exchange("ke", env.channel.id, origin="user")
         await _originate(env, "ke")
         logprobs = {"content": [
             {"token": "a", "logprob": -0.1,
@@ -398,7 +379,7 @@ class TestStage2Persist:
             logprobs=logprobs,
         )
         await _run_next_task(env.task)
-        envelope = await _read_appraisal(env.db, "ke")
+        envelope = await _read_appraisal(env.recorder, "ke")
         assert envelope["entropy"]["kind"] == "topn"
         assert envelope["entropy"]["n_tokens"] == 2
         assert envelope["entropy"]["mean"] >= 0.0
@@ -468,7 +449,6 @@ class TestPastClaims:
 
 class TestStage2Listeners:
     async def _run(self, env, trace_id, annotations=None):
-        await env.outcome.record_exchange(trace_id, env.channel.id, origin="user")
         await _originate(env, trace_id)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="the reply",
@@ -483,7 +463,7 @@ class TestStage2Listeners:
 
         async def listener(**kwargs):
             # Stage 2 is persisted before listeners run.
-            kwargs["persisted"] = (await _read_appraisal(env.db, kwargs["trace_id"]))["stage2"]
+            kwargs["persisted"] = (await _read_appraisal(env.recorder, kwargs["trace_id"]))["stage2"]
             heard.append(kwargs)
 
         env.appraisal.add_stage2_listener(listener)

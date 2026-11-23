@@ -23,6 +23,7 @@ from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT, AppraisalPl
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT, MemoryPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
+from tests.cognition.trace_helpers import add_trace
 from helpers import build_plugin_and_channel, window_of
 from test_lease_scopes import ScriptedSession, loud_unleased_records, usage_rows
 
@@ -118,6 +119,8 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm, config)
+    # The reporters fire on_trace_record, so the trace plugin comes first.
+    add_trace(pm)
     outcome = OutcomeLogPlugin()
     pm.register(outcome, name="outcome_log")
     memory = MemoryPlugin()
@@ -187,7 +190,6 @@ async def test_appraisal_stage2_is_keyed_by_channel(env: Env, caplog: pytest.Log
     """AC8: appraisal stage 2 (a fork) carries the channel id."""
     caplog.set_level(logging.WARNING)
     env.channel.conversation = window_of(env.channel.id, [41, 42])
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is the heater the culprit?", annotations={})
 
@@ -202,7 +204,6 @@ async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCap
     """AC8: a critique lens (a fork) carries the channel id."""
     caplog.set_level(logging.WARNING)
     env.channel.conversation = window_of(env.channel.id, [7, 8])
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.critique.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=7, text="when is the meeting?", annotations={})
 

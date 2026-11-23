@@ -12,7 +12,7 @@ Interface pinned here:
 
 Origin is a plugin-side convention (#131): annotations["origin"] when present,
 else "user" for a trace admitted through on_message_admitted, else the
-origin exchange_log holds, else "task".
+origin ``resolve_trace_origin`` answers, else "task".
 
 Integration tests (a real Agent, outcome log and appraisal) cover the
 seams: the withheld path into WP2.8, origin through tool cycles. The
@@ -23,14 +23,14 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import aiosqlite
 import pytest
 
 from corvidae.channel import Channel, ChannelConfig
-from corvidae.hooks import hookimpl
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
 from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
+from tests.cognition.trace_helpers import TraceRecorder, add_trace
 from llm_response_fixtures import (
     _make_mixed_response,
     _make_text_response,
@@ -66,20 +66,25 @@ class Env:
             await asyncio.gather(*pending, return_exceptions=True)
 
     async def row(self, trace_id):
+        """The trace's merged records, as the old exchange_log row held them.
+
+        Records of one source merge in order, the last write per top-level
+        key winning; origin comes from ``resolve_trace_origin``.
+        """
         await self.settle()
-        async with self.db.execute(
-            "SELECT origin, message_rowid, appraisal, outcomes FROM exchange_log WHERE trace_id = ?",
-            (trace_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row is not None, f"no exchange_log row for {trace_id}"
-        origin, rowid, appraisal, outcomes = row
-        return {
-            "origin": origin,
-            "message_rowid": rowid,
-            "appraisal": json.loads(appraisal) if appraisal else {},
-            "outcomes": json.loads(outcomes) if outcomes else {},
-        }
+        outcomes: dict = {}
+        appraisal: dict = {}
+        # Merge each source's fragments in the order they were fired.
+        for rec in self.recorder.records:
+            if rec["trace_id"] != trace_id:
+                continue
+            if rec["source"] == "appraisal":
+                appraisal.update(rec["record"])
+            elif rec["source"] in ("gates", "silence", "critique"):
+                outcomes.update(rec["record"])
+        origin = await self.pm.ahook.resolve_trace_origin(trace_id=trace_id)
+        assert origin is not None or outcomes or appraisal, f"no records for {trace_id}"
+        return {"origin": origin, "appraisal": appraisal, "outcomes": outcomes}
 
     async def rows_by_type(self):
         async with self.db.execute(
@@ -101,6 +106,9 @@ async def make_env(tmp_path):
         cfg = config if config is not None else {}
         plugin, channel, db = await build_plugin_and_channel(mock_on_agent_response=False)
         pm = plugin.pm
+        # The trace protocol plugin and a listener on it, before any reporter.
+        recorder = TraceRecorder()
+        add_trace(pm, recorder)
         outcome = OutcomeLogPlugin()
         pm.register(outcome, name="outcome_log")
         await outcome.on_init(pm=pm, config=cfg)
@@ -122,8 +130,9 @@ async def make_env(tmp_path):
         plugin._client = client
         plugin._mark_started()
         env = Env(plugin, channel, db, cfg)
-        env.recorder = TraceRecorder()
-        pm.register(env.recorder, name="trace_recorder")
+        env.recorder = recorder
+        env.persisted = PersistedTraceIds()
+        pm.register(env.persisted, name="persisted_trace_ids")
         envs.append(env)
         return env
 
@@ -143,7 +152,7 @@ async def _say(env, text):
     return trace_id
 
 
-class TraceRecorder:
+class PersistedTraceIds:
     """Records every originating trace id, in order (on_message_persisted)."""
 
     def __init__(self):
@@ -156,14 +165,14 @@ class TraceRecorder:
 
 async def _notify(env, text, annotations=None):
     """A notification-born exchange; returns its dequeue-minted trace id."""
-    before = len(env.recorder.trace_ids)
+    before = len(env.persisted.trace_ids)
     await env.plugin.on_notify(
         channel=env.channel, source="scheduler", text=text,
         tool_call_id=None, annotations=annotations,
     )
     await drain(env.plugin, env.channel)
-    assert len(env.recorder.trace_ids) == before + 1
-    return env.recorder.trace_ids[-1]
+    assert len(env.persisted.trace_ids) == before + 1
+    return env.persisted.trace_ids[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -288,35 +297,34 @@ class TestWithheldStillCritiqued:
 
 
 class _FakePM:
-    def __init__(self, **plugins):
-        self.plugins = plugins
+    """A pm stand-in for tests that only read config (no hooks fire)."""
 
     def get_plugin(self, name):
-        return self.plugins.get(name)
+        return None
 
 
-class _StubOutcomeLog:
-    def __init__(self):
-        self.writes: list[dict] = []
+def _writes(recorder) -> list[dict]:
+    """The gate's trace records, as ``{"trace_id", "outcomes"}`` dicts."""
+    return [
+        {"trace_id": r["trace_id"], "outcomes": r["record"]}
+        for r in recorder.by_source("gates")
+    ]
 
-    async def upsert_exchange(self, trace_id, channel_id, origin=None, **columns):
-        self.writes.append({"trace_id": trace_id, "origin": origin, **columns})
 
-
-async def _gate(config=None, *, appraisal=None, persistence=None):
-    """A GatePlugin wired to stubs; returns (gate, outcome_log, channel)."""
+async def _gate(config=None, *, appraisal=None):
+    """A GatePlugin on a real plugin manager with the trace plugin and a
+    recorder; returns (gate, recorder, channel)."""
     from corvidae_cognition.gates import GatePlugin
 
-    outcome_log = _StubOutcomeLog()
-    plugins = {"outcome_log": outcome_log}
+    pm = create_plugin_manager()
+    recorder = TraceRecorder()
+    add_trace(pm, recorder)
     if appraisal is not None:
-        plugins["appraisal"] = appraisal
-    if persistence is not None:
-        plugins["persistence"] = persistence
-    gate = GatePlugin(pm=_FakePM(**plugins))
+        pm.register(appraisal, name="appraisal")
+    gate = GatePlugin(pm=pm)
     gate.config = config or {}
     channel = Channel(transport="test", scope="gates", config=ChannelConfig())
-    return gate, outcome_log, channel
+    return gate, recorder, channel
 
 
 async def _final(gate, channel, annotations=None, trace_id="t1"):
@@ -336,7 +344,7 @@ class TestEmissions:
             channel=channel, text="x", emission=emission, trace_id="t1", annotations={"origin": "heartbeat"},
         )
         assert verdict is None
-        assert log.writes == []
+        assert _writes(log) == []
 
     @pytest.mark.parametrize("emission", ["progress", "thinking"])
     async def test_emission_switches(self, emission):
@@ -346,7 +354,7 @@ class TestEmissions:
         channel.runtime_overrides[f"gate.send.allow_{emission}"] = False
         assert await gate.should_send_response(**args) is False
         await asyncio.gather(*set(gate._record_tasks))
-        assert log.writes == [{"trace_id": "t1", "origin": None, "outcomes": {"suppressed": {emission: True}}}]
+        assert _writes(log) == [{"trace_id": "t1", "origin": None, "outcomes": {"suppressed": {emission: True}}}]
 
 
 class TestTunableTypes:
@@ -394,14 +402,28 @@ class TestOrigin:
         assert await gate._origin("t2", {}) == "task"
         assert await gate._origin(None, {}) == "task"
 
-    async def test_evicted_user_trace_reads_exchange_log(self):
-        from types import SimpleNamespace
+    async def test_evicted_user_trace_resolves_through_the_hook(self, tmp_path):
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
+        from corvidae.persistence import PersistencePlugin, init_db
+        import aiosqlite
 
-        async with aiosqlite.connect(":memory:") as db:
-            await db.execute("CREATE TABLE exchange_log (trace_id TEXT, origin TEXT)")
-            await db.execute("INSERT INTO exchange_log VALUES ('old', 'user')")
-            gate, _log, _channel = await _gate(persistence=SimpleNamespace(db=db))
+        async with aiosqlite.connect(str(tmp_path / "sessions.db")) as db:
+            await init_db(db)
+            gate, _log, channel = await _gate()
+            pm = gate.pm
+            # A real outcome_log on a file DB admits "old"; gates never saw it.
+            persistence = PersistencePlugin()
+            persistence.db = db
+            pm.register(persistence, name="persistence")
+            outcome = OutcomeLogPlugin()
+            pm.register(outcome, name="outcome_log")
+            await outcome.on_init(pm, {})
+            await outcome.on_start({})
+            await outcome.on_message_admitted(
+                channel=channel, trace_id="old", sender="u", text="x",
+            )
             assert await gate._origin("old", {}) == "user"
+            assert await gate._origin("never-seen", {}) == "task"
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +474,7 @@ async def _emit(gate, channel, emission, annotations=None, trace_id="t1"):
 def _merged_outcomes(log) -> dict:
     """Every outcomes fragment the stub log received, merged by top-level key."""
     merged: dict = {}
-    for write in log.writes:
+    for write in _writes(log):
         merged.update(write.get("outcomes", {}))
     return merged
 
@@ -461,7 +483,7 @@ class TestQuietOrigins:
     async def test_q1_listed_origin_final_is_withheld(self):
         gate, log, channel = await _gate(_quiet_config())
         assert await _final(gate, channel, _GITHUB) is False
-        send = log.writes[-1]["outcomes"]["send"]
+        send = _writes(log)[-1]["outcomes"]["send"]
         assert send["reason"] == "quiet_origin"
         assert send["vetoed"] is True
         assert send["surfaced"] is False
@@ -471,7 +493,7 @@ class TestQuietOrigins:
         config = _quiet_config(allow_progress=True, allow_thinking=True)
         gate, log, channel = await _gate(config)
         assert await _emit(gate, channel, emission, _GITHUB) is False
-        assert log.writes[-1]["outcomes"] == {
+        assert _writes(log)[-1]["outcomes"] == {
             "suppressed": {emission: True}, "quiet_origin": "webhook:github",
         }
 
@@ -481,7 +503,7 @@ class TestQuietOrigins:
         the missing message ties back to the quiet origin."""
         gate, log, channel = await _gate(_QUIET)
         assert await _emit(gate, channel, "error", _GITHUB) is False
-        assert log.writes[-1]["outcomes"] == {
+        assert _writes(log)[-1]["outcomes"] == {
             "suppressed": {"error": True}, "quiet_origin": "webhook:github",
         }
 
@@ -607,15 +629,15 @@ class TestQuietOrigins:
         gate, log, channel, tools = await _gate_with_tools(_QUIET)
         await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
         await asyncio.gather(*set(gate._record_tasks))
-        assert log.writes[-1]["trace_id"] == "t1"
-        assert log.writes[-1]["outcomes"] == {"speak_up": "build is broken"}
+        assert _writes(log)[-1]["trace_id"] == "t1"
+        assert _writes(log)[-1]["outcomes"] == {"speak_up": "build is broken"}
 
     async def test_q8_speak_up_without_a_trace_says_the_reply_stays_withheld(self):
         gate, log, channel, tools = await _gate_with_tools(_QUIET)
         result = await _speak_up(tools, channel, trace_id=None)
         assert "trace" in result
         assert "withheld" in result
-        assert log.writes == []
+        assert _writes(log) == []
 
     async def test_q8_speak_up_without_a_channel_returns_error_text(self):
         from corvidae.tool import ToolContext
@@ -665,7 +687,7 @@ class TestNoSalienceFloor:
         gate, log, channel = await _gate({}, appraisal=appraisal)
         assert await _final(gate, channel, {"origin": origin}) is None
         assert appraisal.calls == []
-        assert log.writes == []
+        assert _writes(log) == []
 
     def test_the_gate_has_no_inbound_hook(self):
         """The engagement gate is gone: nothing in GatePlugin judges an
