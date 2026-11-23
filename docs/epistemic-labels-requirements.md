@@ -258,11 +258,19 @@ with this document as their provenance. Two items need the owner.
    its evidence as the window plus a keyword search of raw messages. Giving
    it claims as evidence changes a PRD requirement. This document does not
    ask for it.
-2. **The idle-turn seam.** E9 needs a plugin to put a section into a
-   heartbeat or idle turn. `grep -rn collect_heartbeat corvidae packages`
-   finds no such hook at `98ec754`. If the after-send idle lenses of #1149
-   add one, E9 uses it; otherwise this is a hook request, and the kernel
-   takes a hook only on two use cases.
+2. **The idle-turn seam exists; the cadence is the question.** E9 needs a
+   plugin to put a section into a heartbeat or idle turn, and that seam is
+   already there: `on_heartbeat_collect_prompts(channel)` (spec at
+   `packages/corvidae-cognition/corvidae_cognition/heartbeat.py:123`, called
+   at `:197`), implemented today by memory's recent records and by goals'
+   capped goal list, documented at `docs/cognition.md:41`. So E9 needs no
+   kernel hook. What is not settled is *when* a beat happens: it fires only
+   after the whole system has been quiet for `heartbeat.after` seconds, and
+   the plugin is asleep unless configured. If that is too sparse for E9's
+   re-runs or E10's audit sampling, the question for the owner is which
+   cadence stage 2 should use — a beat, an idle watch on the kernel's
+   `IdleTracker` (`corvidae/idle.py:1`, which fires after quiet but never
+   starts a turn), or the funnel.
 
 ## Open questions
 
@@ -291,7 +299,7 @@ with this document as their provenance. Two items need the owner.
 1. **Store and labels.** E1 to E7, E11, E12, E13. Claims are written,
    checked, labelled and rendered. No falsifiers: nothing goes stale or
    contested yet, and nothing exceeds what its receipts support.
-2. **Falsifiers.** E8 to E10. Needs the idle-turn seam.
+2. **Falsifiers.** E8 to E10. Needs the idle-turn seam, which exists (`on_heartbeat_collect_prompts`); the open question is its cadence, above.
 3. **Later.** A judged contradiction flip that logs both receipts so the
    call can be checked by reading two rows (D6); `record` receipts; any
    writer beyond the idle lens.
