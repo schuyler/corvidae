@@ -2146,6 +2146,50 @@ new reach for code, because the code was already installed and trusted
   edit and does not swap. Review `plugins.replace` like `plugins.disabled`
   (finding 2): both change which code guards the agent.
 
+### 29. `should_execute_tool`: plugins see and can refuse every tool call (#148)
+
+The kernel now offers every dispatched tool call to a veto hook before it
+runs: the main turn's, a subagent's and the fork tool's. This is a new place
+where untrusted text arrives, and a new way to stop a tool. It is not a new
+trust boundary. Plugin code was already trusted (principle 9), and the hook
+lets a plugin narrow what a call can do, never widen it.
+
+- **Model-written arguments reach plugin code before the call.** `arguments`
+  is what the model wrote, validated only against the tool's schema, so it
+  can carry injected text or a secret the model was steered into sending. A
+  check that asks a model about a call runs that text through it. Such a
+  check should frame the arguments as data, as the funnel frames tool
+  results.
+- **Refusal text becomes a tool result.** The model reads a plugin's `reason`
+  as the call's result, inside the kernel's `Error: tool '<name>' was refused
+  ...` frame, in the `tool` role. A reason that quotes the arguments can echo
+  an injection back to the model. A check should not quote untrusted text in
+  its reason unless it fences it.
+- **A late refusal is a core-written system row.** A `Refusal` that misses
+  the allowance becomes a `[late check: <plugin>]` CONTEXT row at the
+  channel's next turn. Like the reply's late row (finding 3), it is in the
+  `system` role. It also quotes the first 40 characters of the call's
+  arguments as JSON, which are model-written, so an injection in the
+  arguments can reach the system role 40 characters at a time.
+  `mid_conversation_system_role: user` covers it like the others. The row is
+  held in memory, and a restart before the next turn loses it.
+- **It fails open, and the allowance bounds it.** A raising implementation is
+  logged at WARNING and the call runs. A check that is still running when
+  the channel's check allowance runs out lets the call run unchecked, and
+  its refusal arrives only as the late row. A security check that must hold
+  therefore catches its own errors and refuses, and decides within
+  `agent.check_allowance_min` if it must hold on every channel. The miss is
+  visible as the `check.missed` metric, tagged with
+  `hook: should_execute_tool`, and a DEBUG line.
+- **Calling channel only.** A refusal bounds what the calling channel's
+  participants can make the agent do. A policy keyed on a target channel
+  (refusing a send or a read because of where it goes) would be a channel
+  wall, which principle 14 rules out (finding 15).
+- **No kernel implementation ships.** With no plugin implementing the hook,
+  nothing is refused, so this changes no behaviour until one is installed.
+  The trust plugin (#138) and the pre-tool-use check (#1075) are the planned
+  consumers.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

@@ -1266,6 +1266,52 @@ class AgentSpec:
         """
 
     @hookspec
+    async def should_execute_tool(
+        self,
+        channel: Channel,
+        tool_name: str,
+        arguments: dict,
+        trace_id: str | None,
+    ) -> bool | Refusal | None:
+        """Veto hook: decide whether one tool call runs (#148, PRD §3.5.12).
+
+        Grammar class: veto (broadcast; resolved with resolve_reject_wins).
+
+        Offered for every dispatched call, a subagent's and the fork tool's
+        included, once its arguments have parsed and validated against the
+        tool's schema, and before it runs. Return a ``Refusal(reason)`` to
+        refuse (a bare ``False`` refuses too, but gives no reason), None for no
+        opinion. Any refusal wins: the call does not run, and its result to
+        the model is the refusal, naming the tool, the reason and what to do
+        next, so the turn continues.
+
+        Runs under the channel's check allowance
+        (``corvidae.checks.run_checks``): every implementation runs
+        concurrently and the call waits no longer than the allowance, then
+        runs unchecked; the miss is recorded. A ``Refusal`` that arrives later
+        refuses nothing but reaches the channel's window as a framed CONTEXT
+        row at its next turn, and wakes no turn. An implementation that raises
+        is logged at warning and counts as no refusal (fail open, PRD
+        principle 5); one that must refuse when it fails catches its own
+        failure and refuses.
+
+        A refusal bounds what the calling channel's participants can make the
+        agent do; refusing because of a *target* channel would be a channel
+        wall (PRD principle 14, §3.5.9).
+
+        All parameters are required (no defaults), so the arg-binding guard
+        catches an impl that re-declares one with a default.
+
+        Args:
+            channel: The calling channel (a subagent's or fork tool's calls
+                carry the channel that started it).
+            tool_name: The tool being called.
+            arguments: The call's arguments, validated against the tool's
+                schema. Model-written: treat them as untrusted.
+            trace_id: The trace the call belongs to, or None.
+        """
+
+    @hookspec
     async def on_message_admitted(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:

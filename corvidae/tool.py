@@ -24,7 +24,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -79,6 +79,13 @@ class ToolTimeouts:
 # Bound applied when a caller passes nothing, so third-party callers of the
 # public dispatch_tool_call are bounded too.
 DEFAULT_TOOL_TIMEOUTS = ToolTimeouts()
+
+#: The per-call veto check dispatch_tool_call runs before a call (#148):
+#: called with (channel, tool name, validated arguments, trace id), it returns
+#: the refusal text to give the model, or None to let the call run.
+#: ``Agent.check_tool_call`` is the one implementation; every dispatch path
+#: passes it.
+ToolCheck = Callable[["Channel", str, dict, "str | None"], Awaitable["str | None"]]
 
 # Tool names whose unreadable own_timeout has already been warned about.
 _warned_own_timeout: set[str] = set()
@@ -514,6 +521,8 @@ async def dispatch_tool_call(
     task_queue: "TaskQueue | None" = None,
     pm=None,
     call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS,
+    check: ToolCheck | None = None,
+    trace_id: str | None = None,
 ) -> ToolCallResult:
     """Parse, dispatch, and wrap a single tool call from an LLM response.
 
@@ -523,7 +532,7 @@ async def dispatch_tool_call(
 
     The transform_tool_result hook fires ONLY when execute_tool_call was
     invoked (success or exception). Pre-dispatch errors (JSON parse failure,
-    unknown tool) return early and skip the hook.
+    unknown tool, rejected arguments, a refusal) return early and skip the hook.
 
     Args:
         call: A tool call dict from the LLM response with keys 'id' and 'function'.
@@ -538,6 +547,11 @@ async def dispatch_tool_call(
             A timeout cancels the tool and returns an error result; the
             outer bound is skipped when the tool declares a not-longer
             ``own_timeout``.
+        check: The per-call veto (should_execute_tool, #148), run once the
+            arguments validate and before the call; its text, when it
+            returns any, is the call's result and the tool does not run.
+            Skipped when ``channel`` is None, since the check needs one.
+        trace_id: The trace the call belongs to, offered to ``check``.
 
     Returns:
         ToolCallResult with the content, error flag, and timing information.
@@ -606,6 +620,20 @@ async def dispatch_tool_call(
             latency_ms=None,
             error=True,
         )
+
+    # Step 3b: Offer the validated call to the veto check (PRD §3.5.12). It
+    # runs before the call's own time bound starts, under the channel's check
+    # allowance; a refusal is the call's result and the tool does not run.
+    if check is not None and channel is not None:
+        refusal = await check(channel, fn_name, args, trace_id)
+        if refusal is not None:
+            return ToolCallResult(
+                tool_call_id=call_id,
+                tool_name=fn_name,
+                content=refusal,
+                latency_ms=None,
+                error=True,
+            )
 
     # Step 4: Execute the tool (ACP / overrides go through ToolBackend; else inline)
     from corvidae.tools.backends import resolve_tool_backend

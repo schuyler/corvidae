@@ -79,7 +79,7 @@ agent:
                                   # exchange: keep it only for the current exchange (since the
                                   # last user message); pair with the server's preserve_thinking off.
   # max_turns: 10                   # max consecutive tool-calling turns per exchange (message or scheduled firing)
-  # check_allowance_min: 5          # seconds: the least a veto check may delay a reply on any channel,
+  # check_allowance_min: 5          # seconds: the least a veto check may delay a reply or tool call on any channel,
   #                                 # and what a channel gets when its transport declares no allowance
   # max_tool_result_chars: 100000   # deprecated: use tools.max_result_chars (longer results are cut and spilled)
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
@@ -479,7 +479,7 @@ channels:
   # acp:*:                          # every ACP session (ids are minted per session)
   #   max_turns: 30
   # signal:*:
-  #   check_allowance: 120          # seconds a veto check may delay a reply here (Signal declares 90);
+  #   check_allowance: 120          # seconds a veto check may delay a reply or tool call here (Signal declares 90);
   #                                 # never below agent.check_allowance_min
   # irc:#lex:
   #   register_prompt: "This is #lex, a small channel of regulars; keep it brief."

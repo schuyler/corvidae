@@ -174,6 +174,41 @@ def late_check_text(text: str, plugin: str, reason: str) -> str:
     )
 
 
+#: What a tool refusal says for a bare ``False``, which carries no reason.
+NO_REASON_GIVEN = "no reason given"
+
+
+def tool_refusal_text(tool_name: str, reasons: list[str]) -> str:
+    """The result a refused tool call returns to the model (#148).
+
+    Names the tool, every refusal's reason and what to do next, so the turn
+    can continue on another path (PRD §3.5.12).
+    """
+    return (
+        f"Error: tool '{tool_name}' was refused before it ran: "
+        f"{'; '.join(reasons)}. It did not run. Don't retry it unchanged; "
+        "use another approach, or ask the user."
+    )
+
+
+def late_tool_check_text(tool_name: str, arguments: dict, plugin: str, reason: str) -> str:
+    """The late-check row content for a refusal of a call that already ran (#148).
+
+    Quotes the call's arguments, cut like the reply excerpt, so the agent can
+    tell which call of that tool it was. The arguments are model-written.
+    """
+    excerpt = " ".join(json.dumps(arguments, ensure_ascii=False).split())
+    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
+        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
+    return (
+        f"[{LATE_CHECK_LABEL}: {plugin}]\n\n"
+        f"A check on your call to tool '{tool_name}' with arguments {excerpt} "
+        "finished after its allowance ran out, so the call ran unchecked. "
+        f"It found: {reason}\n"
+        "Decide whether to undo or follow up on what that call did."
+    )
+
+
 def unsent_marker_emission(content: object) -> str | None:
     """The emission a not-sent marker's ``content`` names, or None when the
     content is not a marker. History replay uses it to hold back what a

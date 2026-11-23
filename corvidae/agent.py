@@ -67,8 +67,11 @@ from corvidae.context import (
     ContextWindow,
     count_tokens,
     late_check_text,
+    late_tool_check_text,
     message_tokens,
     MessageType,
+    NO_REASON_GIVEN,
+    tool_refusal_text,
     unsent_marker_text,
     well_formed_calls,
 )
@@ -1213,6 +1216,53 @@ class Agent(CorvidaePlugin):
             on_late=on_late,
         )
         return resolve_reject_wins(results) is not False
+
+    async def check_tool_call(
+        self, channel: Channel, tool_name: str, arguments: dict, trace_id: str | None
+    ) -> str | None:
+        """Offer one validated tool call to should_execute_tool (#148).
+
+        PRD §3.5.12. Every implementation runs under the channel's check
+        allowance (``run_checks``). Returns the refusal text the call's result
+        carries when any in-time verdict refuses, else None and the call
+        runs. A ``Refusal`` that arrives after the allowance refuses nothing;
+        it is held for the channel's next turn (_drain_late_checks). Every
+        dispatch path passes this as dispatch_tool_call's ``check``.
+        """
+        assert self._registry is not None
+
+        async def on_late(plugin_name: str, verdict: object) -> None:
+            # Only a refusal has anything to say; the miss is already counted.
+            if isinstance(verdict, Refusal):
+                self._late_checks.setdefault(channel.id, []).append(
+                    late_tool_check_text(tool_name, arguments, plugin_name, verdict.reason)
+                )
+
+        results = await run_checks(
+            self.pm, "should_execute_tool",
+            channel=channel,
+            kwargs={
+                "channel": channel, "tool_name": tool_name,
+                "arguments": arguments, "trace_id": trace_id,
+            },
+            allowance=resolve_check_allowance(self.pm, self._registry, channel),
+            clock=self._check_clock(),
+            on_late=on_late,
+        )
+        if resolve_reject_wins(results) is not False:
+            return None
+        # Any refusal wins; name every reason, a bare False as having none.
+        reasons = [
+            r.reason if isinstance(r, Refusal) else NO_REASON_GIVEN
+            for r in results
+            if r is False or isinstance(r, Refusal)
+        ]
+        logger.info(
+            "refused tool %s on %s by a should_execute_tool check: %s",
+            tool_name, channel.id, "; ".join(reasons),
+            extra={"channel": channel.id, "tool": tool_name, "trace_id": trace_id},
+        )
+        return tool_refusal_text(tool_name, reasons)
 
     def _drain_late_checks(self, channel: Channel, conv: ContextWindow) -> None:
         """Append the channel's held late-check rows to its window.
@@ -2374,6 +2424,8 @@ class Agent(CorvidaePlugin):
                     task_queue=task_queue,
                     pm=self.pm,
                     call_timeouts=self._tool_call_timeouts,
+                    check=self.check_tool_call,
+                    trace_id=trace_id,
                 )
                 return result.content
 
