@@ -336,19 +336,19 @@ def _claims(n):
             for i in range(n)]
 
 
-def _funnel_entries(env):
+def _held_entries(env):
     from corvidae_cognition.critique import PROVENANCE_NOTE
 
-    env.funnel.ingest_and_wake.assert_awaited_once()
+    env.held.hold_and_wake.assert_awaited_once()
     # Other waking lenses' sentences (proactivity's, #1126) follow the note.
-    assert env.funnel.ingest_and_wake.await_args.kwargs["stub_text"].startswith(PROVENANCE_NOTE)
-    return env.funnel.ingest_and_wake.await_args.kwargs["entries"]
+    assert env.held.hold_and_wake.await_args.kwargs["stub_text"].startswith(PROVENANCE_NOTE)
+    return env.held.hold_and_wake.await_args.kwargs["entries"]
 
 
 async def _verdict_run(tmp_path, text, n=3):
     agent = RenderingForkAgent({"critique"}, text=text)
-    env = await _provenance_env(tmp_path, with_funnel=True)
-    env.funnel.ingest_and_wake = AsyncMock()
+    env = await _provenance_env(tmp_path, with_held=True)
+    env.held.hold_and_wake = AsyncMock()
     await _provenance_exchange(env, agent)
     await _run_provenance(env, claims=_claims(n))
     return env, agent
@@ -412,7 +412,7 @@ async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
             {"claim": 2, "reason": "nothing says so", "supported": False},
             {"claim": 3, "reason": "the user said it", "supported": True}]}))
     try:
-        assert _funnel_entries(env) == [
+        assert _held_entries(env) == [
             f"[provenance] {_claims(3)[1]['claim']} \u2014 nothing says so"]
         outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
@@ -437,7 +437,7 @@ def test_objection_quotes_our_claim_not_a_model_echo():
 async def test_all_supported_records_the_outcome_and_registers_nothing(tmp_path):
     env, agent = await _verdict_run(tmp_path, verdicts_text(True, True, True))
     try:
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold_and_wake.assert_not_awaited()
         outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 3, "objections": 0}
@@ -482,14 +482,14 @@ def _v(claim, reason="r", supported=True):
         "supported-not-bool", "supported-is-int", "claim-is-bool", "reason-not-str"])
 async def test_malformed_verdicts_skip_the_check(tmp_path, caplog, text):
     agent = RenderingForkAgent({"critique"}, text=text)
-    env = await _provenance_env(tmp_path, with_funnel=True)
-    env.funnel.ingest_and_wake = AsyncMock()
+    env = await _provenance_env(tmp_path, with_held=True)
+    env.held.hold_and_wake = AsyncMock()
     try:
         await _provenance_exchange(env, agent)
         with caplog.at_level("WARNING", logger="corvidae.critique"):
             await _run_provenance(env, claims=_claims(3))
         await _assert_skipped(env, agent, caplog, "the fork failed", fork_calls=1)
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold_and_wake.assert_not_awaited()
     finally:
         await _teardown(env)
 

@@ -132,7 +132,7 @@ class GoalsPlugin(CorvidaePlugin):
     """Goals table, the goal tools, and goals' section of the heartbeat's beat."""
 
     hookspecs = GoalsSpec
-    depends_on = frozenset({"persistence", "memory", "funnel", "clock"})
+    depends_on = frozenset({"persistence", "memory", "clock"})
     # The heartbeat owns the hook spec goals' beat section implements; it is
     # optional so a config without a heartbeat starts quietly (#1079).
     optional_depends_on = frozenset({"heartbeat"})

@@ -14,8 +14,8 @@
   exchange; the provenance critic (a model) judges support. No regex or
   word list judges language anywhere on that path;
 - silent execution: empty verdict -> no on_notify, outcome recorded;
-  non-empty stylistic -> funnel registration, no stub; non-empty
-  provenance -> funnel registration + one stub carrying PROVENANCE_NOTE;
+  non-empty stylistic -> held-store hold, no stub; non-empty
+  provenance -> held-store hold_and_wake + one stub carrying PROVENANCE_NOTE;
 - runtime-tunable thresholds via channel.runtime_overrides (directive 2).
 """
 
@@ -42,7 +42,8 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
 from tests.cognition.trace_helpers import TraceRecorder
-from helpers import add_kernel_registry, CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_held, add_kernel_registry, CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 
 EMPTY_VERDICT = json.dumps({"objections": []})
@@ -125,7 +126,7 @@ def _register_trace(pm) -> TraceRecorder:
 
 async def build_critique(
     tmp_path, appraisal=None, chat_text=OBJECTION_VERDICT, fts_contents=(),
-    with_funnel=False, config=None, fork=True, extra_plugins=None,
+    with_held=False, config=None, fork=True, extra_plugins=None,
 ):
     """Wire critique + outcome_log + llm(stub) + task over a file DB.
 
@@ -171,12 +172,12 @@ async def build_critique(
     await task_plugin.on_init(pm=pm, config={})
     task_plugin.task_queue = TaskQueue(max_workers=1)
 
-    funnel = None
-    if with_funnel:
-        from corvidae_cognition.funnel import FunnelPlugin
-        funnel = FunnelPlugin()
-        pm.register(funnel, name="funnel")
-        await funnel.on_init(pm=pm, config={})
+    # The kernel's held-text store, which critique hands verdicts to (#1176);
+    # it reads the kernel clock and registry when it holds an entry.
+    held = None
+    if with_held:
+        install_kernel_clock(pm)
+        held = await add_kernel_held(pm)
 
     if appraisal is not None:
         pm.register(appraisal, name="appraisal")
@@ -201,7 +202,7 @@ async def build_critique(
         channel.conversation = window_of(channel.id, [1, 2, 50])
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, plugin=plugin, task=task_plugin,
-        outcome=outcome, llm=llm, stub=stub, funnel=funnel, channel=channel,
+        outcome=outcome, llm=llm, stub=stub, held=held, channel=channel,
         appraisal=appraisal, fork_agent=fork_agent, recorder=recorder,
     )
 
@@ -508,7 +509,7 @@ class TestLensSelection:
 class TestExecution:
     async def test_empty_verdict_no_notify_outcome_recorded(self, tmp_path):
         env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
-                                   chat_text=EMPTY_VERDICT, with_funnel=True)
+                                   chat_text=EMPTY_VERDICT, with_held=True)
         env.pm.ahook_raise.on_notify = AsyncMock()
         await _fire(env, "kempty", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
@@ -524,13 +525,13 @@ class TestExecution:
 
     async def test_stylistic_objection_registers_without_waking(self, tmp_path):
         env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
-                                   chat_text=OBJECTION_VERDICT, with_funnel=True)
+                                   chat_text=OBJECTION_VERDICT, with_held=True)
         notify = AsyncMock()
         env.pm.ahook_raise.on_notify = notify
-        # Spy on both funnel entry points; ingest keeps its real behaviour.
-        ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest = ingest
-        env.funnel.ingest_and_wake = AsyncMock()
+        # Spy on both store entry points; hold keeps its real behaviour.
+        ingest = AsyncMock(wraps=env.held.hold)
+        env.held.hold = ingest
+        env.held.hold_and_wake = AsyncMock()
         await _fire(env, "kfull", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.recorder, "kfull")
@@ -538,10 +539,13 @@ class TestExecution:
         # Registered without a stub: no wake of any kind.
         ingest.assert_called_once()
         assert "no record says Friday" in "\n".join(ingest.call_args.kwargs["entries"])
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold_and_wake.assert_not_awaited()
         notify.assert_not_awaited()
         # A turn with no origin (a user turn) admits the verdict as framed CONTEXT.
-        await env.funnel.before_agent_turn(env.channel, trace_id="kfull", annotations={})
+        await env.held.admit_for_turn(
+            env.channel, env.channel.conversation, trace_id="kfull", origin=None,
+            contributions=[],
+        )
         context_text = "\n".join(
             m.get("content") or ""
             for m in env.channel.conversation.messages
@@ -564,20 +568,20 @@ class TestRetentionDelivery:
     async def _run_retention(self, tmp_path, key, origin="user"):
         env = await build_critique(
             tmp_path, appraisal=FakeAppraisal(), chat_text=RETENTION_VERDICT,
-            with_funnel=True,
+            with_held=True,
             config={"critique": {"retention": {"root": "values/"}}},
         )
         env.pm.ahook_raise.on_notify = AsyncMock()
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         await _fire(env, key, origin=origin, vector={"retention": 1.0})
         await _run_next_task(env.task)
         return env
 
     async def test_the_file_and_the_content_reach_the_agent(self, tmp_path):
-        """AC1: the funnel entry, not just the outcome record, carries both."""
+        """AC1: the held entry, not just the outcome record, carries both."""
         env = await self._run_retention(tmp_path, "kdeliver")
-        calls = env.funnel.ingest_and_wake.await_args_list + env.funnel.ingest.call_args_list
+        calls = env.held.hold_and_wake.await_args_list + env.held.hold.call_args_list
         entries = "\n".join(e for c in calls for e in c.kwargs["entries"])
         assert "people/yoz.md" in entries, entries
         assert "- runs ARDC tech" in entries, entries
@@ -586,8 +590,8 @@ class TestRetentionDelivery:
     async def test_a_retention_finding_wakes_the_channel_to_file_it(self, tmp_path):
         """AC2a: an action turn, silent by default, that reads before it appends."""
         env = await self._run_retention(tmp_path, "kwake")
-        env.funnel.ingest_and_wake.assert_awaited_once()
-        kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+        env.held.hold_and_wake.assert_awaited_once()
+        kwargs = env.held.hold_and_wake.await_args.kwargs
         # The NO_REPLY veto keys on this origin: anything else would post it.
         assert kwargs["origin"] == "critique"
         stub = kwargs["stub_text"]
@@ -603,19 +607,19 @@ class TestRetentionDelivery:
         with a root goes through ingest and never wakes."""
         env = await build_critique(
             tmp_path, appraisal=FakeAppraisal(), chat_text=OBJECTION_VERDICT,
-            with_funnel=True,
+            with_held=True,
             config={"critique": {"retention": {"root": "values/"}}},
         )
         env.pm.ahook_raise.on_notify = AsyncMock()
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         # The vector picks constrained; its objection must wait.
         await _fire(env, "kmixed", vector={"constrained": 1.0})
         await _run_next_task(env.task)
-        env.funnel.ingest.assert_called_once()
-        entries = env.funnel.ingest.call_args.kwargs["entries"]
+        env.held.hold.assert_called_once()
+        entries = env.held.hold.call_args.kwargs["entries"]
         assert entries and all(e.startswith("[constrained]") for e in entries), entries
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold_and_wake.assert_not_awaited()
         await _teardown(env)
 
 
@@ -623,10 +627,10 @@ class TestRetentionRootFromRecall:
     """Owner, on #857: the retention root matches recall's root when the
     retention key is unset, so facts are filed where recall reads them."""
 
-    async def _env(self, tmp_path, recall, chat_text=EMPTY_VERDICT, with_funnel=False):
+    async def _env(self, tmp_path, recall, chat_text=EMPTY_VERDICT, with_held=False):
         return await build_critique(
             tmp_path, appraisal=FakeAppraisal(), chat_text=chat_text,
-            with_funnel=with_funnel, config={"markdown_recall": recall},
+            with_held=with_held, config={"markdown_recall": recall},
         )
 
     async def test_recalls_root_turns_the_lens_on_and_is_named(self, tmp_path):
@@ -643,14 +647,14 @@ class TestRetentionRootFromRecall:
     async def test_the_wake_stub_names_recalls_root(self, tmp_path):
         """AC9a: the filing turn is told the same root."""
         env = await self._env(
-            tmp_path, {"root": "values/"}, chat_text=RETENTION_VERDICT, with_funnel=True,
+            tmp_path, {"root": "values/"}, chat_text=RETENTION_VERDICT, with_held=True,
         )
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         await _fire(env, "krecw", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
-        env.funnel.ingest_and_wake.assert_awaited_once()
-        assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+        env.held.hold_and_wake.assert_awaited_once()
+        assert "values/" in env.held.hold_and_wake.await_args.kwargs["stub_text"]
         await _teardown(env)
 
     async def test_several_recall_roots_use_the_first(self, tmp_path):
@@ -739,10 +743,10 @@ async def _log(env, content, channel_id=None, message_type="message", role="user
     return cursor.lastrowid
 
 
-async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_funnel=False):
+async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_held=False):
     appraisal = FakeAppraisal()
     return await build_critique(
-        tmp_path, appraisal=appraisal, chat_text=chat_text, with_funnel=with_funnel,
+        tmp_path, appraisal=appraisal, chat_text=chat_text, with_held=with_held,
         config={"critique": {"sample_below_rate": 0.0}}, fork=False,
     )
 
@@ -1142,17 +1146,17 @@ class TestProvenanceCritic:
         finally:
             await _teardown(env)
 
-    async def test_objections_reach_the_funnel(self, tmp_path):
+    async def test_objections_reach_the_held_store(self, tmp_path):
         from corvidae_cognition.critique import PROVENANCE_NOTE
 
-        env = await _provenance_env(tmp_path, with_funnel=True)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env = await _provenance_env(tmp_path, with_held=True)
+        env.held.hold_and_wake = AsyncMock()
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent, trace_id="kf")
             await _run_provenance(env, "kf")
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+            env.held.hold_and_wake.assert_awaited_once()
+            kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert kwargs["entries"][0].startswith("[provenance]")
             # Other waking lenses' sentences (proactivity's, #1126) follow it.
@@ -1165,14 +1169,14 @@ class TestProvenanceCritic:
         fires first, so with the lens on it must cover retention filing too."""
         from corvidae_cognition.critique import PROVENANCE_NOTE
 
-        env = await _provenance_env(tmp_path, with_funnel=True)
+        env = await _provenance_env(tmp_path, with_held=True)
         env.plugin.config.setdefault("critique", {})["retention"] = {"root": "values/"}
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold_and_wake = AsyncMock()
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent, trace_id="kfr")
             await _run_provenance(env, "kfr")
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             assert stub != PROVENANCE_NOTE
             assert "values/" in stub and "append" in stub.lower(), stub
             assert "NO_REPLY" in stub
@@ -1657,8 +1661,8 @@ class TestRetentionWakeNeedsARoot:
     async def _register(env, *, root):
         if root is not None:
             env.plugin.config.setdefault("critique", {})["retention"] = {"root": root}
-        env.funnel.ingest = Mock()
-        env.funnel.ingest_and_wake = AsyncMock()
+        env.held.hold = AsyncMock()
+        env.held.hold_and_wake = AsyncMock()
         objection = {
             "claim": "Yoz runs ARDC tech", "objection": "not filed", "lens": "retention",
             "file": "people/yoz.md", "content": "- runs ARDC tech",
@@ -1670,22 +1674,22 @@ class TestRetentionWakeNeedsARoot:
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
         appraisal = FakeAppraisal()
-        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        env = await build_critique(tmp_path, appraisal=appraisal, with_held=True)
         try:
             await self._register(env, root="values/")
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
-            env.funnel.ingest.assert_not_called()
+            env.held.hold_and_wake.assert_awaited_once()
+            assert "values/" in env.held.hold_and_wake.await_args.kwargs["stub_text"]
+            env.held.hold.assert_not_called()
         finally:
             await _teardown(env)
 
     async def test_without_a_root_the_finding_waits_for_the_next_turn(self, tmp_path):
         appraisal = FakeAppraisal()
-        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        env = await build_critique(tmp_path, appraisal=appraisal, with_held=True)
         try:
             await self._register(env, root=None)
-            env.funnel.ingest_and_wake.assert_not_awaited()
-            [entry] = env.funnel.ingest.call_args.kwargs["entries"]
+            env.held.hold_and_wake.assert_not_awaited()
+            [entry] = env.held.hold.call_args.kwargs["entries"]
             assert entry.startswith("[retention]") and "people/yoz.md" in entry, entry
         finally:
             await _teardown(env)
@@ -1699,17 +1703,17 @@ class TestCorrectionFindingsWait:
     the turn's annotations to the delivery."""
 
     async def test_provenance_findings_on_a_correction_wait(self, tmp_path):
-        env = await _provenance_env(tmp_path, with_funnel=True)
-        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-        env.funnel.ingest_and_wake = AsyncMock()
+        env = await _provenance_env(tmp_path, with_held=True)
+        env.held.hold = AsyncMock(wraps=env.held.hold)
+        env.held.hold_and_wake = AsyncMock()
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         correction = {"origin": "critique"}
         try:
             await _provenance_exchange(env, agent, trace_id="kc", annotations=correction)
             await _stage2(env, "kc", [CLAIM], annotations=correction)
             await _run_next_task(env.task)
-            env.funnel.ingest_and_wake.assert_not_awaited()
-            [call] = env.funnel.ingest.call_args_list
+            env.held.hold_and_wake.assert_not_awaited()
+            [call] = env.held.hold.call_args_list
             assert call.kwargs["entries"][0].startswith("[provenance]"), call
         finally:
             await _teardown(env)
@@ -1718,8 +1722,8 @@ class TestCorrectionFindingsWait:
         env = await TestRetentionDelivery._run_retention(
             TestRetentionDelivery(), tmp_path, "kcr", origin="critique")
         try:
-            env.funnel.ingest_and_wake.assert_not_awaited()
-            entries = [e for c in env.funnel.ingest.call_args_list for e in c.kwargs["entries"]]
+            env.held.hold_and_wake.assert_not_awaited()
+            entries = [e for c in env.held.hold.call_args_list for e in c.kwargs["entries"]]
             assert any(e.startswith("[retention]") for e in entries), entries
         finally:
             await _teardown(env)

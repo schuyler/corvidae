@@ -43,13 +43,13 @@ def narrative_of(words: int) -> str:
 
 
 def overrun_records(caplog) -> list[logging.LogRecord]:
-    """WARNING records from the memory plugin that talk about the entry target."""
+    """WARNING records from the memory plugin that report an entry over the target."""
     return [
         r
         for r in caplog.records
         if r.levelno == logging.WARNING
         and r.name == "corvidae.memory"
-        and "target" in r.getMessage()
+        and "entry over memory.entry_target_tokens" in r.getMessage()
     ]
 
 

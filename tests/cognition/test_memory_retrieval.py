@@ -1,6 +1,6 @@
 """Tests for the retrieval read path (Phase 1a WP1a.7, bootstrap-mapping §3.1).
 
-before_agent_turn embeds the inbound user text, scores vec-KNN candidates
+before_compose embeds the inbound user text, scores vec-KNN candidates
 by similarity × recency decay, annotates relevance bands, admits the
 winners through the funnel, bumps access stats for what was admitted, and
 persists a retrieval_log row. Encoder failure degrades to FTS5.
@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from helpers import add_kernel_held, add_kernel_registry, memory_turn
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
@@ -102,7 +103,7 @@ class StubEmbedClient:
 
 
 async def build_retrieval_env(config=None, db_path=":memory:"):
-    """persistence + llm(stub embedder) + funnel + memory on one pm.
+    """persistence + llm(stub embedder) + held store + funnel + memory on one pm.
 
     ``db_path`` lets a test open a pre-seeded on-disk database.
     Returns (memory, embedder, channel, conv, db).
@@ -128,6 +129,10 @@ async def build_retrieval_env(config=None, db_path=":memory:"):
     llm._clients["embedding"] = embedder
     stub_llm_config(llm, config.get("llm"))
 
+    # The held-text store admits what memory contributes, under the funnel's
+    # policy (#1176); the store reads the registry and the clock.
+    add_kernel_registry(pm)
+    await add_kernel_held(pm)
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")
     await funnel.on_init(pm=pm, config=config)
@@ -178,7 +183,7 @@ async def seed_memory(
 async def ask(memory, channel, conv, text: str) -> None:
     """Simulate the turn-loop entry: append the user message, fire retrieval."""
     conv.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+    await memory_turn(memory, channel=channel, trace_id=None)
 
 
 def context_messages(conv) -> list[dict]:
@@ -229,7 +234,7 @@ class TestRetrievalBasics:
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, channel.id, "some memory about wifi networks")
         conv.append({"role": "system", "content": "[task]\n\nwifi wifi wifi"})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
         assert context_messages(conv) == []
         assert embedder.calls == []
         await db.close()
@@ -338,8 +343,8 @@ class TestDedupeAndStats:
 
     async def test_budget_dropped_record_is_not_credited(self):
         """Bug I-1 regression: only B is admitted and A is budget-dropped, so
-        only B's access stats move. Records are credited from the exact lines
-        FunnelPlugin.admit_detailed returns, never by substring search of the
+        only B's access stats move. Records are credited from the exact keys
+        the store reports as admitted, never by substring search of the
         framed window content."""
         from corvidae.context import count_tokens
 
@@ -613,9 +618,7 @@ class TestRetrievalLogSimilarity:
         await seed_memory(db, channel.id,
                           "kestrel moved the rain gauge to the north fence")
         conv.append({"role": "user", "content": "where is the rain gauge?"})
-        await memory.before_agent_turn(
-            channel=channel, trace_id="ex-sim", annotations={}
-        )
+        await memory_turn(memory, channel=channel, trace_id="ex-sim")
 
         async with db.execute(
             "SELECT top_similarity FROM retrieval_log"
@@ -704,7 +707,7 @@ class TestBurstRetrieval:
         # Three unanswered user messages; only the first matches a memory.
         for text in ("zephyr quasar nebula pulsar", "ok", "thanks"):
             conv.append({"role": "user", "content": text})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         # m1's text reaches the embedded query, and its memory is admitted.
         assert "zephyr" in embedder.calls[-1][0]
@@ -732,7 +735,7 @@ class TestBurstRetrieval:
                       + [f"gamma{i}" for i in range(8, 21)])
         for text in (m1, m2, m3):
             conv.append({"role": "user", "content": text})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         recalled = " ".join(m["content"] for m in context_messages(conv))
         assert "falconry apprenticeship" in recalled

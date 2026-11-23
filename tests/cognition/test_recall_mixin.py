@@ -1,9 +1,13 @@
-"""RED tests for #718: the shared recall-source mixin (``corvidae_cognition.recall``).
+"""Tests for #718 / #1176: the shared recall-source mixin (``corvidae_cognition.recall``).
 
 Covers ``SearchGate`` (cooldown and single-flight on an injected clock),
-``parse_recall_settings`` (rejected-value messages), and ``RecallSourceMixin``
-on a real plugin manager with the real funnel and a fake source. ``recall`` is
-imported lazily through ``recall_mod`` so the module collects before it exists.
+``parse_recall_settings`` (rejected-value messages), and the mixin's
+``before_compose`` on a real plugin manager with a fake source. The mixin
+answers the kernel's before-compose gather with a ``Contribution`` (what that
+contribution holds for a real folder is pinned by ``test_recall_contribution.py``);
+these tests call ``before_compose`` as the gather does, with ``channel``,
+``trace_id`` and ``annotations`` keywords. ``recall`` is imported lazily through
+``recall_mod``.
 """
 
 import asyncio
@@ -11,18 +15,15 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 
-import aiosqlite
 import pytest
 
-import corvidae_cognition.funnel as funnel_mod
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
+from corvidae.held import Contribution
 from corvidae.hooks import (
     CorvidaePlugin, create_plugin_manager, hookimpl,
-    install_plugin_hookspecs, report_orphan_hookimpls,
+    install_plugin_hookspecs,
 )
-from corvidae.persistence import PersistencePlugin, init_db
-from corvidae_cognition.funnel import FunnelPlugin
 
 
 def recall_mod():
@@ -92,56 +93,39 @@ class FakeSource:
         return _Source(*args, **kwargs)
 
 
-async def make(config: dict | None = None, with_funnel: bool = True) -> SimpleNamespace:
-    # A funnel and a fake source on a real plugin manager, one channel, in-memory DB.
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
+async def make(config: dict | None = None) -> SimpleNamespace:
+    # A fake source on a real plugin manager, one channel.
     pm = create_plugin_manager()
-    persistence = PersistencePlugin()
-    persistence.db = db
-    pm.register(persistence, name="persistence")
     clock = Clock()
-    funnel = FunnelPlugin(now=clock)
-    if with_funnel:
-        pm.register(funnel, name="funnel")
     source = FakeSource(clock)
     pm.register(source, name="fake_recall")
     install_plugin_hookspecs(pm)
-    cfg = config or {}
-    await funnel.on_init(pm=pm, config=cfg)
-    await source.on_init(pm=pm, config=cfg)
+    await source.on_init(pm=pm, config=config or {})
     channel = Channel(transport="test", scope="recall")
     channel.conversation = ContextWindow(channel.id)
     return SimpleNamespace(
-        pm=pm, funnel=funnel, source=source, channel=channel,
-        conv=channel.conversation, clock=clock, db=db,
+        pm=pm, source=source, channel=channel, conv=channel.conversation, clock=clock,
     )
 
 
 @pytest.fixture
 async def build():
-    # Factory for make(); closes the databases it opened.
-    opened: list[aiosqlite.Connection] = []
+    # Factory for make().
+    async def _build(config: dict | None = None):
+        return await make(config)
 
-    async def _build(config: dict | None = None, with_funnel: bool = True):
-        env = await make(config, with_funnel)
-        opened.append(env.db)
-        return env
-
-    yield _build
-    for db in opened:
-        await db.close()
+    return _build
 
 
-async def turn(env: SimpleNamespace) -> None:
-    # One agent turn: the funnel sweeps, drains, then collects from the source.
-    await env.funnel.before_agent_turn(
+async def compose(env: SimpleNamespace) -> Contribution | None:
+    # One turn's before_compose answer from the source, as the gather calls it.
+    return await env.source.before_compose(
         channel=env.channel, trace_id="t", annotations={"origin": "user"}
     )
 
 
 async def settle() -> None:
-    # Let background searches and their done callbacks run.
+    # Let a started search run up to its first await.
     for _ in range(5):
         await asyncio.sleep(0)
 
@@ -149,14 +133,6 @@ async def settle() -> None:
 def user(env: SimpleNamespace, text: str) -> None:
     # Append a user message to the channel's window.
     env.conv.append({"role": "user", "content": text})
-
-
-def context_text(env: SimpleNamespace) -> str:
-    # All CONTEXT content in the window.
-    return "\n".join(
-        m.get("content") or "" for m in env.conv.messages
-        if m.get("_message_type") == MessageType.CONTEXT
-    )
 
 
 def warnings(caplog) -> list[logging.LogRecord]:
@@ -250,8 +226,7 @@ class TestGate:
         user(env, "first question")
         env.conv.append({"role": "assistant", "content": "an answer"})
         user(env, "and a follow up")
-        await turn(env)
-        await settle()
+        await compose(env)
         # The previous reply precedes the unanswered user message, as memory builds it.
         assert env.source.queries == ["an answer\n\nand a follow up"]
 
@@ -264,26 +239,23 @@ class TestGate:
     async def test_other_tails_are_not_searched(self, build, tail):
         env = await build({"fake_recall": {"cooldown": 0}})
         env.conv.append(dict(tail))
-        await turn(env)
-        await settle()
+        assert await compose(env) is None
         assert env.source.queries == []
 
     async def test_a_summary_row_at_the_tail_is_not_searched(self, build):
         env = await build({"fake_recall": {"cooldown": 0}})
         user(env, "real question")
         env.conv.append({"role": "user", "content": "a summary"}, MessageType.SUMMARY)
-        await turn(env)
-        await settle()
+        assert await compose(env) is None
         assert env.source.queries == []
 
     async def test_context_rows_after_the_user_message_are_looked_through(self, build):
-        # on_funnel_ingest runs last in the turn, after the funnel (or memory) has
+        # before_compose runs after every before_agent_turn, which may have
         # appended CONTEXT below the user message; the turn is still a user turn.
         env = await build({"fake_recall": {"cooldown": 0}})
         user(env, "real question")
         env.conv.append({"role": "user", "content": "ctx"}, MessageType.CONTEXT)
-        await turn(env)
-        await settle()
+        await compose(env)
         assert env.source.queries == ["real question"]
 
     async def test_context_rows_after_an_assistant_reply_do_not_make_it_a_user_turn(self, build):
@@ -291,47 +263,28 @@ class TestGate:
         user(env, "question")
         env.conv.append({"role": "assistant", "content": "a reply"})
         env.conv.append({"role": "user", "content": "ctx"}, MessageType.CONTEXT)
-        await turn(env)
-        await settle()
+        assert await compose(env) is None
         assert env.source.queries == []
 
     async def test_a_skipped_turn_does_not_use_up_the_cooldown(self, build):
         env = await build({"fake_recall": {"cooldown": 100}})
         env.conv.append({"role": "assistant", "content": "a reply"})
-        await turn(env)
+        await compose(env)
         user(env, "question")
-        await turn(env)
-        await settle()
+        await compose(env)
         assert len(env.source.queries) == 1
 
 
-class TestAdmission:
-
-    async def test_a_hit_reaches_the_window_as_framed_context_on_the_next_turn(self, build):
-        env = await build({"fake_recall": {"cooldown": 0}})
-        user(env, "question")
-        await turn(env)
-        await settle()
-        # Submitted this turn; first swept on the next (#726: no same-turn admission).
-        assert context_text(env).strip() == ""
-        user(env, "another")
-        await turn(env)
-        text = context_text(env)
-        assert funnel_mod.FRAME_HEADER.format(source="fake") in text
-        assert "rendered hit one" in text
+class TestContribution:
 
     @pytest.mark.parametrize("hits", [None, []])
-    async def test_no_hits_admits_nothing(self, build, hits):
+    async def test_no_hits_contributes_nothing(self, build, hits):
         env = await build({"fake_recall": {"cooldown": 0}})
         env.source.hits = hits
         user(env, "question")
-        await turn(env)
-        await settle()
-        user(env, "another")
-        await turn(env)
-        assert context_text(env).strip() == ""
+        assert await compose(env) is None
 
-    async def test_a_hit_that_cannot_render_is_dropped_and_logged_the_rest_admitted(self, build, caplog):
+    async def test_a_hit_that_cannot_render_is_dropped_and_logged_the_rest_kept(self, build, caplog):
         env = await build({"fake_recall": {"cooldown": 0}})
         env.source.hits = ["good", "bad", "also good"]
         original = env.source.render
@@ -345,12 +298,8 @@ class TestAdmission:
         env.source.render = render
         user(env, "question")
         with caplog.at_level(logging.WARNING):
-            await turn(env)
-            await settle()
-        user(env, "another")
-        await turn(env)
-        text = context_text(env)
-        assert "rendered good" in text and "rendered also good" in text and "bad" not in text
+            contribution = await compose(env)
+        assert contribution == Contribution("fake", ["rendered good", "rendered also good"])
         warned = warnings(caplog)
         assert warned and "fake" in warned[0].getMessage() and env.channel.id in warned[0].getMessage()
         assert warned[0].exc_info and warned[0].exc_info[0] is KeyError
@@ -363,11 +312,7 @@ class TestFailSoft:
         env.source.raises = ConnectionError("wiki is down")
         user(env, "question")
         with caplog.at_level(logging.WARNING):
-            await turn(env)
-            await settle()
-        user(env, "another")
-        await turn(env)
-        assert context_text(env).strip() == ""
+            assert await compose(env) is None
         msgs = [r for r in warnings(caplog) if "fake" in r.getMessage()]
         assert msgs, [r.getMessage() for r in caplog.records]
         text = msgs[0].getMessage()
@@ -379,16 +324,13 @@ class TestFailSoft:
         env = await build({"fake_recall": {"cooldown": 100}})
         env.source.raises = ConnectionError("down")
         user(env, "question")
-        await turn(env)
-        await settle()
+        await compose(env)
         user(env, "retry")
-        await turn(env)
-        await settle()
+        await compose(env)
         assert len(env.source.queries) == 1
         env.clock.t = 100.0
         user(env, "after the cooldown")
-        await turn(env)
-        await settle()
+        await compose(env)
         assert len(env.source.queries) == 2
 
     async def test_a_search_over_its_timeout_is_cancelled_logged_and_counted(self, build, caplog):
@@ -396,15 +338,13 @@ class TestFailSoft:
         env.source.sleep_forever = True
         user(env, "question")
         with caplog.at_level(logging.WARNING):
-            await turn(env)
-            await asyncio.sleep(0.2)
+            assert await compose(env) is None
         assert env.source.cancelled
         msgs = [r.getMessage() for r in warnings(caplog) if "fake" in r.getMessage()]
         # Names the source, the channel and the setting to raise.
         assert msgs and env.channel.id in msgs[0] and "fake_recall.timeout" in msgs[0]
         user(env, "next")
-        await turn(env)
-        await settle()
+        await compose(env)
         assert len(env.source.queries) == 1
 
     async def test_a_host_that_never_called_init_recall_fails_with_a_clear_message(self):
@@ -417,75 +357,46 @@ class TestFailSoft:
         channel = Channel(transport="test", scope="bare")
         channel.conversation = ContextWindow(channel.id)
         with pytest.raises(RuntimeError, match="init_recall"):
-            await Bare().on_funnel_ingest(
-                channel=channel, trace_id="t", annotations=None, submit=lambda s, p: None
-            )
+            await Bare().before_compose(channel=channel, trace_id="t", annotations={})
 
 
 class TestSingleFlight:
 
-    async def test_no_second_search_and_no_resubmit_while_one_is_pending(self, build):
+    async def test_no_second_search_while_one_is_in_flight(self, build):
         env = await build({"fake_recall": {"cooldown": 0}})
         env.source.gate_event = asyncio.Event()
         user(env, "question")
-        await turn(env)
+        first = asyncio.create_task(compose(env))
         await settle()
         user(env, "second")
-        await turn(env)
-        await settle()
+        # The second turn's gather finds the channel's slot taken and contributes nothing.
+        assert await compose(env) is None
         assert len(env.source.queries) == 1
-        # The pending promise was not superseded: it still lands once released.
+        # The first search was not superseded: it still lands once released.
         env.source.gate_event.set()
-        await settle()
-        user(env, "third")
-        await turn(env)
-        assert "rendered hit one" in context_text(env)
+        assert await first == Contribution("fake", ["rendered hit one"])
 
-    async def test_the_next_search_starts_after_the_pending_one_is_swept(self, build):
+    async def test_the_next_search_starts_after_the_first_has_finished(self, build):
         env = await build({"fake_recall": {"cooldown": 0}})
         user(env, "question")
-        await turn(env)
-        await settle()
+        await compose(env)
         user(env, "second")
-        await turn(env)
-        await settle()
+        await compose(env)
         assert len(env.source.queries) == 2
 
-    async def test_a_promise_cancelled_by_the_funnel_is_released_and_not_logged_as_a_failure(self, build, caplog):
-        env = await build({"funnel": {"ingest_ttl": 10}, "fake_recall": {"cooldown": 0}})
+    async def test_a_cancelled_gather_releases_the_slot_and_is_not_logged_as_a_failure(self, build, caplog):
+        env = await build({"fake_recall": {"cooldown": 0}})
         env.source.gate_event = asyncio.Event()
         user(env, "question")
-        await turn(env)
+        task = asyncio.create_task(compose(env))
         await settle()
-        # The funnel expires the pending promise at the channel's next turn (TTL), cancelling it.
-        env.clock.t = 20.0
-        user(env, "later")
         with caplog.at_level(logging.WARNING):
-            await turn(env)
-            await settle()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         assert not [r for r in warnings(caplog) if "fake" in r.getMessage() and r.exc_info]
-        # The cancelled task frees its slot a tick later, so the next turn searches again.
-        user(env, "after the cancel")
-        await turn(env)
-        await settle()
+        # The cancelled search freed its slot, so the next turn searches again.
         env.source.gate_event.set()
-        await settle()
+        user(env, "after the cancel")
+        await compose(env)
         assert env.source.cancelled and len(env.source.queries) == 2
-
-
-class TestWithoutTheFunnel:
-
-    async def test_the_hookimpl_is_inert_and_reported_at_debug_only(self, caplog):
-        recall = recall_mod()
-
-        class Src(recall.RecallSourceMixin, CorvidaePlugin):
-            source_name = "src"
-            config_key = "src_recall"
-
-        pm = create_plugin_manager()
-        pm.register(Src(), name="src")
-        with caplog.at_level(logging.DEBUG):
-            install_plugin_hookspecs(pm)
-            report_orphan_hookimpls(pm)
-        mentions = [r for r in caplog.records if "on_funnel_ingest" in r.getMessage()]
-        assert mentions and all(r.levelno == logging.DEBUG for r in mentions)

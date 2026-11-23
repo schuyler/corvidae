@@ -22,6 +22,7 @@ import pytest
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.retention'
+from helpers import memory_turn
 from corvidae_cognition.retention import (
     retention_score,
     run_retention_job,
@@ -30,11 +31,10 @@ from corvidae_cognition.retention import (
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from fake_clock import install_kernel_clock
-from helpers import stub_llm_config, with_chat_llm
+from helpers import add_kernel_held, add_kernel_registry, stub_llm_config, with_chat_llm
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 # Cross-WP dependency: MemoryToolsPlugin lives in WP1b.3. Tests in this file
@@ -113,7 +113,7 @@ class StubEmbedClient:
 
 
 async def build_retention_env(config=None, fail_embed: bool = False):
-    """Full pm: persistence (in-memory DB) + stubbed llm + funnel + memory.
+    """Full pm: persistence (in-memory DB) + stubbed llm + memory.
 
     Returns (memory, embedder, channel, db).
     """
@@ -136,10 +136,10 @@ async def build_retention_env(config=None, fail_embed: bool = False):
     llm._clients["embedding"] = embedder
     stub_llm_config(llm, config.get("llm"))
 
-    funnel = FunnelPlugin()
-    pm.register(funnel, name="funnel")
-    await funnel.on_init(pm=pm, config=config)
 
+    # The held-text store admits what memory contributes (#1176).
+    add_kernel_registry(pm)
+    await add_kernel_held(pm)
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
     await memory.on_init(pm=pm, config=config)
@@ -526,15 +526,15 @@ class TestDemotion:
 
 
 # ---------------------------------------------------------------------------
-# WP1b.1 retrieval integration (before_agent_turn exclusion + search_memory)
+# WP1b.1 retrieval integration (before_compose exclusion + search_memory)
 # ---------------------------------------------------------------------------
 
 
 class TestDemotionRetrievalIntegration:
     """Demoted records: excluded from passive retrieval, visible to tools."""
 
-    async def test_demoted_excluded_from_before_agent_turn(self):
-        """Passive retrieval (before_agent_turn) must skip demoted records."""
+    async def test_demoted_excluded_from_before_compose(self):
+        """Passive retrieval (before_compose) must skip demoted records."""
         from corvidae.context import MessageType
         memory, embedder, channel, db = await build_retention_env()
         channel.conversation = ContextWindow(channel.id)
@@ -555,7 +555,7 @@ class TestDemotionRetrievalIntegration:
         )
 
         channel.conversation.append({"role": "user", "content": "ESP32 wifi issue"})
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         from corvidae.context import MessageType
         context_msgs = [

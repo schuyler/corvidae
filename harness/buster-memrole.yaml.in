@@ -2,8 +2,8 @@
 # $BUSTER_ROOT/state/agent.yaml by run.sh when HARNESS_PROFILE=buster-memrole
 # (state dir: @STATE_DIR@).
 #
-# One question: with agent.mid_conversation_system_role: user, the funnel's
-# memory block becomes the last "user" message the model sees. Does it
+# One question: with agent.mid_conversation_system_role: user, the held-text
+# store's memory block becomes the last "user" message the model sees. Does it
 # still answer the person? The default profile (buster.yaml.in) keeps memory
 # and the funnel off, so this is a separate profile with one probe channel.
 #

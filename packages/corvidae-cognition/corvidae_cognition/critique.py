@@ -4,8 +4,9 @@ The agent's fallible-generation antidote (bootstrap-mapping §2.4, §3.3;
 plans/implementation/phase-2.md WP2.7). After an exchange ends, critique runs
 as a SILENT TaskQueue task (``deliver=False``) that never wakes the main model
 by itself: empty objections are recorded and nothing re-enters the window;
-non-empty objections re-enter as budgeted, framed CONTEXT via the funnel's
-deferred registration, at the turn its stub triggers.
+non-empty objections re-enter as framed CONTEXT, held by the kernel's held-text
+store (``hold_and_wake``) and admitted, under the funnel's policy, at the turn
+its stub triggers.
 
 Two independent paths:
 
@@ -80,6 +81,7 @@ from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
+from corvidae.held import HeldContext
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.persistence import decode_message_row
 from corvidae.task import Task, TaskPlugin
@@ -126,7 +128,7 @@ RECORD_MESSAGE_TYPES = ("message", "summary")
 NO_REPLY_MARKER = "NO_REPLY"
 
 # Wake-stub text once the retention lens is on (a retention root is known).
-# The funnel keeps one pending stub per (channel, "critique"), so whichever
+# The store keeps one pending stub per (channel, "critique"), so whichever
 # critique wake fires first instructs the whole drain: the note covers both
 # retention filing and the provenance rule (#742). {root} is quoted. When a
 # loaded plugin lens wakes (Lens.wakes), WAKE_LENSES_SENTENCE follows it.
@@ -143,7 +145,7 @@ RETENTION_WAKE_NOTE = (
 )
 
 # Wake-stub text for a provenance objection. Lives in the stub, not the
-# CONTEXT entry: the funnel frames CONTEXT as data, and this is an
+# CONTEXT entry: the store frames CONTEXT as data, and this is an
 # instruction written by us.
 PROVENANCE_NOTE = (
     "Background self-check: the provenance check found claims in your last "
@@ -163,7 +165,7 @@ PROACTIVITY_WAKE_SENTENCE = (
 )
 
 # Appended to whichever wake note applies once a loaded plugin lens has
-# wakes=True. The funnel keeps one stub per drain, so the note can't name
+# wakes=True. The store keeps one stub per drain, so the note can't name
 # what woke; this keeps the silence default true for every waking lens.
 WAKE_LENSES_SENTENCE = (
     "Findings from other self-check lenses may also be in the critique "
@@ -768,7 +770,7 @@ class CritiquePlugin(CorvidaePlugin):
     """
 
     # trace owns the hook critique reports its outcomes on (#1179).
-    depends_on = frozenset({"task", "llm", "trace"})
+    depends_on = frozenset({"task", "llm", "trace", "held"})
     optional_depends_on = frozenset({"appraisal"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
@@ -1904,7 +1906,7 @@ class CritiquePlugin(CorvidaePlugin):
         """The stub for a critique wake: PROVENANCE_NOTE unless the retention
         lens is on, then one note that also says how to file (#742).
 
-        It depends on configuration only, never on what woke: the funnel
+        It depends on configuration only, never on what woke: the store
         keeps the first pending stub of a drain. While proactivity is
         offered PROACTIVITY_WAKE_SENTENCE follows the note, and with a waking
         plugin lens loaded WAKE_LENSES_SENTENCE comes last.
@@ -1945,7 +1947,7 @@ class CritiquePlugin(CorvidaePlugin):
         ``critique``) as its own record. Provenance records under its own
         key, so a reader merging a trace's critique records never loses the
         stylistic run's ``critique``.
-        Non-empty objections re-enter via the funnel as budgeted CONTEXT.
+        Non-empty objections re-enter through the held-text store as CONTEXT.
         With ``wake`` (provenance) they register under
         origin="critique" and fire the critique wake stub; without it
         (stylistic) they queue for the channel's next turn and wake nothing
@@ -1969,10 +1971,6 @@ class CritiquePlugin(CorvidaePlugin):
         if not objections:
             return  # silent: nothing re-enters the window
 
-        funnel = self.pm.get_plugin("funnel")
-        if funnel is None:
-            logger.debug("critique verdict not delivered: funnel unavailable")
-            return
         # Split by delivery: what wakes the channel now, what waits.
         if origin == "critique" or not waking_allowed:
             waking, waiting = [], list(objections)
@@ -1985,14 +1983,15 @@ class CritiquePlugin(CorvidaePlugin):
         try:
             # Waking findings fire one stub on the "critique" origin, which the
             # NO_REPLY veto keys on; the rest wait for the channel's next turn.
+            held = get_dependency(self.pm, "held", HeldContext)
             if waking:
-                await funnel.ingest_and_wake(
+                await held.hold_and_wake(
                     channel, origin="critique", source="critique",
                     entries=[self._format_objection(o) for o in waking],
                     stub_text=self._wake_stub(),
                 )
             if waiting:
-                funnel.ingest(
+                await held.hold(
                     channel, source="critique",
                     entries=[self._format_objection(o) for o in waiting],
                 )

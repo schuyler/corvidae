@@ -296,7 +296,9 @@ def test_names_are_cut_and_ids_render_whole():
 
 
 class Declarer(CorvidaePlugin):
-    model_visible_annotations = frozenset({"origin"})
+    # Not "origin": the kernel's held store declares that one, so a test with
+    # no declarer would still see it (#1176).
+    model_visible_annotations = frozenset({"mood"})
 
 
 @pytest.fixture
@@ -401,11 +403,11 @@ async def test_the_annotations_line_follows_the_allowlist_read_at_startup(starte
     # Changing the declaration after startup has no effect until restart.
     monkeypatch.setattr(Declarer, "model_visible_annotations", frozenset())
     await plugin.on_notify(channel=channel, source="reminder", text="stretch",
-                           tool_call_id=None, annotations={"origin": "reminder"})
+                           tool_call_id=None, annotations={"mood": "calm"})
     await drain(plugin, channel)
     lines = "\n".join(m["content"] for m in last_prompt(plugin)).split("\n")
     assert any(line.startswith("[metadata:") for line in lines)
-    assert ("[annotations: origin=reminder]" in lines) is declared
+    assert ("[annotations: mood=calm]" in lines) is declared
 
 
 async def test_a_named_person_gets_a_rendered_header_and_no_stored_row(started):

@@ -2,7 +2,7 @@
 
 PRD §3.5.12, §3.13.5. A plugin can refuse a tool call before it runs. Every
 implementation runs under the channel's check allowance through
-``corvidae.checks.run_checks``; any refusal wins and becomes the call's
+``corvidae.checks.gather``; any refusal wins and becomes the call's
 result, so the turn continues. An implementation that raises counts as no
 refusal. When the allowance runs out the call runs unchecked and the miss is
 recorded; a refusal that arrives later reaches the channel's window at its
@@ -157,7 +157,7 @@ def _late_rows(messages):
         m for m in messages
         if m.get("_message_type") == MessageType.CONTEXT
         and isinstance(m.get("content"), str)
-        and m["content"].startswith(f"[{LATE_CHECK_LABEL}")
+        and m["content"].startswith(f"[CONTEXT from {LATE_CHECK_LABEL}")
     ]
 
 
@@ -368,6 +368,7 @@ class TestAllowance:
                 "channel": channel.id,
                 "hook": "should_execute_tool",
                 "plugin": "slow_veto",
+                "phase": "before_effect",
             }),
         ]
         debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
@@ -404,7 +405,7 @@ class TestAllowance:
         await asyncio.wait_for(await _start_turn(plugin, channel, text="next"), 2)
         (late,) = _late_rows(channel.conversation.messages)
         content = late["content"]
-        assert content.startswith(f"[{LATE_CHECK_LABEL}: slow_veto]")
+        assert f"[{LATE_CHECK_LABEL}: slow_veto]" in content
         assert "'shell'" in content
         assert "ran unchecked" in content
         assert "that command touched the prod host" in content
@@ -431,7 +432,7 @@ class TestAllowance:
 
         (late,) = _late_rows(channel.conversation.messages)
         content = late["content"]
-        assert content.startswith(f"[{LATE_CHECK_LABEL}: slow_veto]")
+        assert f"[{LATE_CHECK_LABEL}: slow_veto]" in content
         assert "'shell'" in content
         assert "ran unchecked" in content
         assert "no reason given" in content

@@ -43,8 +43,9 @@ candidates filtered to indexed, unredacted records, and each is scored
 `similarity × exp(-age_days / half_life_days)`. The band
 (strong ≥ 0.75, moderate ≥ 0.60, else weak) is applied to that score by
 default, or to raw similarity under `band_on: similarity`. Weak drops
-unless nothing else matched. Survivors enter the window through the
-funnel as `[band] (age) summary` lines under a 512-token budget. The
+unless nothing else matched. Survivors enter the window as `[band] (age) summary` lines,
+contributed from `before_compose` and admitted by the held-text store under the
+funnel's 512-token default budget. The
 active tools are `search_memory` (FTS5 keyword only) and `recall_raw`
 (replays a record's source range by memory id).
 

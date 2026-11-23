@@ -474,7 +474,7 @@ class OutboundCapPlugin(CorvidaePlugin):
 
         A wrapper sees the result list of every gate after they ran (apluggy
         drives it from ``_async_multicall``; for the ``final`` firing the
-        kernel's ``corvidae.checks.run_checks`` drives it the same way with
+        kernel's ``corvidae.checks.gather`` drives it the same way with
         the verdicts that arrived inside the check allowance), so a veto from
         any other gate keeps the emission out of the count. The results pass through
         unchanged; a failure here logs and never changes the verdict.
