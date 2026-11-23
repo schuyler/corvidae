@@ -383,9 +383,10 @@ every channel are candidates (PRD principle 14, #168), and
 **Hybrid candidates (#666).** Dense embeddings handle rare tokens poorly
 (people's and project names, hostnames, ticket numbers), so on the vector
 path the KNN is joined by an FTS5 search over `memory_fts` with the same
-query and filters, `k × 4` rows in bm25 order. Its MATCH leaves out a short
-English stopword list (`FTS_STOPWORDS`) before the per-paragraph cap, so
-"what", "the" and "thanks" can't buy rank. The two are ranked together
+query and filters, `k × 4` rows in bm25 order. Its query is built as in
+[Keyword search](#keyword-search-and-the-fts5-indexes-1186): 3-character
+pieces ranked by bm25, no word list, so a common word buys little rank but
+every list is full. The two are ranked together
 by reciprocal rank fusion. Each candidate earns `1 / (60 + rank)` from each
 of two lists:
 
@@ -616,7 +617,7 @@ rows that reference a redacted memory (below).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
 `memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
-blank-line-separated paragraph at 20 tokens, so every message of a burst
+blank-line-separated paragraph at 20 terms, so every message of a burst
 keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
 with one clear startup warning; no embedding profile (the `embedding` stage isn't mapped under `llm.stages` and there is no default embedding profile: no `llm.profiles.embedding` and no `llm.defaults.embedding`) → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
@@ -873,8 +874,9 @@ startup warning naming `memory.consolidation_fork_prompt`.
 
 **Entry size target** (plugin-defined, #686). `memory.entry_target_tokens`
 (default 256) feeds a sentence appended to the consolidation instruction,
-default or override, asking for about `round(target × 0.75)` words per
-entry (192 by default) and consecutive entries for a longer topic. It sits
+default or override, asking for about `target` tokens per entry (256 by
+default, stated as tokens, not words, so it reads the same in any language)
+and consecutive entries for a longer topic. It sits
 after the instruction and before the range sentence. An entry whose
 narrative exceeds the target by the kernel's tiktoken `count_tokens` (not
 the serving model's tokenizer) is stored in full, with no truncation and no
@@ -983,13 +985,13 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 `model` and `trigger`, and `merged_foreign`, set on a near-dup survivor that
 holds another channel's record, #627), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
-`memory_fts` (external-content FTS5 with insert/update sync triggers; no
+`memory_fts` (external-content FTS5, trigram tokenizer, with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
 created only when the extension loads), `retrieval_log`,
 `retrieval_candidate` (one row per logged retrieval candidate; see
 "Retrieval (read path)"), `retention_meta`
 (one-row table persisting `last_run` for the retention job interval), and
-`message_fts` (regular FTS5 table over `message_log` content, maintained by
+`message_fts` (regular FTS5 table, trigram tokenizer, over `message_log` content, maintained by
 `message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
 redact` — not by `search_memory`, which queries `memory_fts` and `memory_vec`). All on the persistence connection in
 `sessions.db`; `message_log` stays append-only except for the
@@ -1228,7 +1230,9 @@ warning. Neither touches access statistics. Redaction needs nothing of its
 own: `corvidae redact` rewrites the row, and the `message_log_au` trigger
 re-indexes the tombstone, so the original text is neither found nor
 replayed. The index holds only `content`, so tool-call arguments are not
-searchable, and the `unicode61` tokenizer limits (#158) apply.
+searchable, and the trigram search's limits apply (see
+[Keyword search](#keyword-search-and-the-fts5-indexes-1186): a term must share
+a 3-character run with the text).
 
 **Fencing.** `search_transcripts` and `recall_raw` declare
 `returns_untrusted`: their output reaches the model fenced as untrusted
@@ -1253,7 +1257,8 @@ by reciprocal rank fusion, as passive retrieval does (#666):
   (`memory JOIN memory_vec`, filtered in `WHERE`, `LIMIT 50`). A KNN would
   cut before the filters and could leave a `channel=` or date-filtered
   search with no vector hits;
-- the FTS5 keyword search, with common words left out.
+- the FTS5 keyword search (trigram pieces, see
+  [Keyword search](#keyword-search-and-the-fts5-indexes-1186)).
 
 So a paraphrase ("what did we decide about the deploy schedule?") finds a
 record that shares no words with it ("agreed to ship on Thursdays"), and a
@@ -1283,7 +1288,7 @@ another task.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank; a query with no term of 3+ characters (`LIKE` path) comes back newest first with score `-0.0000`. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
 | `search_transcripts` | `query: str`, `channel: str\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `max_tokens: int` (default `2000`) | Keyword search over every channel's `message_log` content (above). Returns up to 50 lines `id. [timestamp] channel role: snippet`, best bm25 match first, the match wrapped in `**`, capped at approximately `max_tokens`. `channel` narrows by exact id; `after`/`before` parse as for `search_memory` and compare against the row's `timestamp`. A query with no word tokens, no hits (naming the channel filter when set) and a failing FTS query (logged at WARNING; retry with a simpler query) each return a plain message. **Does not update access stats.** Fenced. |
 | `recall_raw` | `memory_id: int\|None`, `channel: str\|None`, `start_id: int\|None`, `end_id: int\|None` (all default `None`), `max_tokens: int` (default `1000`) | Two forms; exactly one per call, or an error naming both forms and what was passed. **By range** (`channel`, `start_id`, `end_id`): replays that channel's rows with `start_id ≤ id ≤ end_id` under a `[channel C: messages S–E]` header; says so when the range holds none; bumps nothing. **By record** (`memory_id`): replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
@@ -1300,6 +1305,148 @@ demotion threshold and re-promotes.
 `recall_raw` tools are
 not available. Memory records are still formed and passively retrieved
 by `MemoryPlugin`; only the agent's active access surface is absent.
+
+### Keyword search and the FTS5 indexes (#1186)
+
+Memory, the transcript search, critique's provenance check and markdown recall
+all search an FTS5 table, and all four build their query the same way
+(`corvidae_cognition/fts.py`). Nothing in the build decides by one language's
+words: there is no stopword list, no prefix match and no assumption that words
+are separated by spaces.
+
+**The tables.** `memory_fts`, `message_fts` (both in `sessions.db`) and
+`chunks_fts` (the markdown recall index file) use the `trigram` tokenizer with
+`remove_diacritics 1` (so `cafe` still finds `café`; matching is
+case-insensitive). The index holds every 3-character window of the text, so a
+query finds a record by any substring of three or more characters, in any
+script, spaced or not.
+
+**How a query is built.**
+
+1. The text is split into terms: runs of letters, combining marks and numbers
+   (Unicode categories L, M, N), plus the zero-width joiners U+200C/U+200D
+   that sit inside Persian, Indic and emoji words. Punctuation, symbols and whitespace separate
+   terms, so a term never carries FTS syntax. The per-paragraph cap (the first
+   20 terms of each blank-line-separated paragraph) is kept where it was.
+2. A term of 3 or more characters is searched as its overlapping 3-character
+   pieces (`喜欢吃苹果` gives `喜欢吃`, `欢吃苹`, `吃苹果`), and a term of 4 or more
+   is also searched whole. The pieces are quoted phrases joined by `OR`,
+   deduplicated case-insensitively, and ranked by bm25, so a record sharing
+   rare pieces with the query ranks above one sharing `ing` or `the`. A query
+   that *contains* a word finds a record containing it even when neither is
+   spaced: `你还记得我喜欢吃什么吗` finds `我喜欢吃苹果`.
+3. A `LIKE '%term%'` scan runs only when the query has no term of 3 or more
+   characters (a bare `苹果`), because trigram matches nothing shorter. Its
+   results come newest first, since `LIKE` has no rank (markdown recall:
+   index order).
+
+**What this costs, and its limits.**
+
+- Every FTS list is full. A chatty English query shares pieces such as `ing`
+  or `the` with most of the table, so the keyword side returns its whole limit
+  and relies on bm25 to put real matches first. They do, but a record sharing
+  several mid-frequency pieces without sharing a word can run a close second.
+  A query of only common words still runs and returns rows.
+- Where that noise lands. Passive retrieval fuses the FTS list with the vector
+  list, and a record in both outranks one in only one, so FTS noise can
+  displace a record from the top k but cannot be admitted without a cosine
+  that bands above weak. On the degraded path (no embedding) the top k by bm25
+  are admitted with no gate, marked `[marginal]`. `search_memory`,
+  `search_transcripts` and markdown recall return their ranked tail with no
+  threshold. Critique's provenance search keeps the top 5 per claim, and
+  "no earlier message matched the search" now means no 3-character piece of
+  the claim occurs in any earlier message, which is rare for English.
+- A query whose words share no 3-character run with the record finds nothing
+  by keyword (`苹果好吃吗` against `我喜欢吃苹果`): the vector path covers that.
+  The `LIKE` fallback folds ASCII case only and keeps diacritics.
+- The index is about three times the size of the old one, and a query costs
+  roughly twice a whole-word one (more for a burst of many messages: no cap
+  on pieces exists).
+- `search_transcripts` shows a snippet of about 64 trigram tokens around the
+  match (roughly 64 characters).
+
+**Markdown recall chunking.** Chunk sizes are in UTF-8 bytes, not words, so an
+unspaced page is split like any other: a target of 900 bytes, 200 bytes of
+overlap, one chunk for a page under 1800 bytes, and sections under 300 bytes
+merged into a neighbour. A chunk is a span of the source, so nothing is
+inserted (no space, no blank line); the overlap starts on a word start where
+the text has spaces and on a character otherwise. A paragraph is split at
+sentence ends: `.`, `!` or `?` followed by whitespace, a full-width `。`, `！`
+or `？` (no whitespace needed), or a newline, with no condition on the next
+letter's case. A sentence longer than twice the target is cut at spaces, or on
+characters when there are none. The chunker version changed (`otterwiki-3`),
+so the first start after upgrading re-chunks and re-embeds the whole folder
+once.
+
+**SQLite 3.45 or newer.** `remove_diacritics` on the trigram tokenizer needs
+SQLite 3.45 (January 2024). The container image and uv's Python meet it; a
+distribution Python linked against an older system SQLite (Debian bookworm
+ships 3.40) does not. Below the floor:
+
+- A new database cannot create the FTS tables. `create_fts_table` logs an
+  ERROR naming the table, the SQLite version and the remedy (run on a Python
+  linked against SQLite 3.45+) and re-raises. Memory stays without a schema
+  (no records, no retrieval, no memory tools) and logs the ERROR at each
+  retry; markdown recall's reconcile and search raise to their callers. The
+  daemon and the kernel keep running.
+- An existing install keeps its old `unicode61` tables, since
+  `CREATE ... IF NOT EXISTS` returns before it reads the tokenizer. Searches
+  keep working on whole words (a term of 4 or more is searched whole beside
+  its pieces for this reason) but unspaced text is not found by a contained
+  word, and markdown recall loses its old prefix matching (`runn` no longer
+  finds `running`).
+- A database whose tables are trigram cannot be written by a Python linked to
+  an older SQLite: the `message_log_ai` trigger fails every kernel insert.
+  Run every tool against the database with a
+  SQLite at or above the floor.
+
+**Switching an existing install by hand.** There is no automatic migration:
+an install made before #1186 keeps its `unicode61` tables until the operator
+rebuilds them. Nothing is deleted from a content table; only the three indexes
+are rebuilt. Every step runs with the daemon **stopped**, and it starts only
+after the last one: an external-content table left empty makes the
+`memory_au` and `chunks_ad` triggers fail every update or delete of a content
+row (`database disk image is malformed`) until it is rebuilt.
+
+Check first that `sqlite3 --version` is 3.45 or newer, and run each file's
+steps with `sqlite3 -bail` inside one `BEGIN; ... COMMIT;`, so an old `sqlite3`
+that cannot create the table stops before the drop commits and leaves the old
+table in place. For each table, in its file (`memory_fts` and `message_fts` in
+`sessions.db`, `chunks_fts` in the file at `markdown_recall.db_path`), drop
+it, create it with the trigram statement, and repopulate it:
+
+```sql
+DROP TABLE memory_fts;
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    summary, content='memory', content_rowid='id',
+    tokenize='trigram remove_diacritics 1'
+);
+INSERT INTO memory_fts(memory_fts) VALUES('rebuild');
+
+DROP TABLE message_fts;
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+    content_text, tokenize='trigram remove_diacritics 1'
+);
+INSERT INTO message_fts(rowid, content_text)
+    SELECT id, CASE WHEN json_valid(message)
+                    THEN coalesce(json_extract(message, '$.content'), '')
+                    ELSE '' END
+    FROM message_log;
+
+-- in the markdown recall index file, not sessions.db
+DROP TABLE chunks_fts;
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    text, content='chunks', content_rowid='rowid',
+    tokenize='trigram remove_diacritics 1'
+);
+INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');
+```
+
+The order inside a file is the point: drop, create, then repopulate, all
+before the daemon opens the database. The content tables' triggers belong to
+the content tables, so dropping an FTS table leaves them in place. The
+markdown index is a cache, so deleting the file and letting the next
+reconcile rebuild it is an alternative to the `chunks_fts` steps.
 
 ### FunnelPlugin (`packages/corvidae-cognition/corvidae_cognition/funnel.py`)
 
@@ -1962,10 +2109,12 @@ model makes both language judgments; the code only fetches evidence:
    trace is eligible, whatever started it (#1031; the same rule as the
    stylistic lenses), corrections included, so stage 2 runs on them too. That task searches `message_fts`
    with each claim's phrases (or the claim's own words when it has none):
-   every whitespace-separated chunk quoted, then OR-joined. FTS5
-   tokenizes the quotes with the index's own tokenizer, so no
-   word-splitting or stopword list of ours decides what matches, and query
-   syntax in the model's phrases is never parsed. Results are ranked
+   the phrases are split into terms (letters, marks, numbers), each term
+   becomes its 3-character pieces (and whole when 4+ characters), quoted and
+   OR-joined, with a `LIKE` scan only for a query of nothing longer than two
+   characters. No word list of ours decides what matches, and query syntax in
+   the model's phrases is never parsed. A non-string entry in the model's
+   `queries` is skipped. Results are ranked
    by bm25, and up to 5 per claim are kept. Only these rows count:
    - rows from before the exchange's originating row. The exchange's own
      rows, the reply included, are already indexed when the check runs;

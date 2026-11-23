@@ -98,6 +98,7 @@ from corvidae.persistence import decode_message_row
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
+from corvidae_cognition.fts import keyword_query, keyword_where
 from corvidae_cognition.presend import PreSendHold
 from corvidae_cognition.probe import ReadOnlyProbe
 from corvidae_cognition.silence import decline_kind, is_decline
@@ -529,22 +530,6 @@ def _parse_json_block(text: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"critique: no JSON object in LLM output: {text[:500]!r}")
     return json.loads(text[start:end + 1])
-
-
-def _match_expression(queries: list[str]) -> str:
-    """An FTS5 MATCH string that is pure data: every whitespace-separated
-    chunk of the queries is a quoted string ("" escapes a quote), OR-joined.
-
-    FTS5 tokenizes inside the quotes with the index's own tokenizer, so no
-    word-splitting or stopword list of ours decides what matches, and
-    query syntax in model-written text (NOT, *, ^, column:) is never parsed.
-    bm25 then ranks rarer words higher.
-    """
-    chunks: list[str] = []
-    for query in queries:
-        if isinstance(query, str):
-            chunks.extend(query.split())
-    return " OR ".join('"' + chunk.replace('"', '""') + '"' for chunk in chunks)
 
 
 # Lead-in before the first match in an excerpt, in characters.
@@ -1795,7 +1780,8 @@ class CritiquePlugin(CorvidaePlugin):
         """The closest earlier messages for each claim, or None.
 
         Mechanical retrieval; it decides nothing. Each claim's queries
-        (written by stage 2) become one FTS5 OR query over message_fts,
+        (written by stage 2) become one FTS5 OR query over message_fts (a
+        LIKE scan when no term reaches three characters),
         ranked by bm25, restricted to:
 
           * rows before the exchange's originating row: the exchange's own
@@ -1830,25 +1816,38 @@ class CritiquePlugin(CorvidaePlugin):
             )
             return None
         types = ",".join("?" for _ in RECORD_MESSAGE_TYPES)
-        sql = (
-            "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), m.message_type, "
-            "m.timestamp, "
-            "highlight(message_fts, 0, char(2), char(3)) "
-            "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
-            f"WHERE message_fts MATCH ? AND m.id < ? AND m.message_type IN ({types}) "
-            "ORDER BY bm25(message_fts) LIMIT ?"
-        )
         evidence: list[dict] = []
         try:
             for claim in claims:
-                # A claim with no queries is searched by its own words.
-                match_expr = _match_expression(
-                    claim.get("queries") or [claim.get("claim", "")])
+                # A claim with no queries is searched by its own words. The
+                # model writes `queries`, so a non-string entry is skipped
+                # rather than abandoning the whole check. A bare string is
+                # one query, not a sequence of single characters.
+                queries = claim.get("queries") or [claim.get("claim", "")]
+                if isinstance(queries, str):
+                    queries = [queries]
+                q = keyword_query(
+                    "\n\n".join(x for x in queries if isinstance(x, str))
+                )
                 rows = []
-                if match_expr:
+                if q.terms:
+                    # MATCH over 3-character pieces ranked by bm25, or a LIKE
+                    # scan (newest first) for a query of only short terms.
+                    kw_where, kw_params = keyword_where(
+                        q, "message_fts", "message_fts.content_text"
+                    )
+                    order = "bm25(message_fts)" if q.match is not None else "m.id DESC"
+                    sql = (
+                        "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), "
+                        "m.message_type, m.timestamp, "
+                        "highlight(message_fts, 0, char(2), char(3)) "
+                        "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
+                        f"WHERE {kw_where} AND m.id < ? AND m.message_type IN ({types}) "
+                        f"ORDER BY {order} LIMIT ?"
+                    )
                     async with db.execute(
                         sql,
-                        (match_expr, before_rowid, *RECORD_MESSAGE_TYPES,
+                        (*kw_params, before_rowid, *RECORD_MESSAGE_TYPES,
                          PROVENANCE_CANDIDATES),
                     ) as cursor:
                         rows = await cursor.fetchall()

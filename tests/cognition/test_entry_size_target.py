@@ -83,12 +83,15 @@ async def fork_one_entry(memory, channel, ids, narrative):
 # ---------------------------------------------------------------------------
 
 
-def test_default_instruction_asks_one_topic_per_entry_and_words():
-    """R1: the composed default names the target in words and wants one topic
-    per entry; the old 'a paragraph at most' wording is gone."""
+def test_default_instruction_asks_one_topic_per_entry_and_tokens():
+    """R1 (#1186 R6): the composed default names the target in tokens, the
+    unit the config key and the overrun check use, with no English words
+    ratio; it wants one topic per entry; the old 'a paragraph at most'
+    wording is gone."""
     text = consolidation_instruction(DEFAULT_CONSOLIDATION_FORK_PROMPT, 256)
 
-    assert "192 words" in text
+    assert "about 256 tokens or fewer" in text
+    assert "words" not in text.split("Respond with a single JSON object")[-1]
     assert "one entry for each distinct stretch or topic" in " ".join(text.split())
     assert "a paragraph at most" not in DEFAULT_CONSOLIDATION_FORK_PROMPT
 
@@ -104,9 +107,11 @@ def test_entry_target_default_is_256():
 
 
 def test_entry_target_set_changes_the_sentence():
-    """R2: a configured 100 resolves to 100 and states 75 words."""
+    """R2: a configured 100 resolves to 100 and states 100 tokens (#1186 R6:
+    no words conversion)."""
     assert resolve_entry_target_tokens({"memory": {"entry_target_tokens": 100}}) == 100
-    assert "75 words" in entry_size_sentence(100)
+    assert "about 100 tokens or fewer" in entry_size_sentence(100)
+    assert "words" not in entry_size_sentence(100)
 
 
 @pytest.mark.parametrize("bad", [0, -5, True, "200", 1.5])
@@ -139,7 +144,7 @@ async def test_bad_entry_target_fails_plugin_startup():
 
 
 async def test_configured_target_drives_instruction_and_threshold(tmp_path, caplog):
-    """R2: target 100 sends '75 words' and warns for an entry between 100 and
+    """R2: target 100 sends '100 tokens' and warns for an entry between 100 and
     the default 256 tokens."""
     config = config_with(EMBED_CONFIG, entry_target_tokens=100)
     memory, channel, db, ids = await fork_env(config, tmp_path)
@@ -153,7 +158,7 @@ async def test_configured_target_drives_instruction_and_threshold(tmp_path, capl
         with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
             await _compaction(memory, channel, ids[:3], cut=3)
 
-        assert "75 words" in agent.calls[0]["instruction"]
+        assert "about 100 tokens or fewer" in agent.calls[0]["instruction"]
         assert len(overrun_warnings(caplog)) == 1
     finally:
         await db.close()

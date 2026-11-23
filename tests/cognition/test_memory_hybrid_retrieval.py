@@ -19,7 +19,6 @@ from corvidae_cognition.memory import (
     CANDIDATES_CHOICES,
     FTS_SIMILARITY_PROXY,
     MemoryPlugin,
-    _fts_match_query,
 )
 
 from .test_memory_retrieval import (
@@ -44,6 +43,19 @@ DISTRACTORS = [
     "so what about them",
 ]
 QUERY = "what about Yoz"
+# #1186 (U1): records near QUERY by cosine but sharing no 3-character piece
+# with it. Under the stub's hashed bag of words, `velvet` lands in the bucket
+# of `what` and `aspen` in that of `about`, so each acts as a paraphrase of the
+# query's common words without sharing a word, as an embedding would. With no
+# stopword list, DISTRACTORS (which repeat `what about`) now match the keyword
+# side too; these keep the fixtures' claims about what only keywords can find.
+PARAPHRASES = [
+    "velvet aspen lantern",
+    "vale aspen harbor",
+    "velvet aspen meadow",
+    "vale aspen orchid",
+    "velvet aspen timber",
+]
 
 
 def config(candidates: str | None = None, k: int = 1, **retrieval) -> dict:
@@ -66,24 +78,11 @@ async def seed_named_and_distractors(db, channel_id: str) -> int:
     return await seed_memory(db, channel_id, NAMED)
 
 
-class TestFtsQueryStopwords:
-    """The hybrid side's FTS query drops common words."""
-
-    def test_stopwords_dropped_when_asked(self):
-        assert _fts_match_query("what about Yoz", stopwords=True) == '"Yoz"'
-
-    def test_all_stopwords_gives_no_query(self):
-        assert _fts_match_query("what about that", stopwords=True) is None
-
-    def test_default_keeps_every_word(self):
-        """search_memory and the degraded path keep today's builder."""
-        assert _fts_match_query("what about Yoz") == '"what" OR "about" OR "Yoz"'
-
-    def test_cap_counts_words_left_after_stopwords(self):
-        text = " ".join(["the"] * 30 + [f"w{i}" for i in range(25)])
-        match = _fts_match_query(text, stopwords=True)
-        assert match is not None
-        assert match.count(" OR ") == 19 and '"the"' not in match
+async def seed_named_and_paraphrases(db, channel_id: str) -> int:
+    """Seed the paraphrases, then NAMED; return NAMED's id."""
+    for text in PARAPHRASES:
+        await seed_memory(db, channel_id, text)
+    return await seed_memory(db, channel_id, NAMED)
 
 
 class TestFusion:
@@ -91,10 +90,10 @@ class TestFusion:
         assert CANDIDATES_CHOICES == ("hybrid", "vector")
 
     async def test_name_query_ranks_the_naming_record_first(self):
-        # Sanity: every distractor beats NAMED on cosine, so vec alone loses it.
-        assert all(cosine(QUERY, d) > cosine(QUERY, NAMED) for d in DISTRACTORS)
+        # Sanity: every paraphrase beats NAMED on cosine, so vec alone loses it.
+        assert all(cosine(QUERY, d) > cosine(QUERY, NAMED) for d in PARAPHRASES)
         memory, _e, channel, _conv, db = await build_retrieval_env(config())
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         pool = await memory._retrieve_pool(QUERY)
 
@@ -125,7 +124,7 @@ class TestFusion:
 
     async def test_record_in_both_lists_is_marked_both(self):
         memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         pool = await memory._retrieve_pool(QUERY)
 
@@ -150,13 +149,17 @@ class TestFusion:
         await db.close()
 
     async def test_query_with_no_lexical_hit_ranks_as_vector_only(self):
-        """Requirement 2: no FTS match means the fused order is the vec order."""
+        """Requirement 2: no FTS match means the fused order is the vec order.
+
+        #1186: the query shares no 3-character piece with any record (the
+        old "what about those" shared the common words of the distractors, and
+        with no stopword list those now match)."""
         orders = []
         for mode in ("hybrid", "vector"):
             memory, _e, channel, _conv, db = await build_retrieval_env(config(mode, k=8))
             for text in [NAMED, *DISTRACTORS]:
                 await seed_memory(db, channel.id, text)
-            pool = await memory._retrieve_pool("what about those")  # all stopwords
+            pool = await memory._retrieve_pool("qzxv wkjy")
             orders.append([(c["id"], round(c["similarity"], 6)) for c in pool.ranked])
             await db.close()
         assert orders[0] == orders[1]
@@ -224,7 +227,7 @@ class TestNoKeywordFloor:
 class TestCandidateLog:
     async def test_source_is_logged_per_candidate(self):
         memory, _e, channel, conv, db = await build_retrieval_env(config(k=1))
-        named = await seed_named_and_distractors(db, channel.id)
+        named = await seed_named_and_paraphrases(db, channel.id)
 
         conv.append({"role": "user", "content": QUERY})
         await memory_turn(memory, channel=channel, trace_id=None)
@@ -284,7 +287,7 @@ class TestWindowExclusion:
         memory, _e, channel, conv, db = await build_retrieval_env(
             config(k=2, band_on="similarity", bands={"moderate": 0.0})
         )
-        for text in DISTRACTORS:
+        for text in PARAPHRASES:
             await seed(db, channel.id, text, 1, 2)
         in_window = await seed(db, channel.id, NAMED, WINDOW_START, WINDOW_START + 1)
         older = await seed(db, channel.id, "Yoz reviewed the battery design", 1, 2)
@@ -354,7 +357,7 @@ class TestUnmeasuredDoesNotTakeASlot:
         # decay with age while its ranking score does. The unembedded record
         # is fresh, ties on fused rank (both are rank 1 in their own list) and
         # wins the score tiebreak, so it used to take the single slot.
-        measured_text = "what about what about"
+        measured_text = "velvet aspen velvet aspen"
         assert cosine(QUERY, measured_text) >= 0.6  # clears the gate
         memory, _e, channel, conv, db = await build_retrieval_env(
             config(k=1, band_on="similarity")

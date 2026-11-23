@@ -104,7 +104,10 @@ class TestMeaning:
     async def test_paraphrase_with_no_shared_keyword_is_found(self):
         _memory, tools_plugin, db, client = await env()
         mid = await seed(db, CHANNEL, RECORD)
-        await seed(db, CHANNEL, "the greenhouse humidity sensor reads high")
+        # #1186 (U1): no leading "the" here. With no stopword list, a shared
+        # common word is a real keyword match, which would put this record in
+        # both lists; the claim is that meaning alone finds RECORD.
+        await seed(db, CHANNEL, "greenhouse humidity sensor reads high")
 
         result = await get_tools(tools_plugin)["search_memory"](PARAPHRASE)
 

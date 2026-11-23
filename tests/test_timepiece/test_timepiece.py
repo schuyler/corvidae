@@ -326,3 +326,36 @@ class TestCustomFormat:
         content = context_entries(channel)[0]["content"]
         assert "The current date and time are now" in content
         assert "Saturday 2026-11-07 at 19:15 UTC" in content, content
+
+
+class TestSystemLocale:
+    """#1186 R8: the default row follows the system locale; an operator's
+    format wins; C/POSIX keeps today's form (D6)."""
+
+    async def test_real_locale_default_row_uses_localized_format(self, monkeypatch):
+        """Under a real locale the default stamp is rendered with
+        LOCALIZED_DATETIME_FORMAT (the locale's weekday and date form), not
+        DEFAULT_FORMAT. No de_DE is installed here, so LC_TIME stays C and the
+        expected text is computed from the same format string."""
+        from corvidae import system_locale
+
+        monkeypatch.setattr(system_locale, "time_locale", lambda: "de_DE")
+        plugin = await make_plugin({})
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        expected = T0.strftime(system_locale.LOCALIZED_DATETIME_FORMAT)
+        assert f"The current date and time are now {expected}." in content, content
+        assert "Saturday 2026-11-07 at 19:15 UTC" not in content
+
+    async def test_operator_format_wins_under_a_real_locale(self, monkeypatch):
+        """An operator-set timepiece.format is used as written even when a
+        real locale is adopted."""
+        from corvidae import system_locale
+
+        monkeypatch.setattr(system_locale, "time_locale", lambda: "de_DE")
+        plugin = await make_plugin({"timepiece": {"format": "%Y/%m/%d %H:%M"}})
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        assert "now 2026/11/07 19:15." in content, content

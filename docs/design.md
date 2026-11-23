@@ -3319,6 +3319,107 @@ agent:
 **Graceful degradation:** without `ToolCollectionPlugin`, `Agent.depends_on`
 validation fails at startup.
 
+## System locale
+
+`corvidae/system_locale.py` makes date and time text and the web-search
+region follow the locale of the host (#1186). `run_daemon` (the one entry
+helper for `serve`, `cli` and `acp`) calls `adopt_system_locale()` once,
+before `asyncio.run` starts any thread, because `setlocale` is not
+thread-safe. It runs `locale.setlocale(LC_TIME, "")` and nothing else, so the
+C library's own precedence applies (`LC_ALL`, then `LC_TIME`, then `LANG`) and
+only `LC_TIME` changes; `LC_CTYPE` is Python's own, and `LC_NUMERIC` is left
+alone. It is not in `Runtime.start()`, which the test suite calls directly;
+`tests/conftest.py` has an autouse fixture that replaces
+`corvidae.runtime.adopt_system_locale` with a no-op, because the acp tests
+reach the real `run_daemon` in-process and a developer's `LANG` would
+otherwise leak into every later test's date strings.
+
+Why it is needed: a Python process starts in the `C` locale for `LC_TIME`
+whatever `LANG` says, and `strftime` writes `%a %A %b %B %p %x` from
+`LC_TIME`, so without the call every name is English. After it, every
+`strftime`/`strptime` in the process that uses those directives is localized,
+third-party code included (`email.utils.formatdate` uses fixed English tables
+and is unaffected; nothing in this tree formats a protocol date with them).
+
+| Function | Result |
+|---|---|
+| `time_locale()` | the current `LC_TIME` name without encoding or modifier (`de_DE.UTF-8@euro` gives `de_DE`); `None` for `C`, `POSIX` (and `C.UTF-8`, which is `C`) |
+| `datetime_format(c_format)` | `"%A %x %H:%M %Z"` under a real locale (`de_DE`: `Montag 23.11.2026 14:20 CET`); under C/POSIX the calling site's own format, unchanged |
+| `web_region()` | ddgs region `<country>-<language>` lowercased (`de_DE` gives `de-de`, `en_US` gives `us-en`); `wt-wt` when there is no locale or no country |
+
+Two sites use `datetime_format`: the scheduler's `format_time` (reminder
+results) and timepiece's default stamp. Under C/POSIX each keeps today's form
+with the C locale's English names (`Mon 2026-11-23 14:20 UTC`; `Monday
+2026-11-23 at 14:20 UTC`). An operator-set `timepiece.format` wins and is
+rendered with the adopted `LC_TIME`. `web_search` passes `region=web_region()`
+to ddgs. The region is `<country>-<language>` and there is no mapping table,
+so `en_GB` gives `gb-en` where DuckDuckGo's own list says `uk-en`. Under
+C/POSIX the region is `wt-wt`; ddgs's wikipedia engine then asks for
+`wt.wikipedia.org`, which fails, and ddgs carries on with its other engines.
+
+If the named locale is not installed (`locale.Error`; `python:3.13-slim`
+ships only `C`, `C.UTF-8` and `POSIX`), `adopt_system_locale` logs a WARNING
+naming the variable and value and the remedy, and the process behaves as C.
+The warning is written before logging is configured, so it goes to stderr,
+not to `logging.file`. Durations are input syntax, not locale output, and do
+not change with the locale. `docs/configuration.md` ("System locale") covers it for
+the operator, including the container image.
+
+## Keyword search indexes (cognition)
+
+The cognition plugins' three FTS5 tables share one tokenizer and one query
+builder in `corvidae_cognition/fts.py` (the kernel never imports it):
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    summary, content='memory', content_rowid='id',
+    tokenize='trigram remove_diacritics 1'
+)
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+    content_text, tokenize='trigram remove_diacritics 1'
+)
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    text, content='chunks', content_rowid='rowid',
+    tokenize='trigram remove_diacritics 1'
+)
+```
+
+`keyword_query(text, cap_per_paragraph=None)` returns the terms, the
+3-character pieces (plus whole terms of 4 or more characters), the MATCH
+string and the `LIKE` patterns; `keyword_where` turns one into a predicate
+(its caller has already returned for a query with no terms). The `LIKE` scan
+is used only when no term has 3 characters. Every site (`_fts_candidates`,
+`_fts_in_window_count`, `search_memory`, `search_transcripts`, critique's
+provenance search, markdown recall) uses the same builder. The behaviour and
+its limits are in `docs/cognition.md`.
+
+`create_fts_table(db, table, ddl)` executes the `CREATE ... IF NOT EXISTS`.
+There is no automatic migration: an existing table is untouched, because
+`IF NOT EXISTS` returns before the tokenizer is read, so an install made
+before this change keeps its `unicode61` tables until the operator switches
+them by hand (`docs/cognition.md`). On SQLite older than 3.45, where
+`remove_diacritics` on trigram is unknown, the `CREATE` of a new table raises
+`sqlite3.OperationalError`; `create_fts_table` logs an ERROR naming the
+table, the SQLite version and the remedy, and re-raises. What follows is each
+plugin's existing schema-failure handling: memory's `on_start` defers
+("memory schema creation deferred") and `_ensure_schema` retries on use,
+logging the ERROR each time; markdown recall's `reconcile` and `search`
+raise. The content-table triggers are created after the FTS table, so they
+never exist without it and the kernel's `message_log` writes are unaffected.
+The reverse also holds: a database holding trigram tables cannot be written
+by a Python linked to an older SQLite (the `message_log_ai` trigger fails each
+insert).
+
+Markdown recall's chunker (`markdown_recall/chunking.py`) sizes in UTF-8 bytes
+(`TARGET_BYTES` 900, `OVERLAP_BYTES` 200, `MIN_CHUNK_BYTES` 1800,
+`STUB_BYTES` 300) and cuts spans of the source, so it inserts no separator.
+`CHUNKER_VERSION` is `otterwiki-3`, which re-chunks every folder once. Sentence
+boundaries are the same as in `split.py` tier 2 plus a newline, with no
+condition on the next letter's case. `search_transcripts` shows a snippet of
+64 trigram tokens around the match; on the `LIKE` path (no term of 3+
+characters) there is no match to centre on, so the snippet starts at the
+beginning of the message.
+
 ## SchedulerPlugin
 
 `scheduler.py` — the clock-driven producer: reminders, the agent's
@@ -3434,9 +3535,15 @@ running job. A reload wakes the timer.
 `cancel_reminder(id)`, `add_job(cron, prompt)` and
 `update_job(id, cron, prompt)` act on `_ctx.channel` only and take no
 channel or origin argument (#814). The tool, not the model, parses `when` against
-`scheduler.timezone`: a relative duration (`20m`, `1h30m`), ISO 8601 with
+`scheduler.timezone`: a relative duration (`45s`, `20m`, `1h30m`, `1w`; unit
+letters `s`, `m`, `h`, `d`, `w` only, so `in 3 hours` is refused with an error
+naming the accepted form), ISO 8601 with
 or without an offset, or bare `HH:MM` for the next occurrence; a bare
-number is refused as ambiguous. It returns the resolved absolute time.
+number is refused as ambiguous. Config `every` takes the same duration syntax
+(or a bare number of seconds); a bad value fails with the job name and key.
+Times shown to the model use the system locale's day and month names and date
+form (see [System locale](#system-locale)); the structured log field
+`next_fire_at` keeps a fixed numeric `%Y-%m-%d %H:%M %Z` under every locale. It returns the resolved absolute time.
 `add_job` takes a 5-field cron expression, interpreted in
 `scheduler.timezone` at fire time, and refuses one that does not parse or
 never matches; its row recurs like a config cron job and is framed as a
@@ -3778,7 +3885,7 @@ They replaced the combined `CoreToolsPlugin` (`core_tools`), with no alias.
 | `read_file(path, offset, length, start_line, end_line)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range (`offset`, `length`) or a line range (`start_line`, `end_line`, 1-based, inclusive) of any size behind a header naming the range, total and next position; the two kinds cannot be combined; a page is sized to the calling channel's budget (see Page size under the spill service), a line range backing up to the last whole line (a first line longer than a page is cut, and the header gives the character offset to continue from and the start line where line paging resumes); an unranged read of a file longer than a page returns the first page with its header |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
-| `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
+| `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable), in the region of the system locale (`de_DE` gives `de-de`; `wt-wt` under C/POSIX) |
 | `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution. A step whose command exits non-zero is marked failed and its dependents do not run; a timeout leaves the step done, since the model decides whether to retry (#105). |
 
 Additionally, `SubagentPlugin` registers `subagent` and `TaskPlugin`
@@ -3948,7 +4055,10 @@ raises `ValueError` regardless of the text (so a bad limit is not
 input-dependent; a 6-byte floor leaves room for one 4-byte codepoint
 after the 2-byte paragraph separator is re-attached). For any
 `max_len >= 6`, every chunk is at most `max_len` bytes and
-`"".join(chunks) == text`. The word tier carries each word's leading space
+`"".join(chunks) == text`. The sentence tier cuts after `.`, `!` or `?`
+followed by whitespace, and after a full-width `。`, `！` or `？` with or
+without whitespace, so a long CJK paragraph breaks at a sentence end instead
+of mid-word; the separator stays on the sentence it follows. The word tier carries each word's leading space
 with it and cuts a word that cannot fit on its own on codepoint
 boundaries, so nothing is dropped and nothing overflows. Earlier versions
 could lose characters or exceed the limit on long unbroken runs and
@@ -5365,7 +5475,7 @@ tools:
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
   consolidate_after_tokens: 4000  # new window tokens that start a turn consolidation (forks only)
-  entry_target_tokens: 256      # size target per consolidation entry, stated as ~192 words (#686)
+  entry_target_tokens: 256      # size target per consolidation entry, stated to the model in tokens (#686)
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count

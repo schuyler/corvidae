@@ -14,9 +14,10 @@ exposed, and at most one short line enters each channel per interval.
 Config (own section; absent block = defaults):
     timepiece.interval_minutes: positive number, default 10.
     timepiece.timezone: IANA timezone name, default the daemon's local time.
-    timepiece.format: strftime format string, default
-        "%A %Y-%m-%d at %H:%M %Z" (produces e.g. "Monday 2026-11-09
-        at 17:12 PST").
+    timepiece.format: strftime format string. Default: under the C locale
+        "%A %Y-%m-%d at %H:%M %Z" (e.g. "Monday 2026-11-09 at 17:12 PST");
+        under a real system locale that locale's weekday name and date form
+        (e.g. de_DE "Montag 09.11.2026 17:12 CET"). A format set here wins.
     timepiece.note: optional string, default "" (no note appended).
         When non-empty, appended after the stamp in the same CONTEXT line.
 """
@@ -29,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.system_locale import datetime_format
 from corvidae.tuning import config_value
 
 logger = logging.getLogger(__name__)
@@ -75,13 +77,15 @@ class TimepiecePlugin(CorvidaePlugin):
                 ) from exc
         else:
             self._tz = None  # fall back to the daemon's local time
-        fmt = config_value(config, "timepiece.format", DEFAULT_FORMAT)
-        if not isinstance(fmt, str) or not fmt:
+        # None means the operator set no format: the stamp then follows the
+        # system locale; an operator-set format always wins.
+        fmt = config_value(config, "timepiece.format", None)
+        if fmt is not None and (not isinstance(fmt, str) or not fmt):
             raise ValueError(
                 "Config error: timepiece.format must be a non-empty "
                 f"strftime format string, got {fmt!r} — check agent.yaml"
             )
-        self._format = fmt
+        self._format: str | None = fmt
         note = config_value(config, "timepiece.note", DEFAULT_NOTE)
         if not isinstance(note, str):
             raise ValueError(
@@ -113,7 +117,7 @@ class TimepiecePlugin(CorvidaePlugin):
         # elapsed; strictly inside it the last stamp is still fresh.
         if last is not None and (now.timestamp() - last.timestamp()) < self._interval.total_seconds():
             return
-        stamp = now.strftime(self._format)
+        stamp = now.strftime(self._format or datetime_format(DEFAULT_FORMAT))
         content = f"The current date and time are now {stamp}."
         if self._note:
             content += f" {self._note}"

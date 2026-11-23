@@ -948,6 +948,53 @@ class TestProvenanceTrigger:
             await _teardown(env)
 
 
+async def _use_real_message_fts(env) -> None:
+    """Replace the test's plain message_fts with the DDL the memory plugin
+    creates in production (the tokenizer under test), before any row is logged."""
+    from corvidae_cognition.memory import MESSAGE_FTS_DDL
+
+    await env.db.execute("DROP TABLE message_fts")
+    await env.db.execute(MESSAGE_FTS_DDL)
+    await env.db.commit()
+
+
+class TestProvenanceUnspacedText:
+    """#1186 R2: critique's provenance search finds unspaced text through
+    the shared keyword query (pieces, or LIKE for a 2-character term)."""
+
+    @pytest.mark.parametrize("query", ["我也喜欢吃", "苹果"], ids=["containing", "short"])
+    async def test_unspaced_claim_finds_the_earlier_message(self, tmp_path, query):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _use_real_message_fts(env)
+            earlier = await _log(env, "我喜欢吃苹果")
+            await _log(env, "kestrel rain gauge calibration")
+            origin = await _log(env, "你喜欢什么？")
+            await _begin_exchange(env, "kj", origin_rowid=origin)
+            claim = {"claim": "你说过你喜欢吃苹果", "queries": [query]}
+            evidence = await env.plugin._gather_evidence(env.channel, "kj", [claim])
+            assert _candidate_rowids(evidence) == [[earlier]]
+        finally:
+            await _teardown(env)
+
+    async def test_non_string_query_entries_are_skipped_not_fatal(self, tmp_path):
+        """A model-written `queries` list can hold a non-string; the claim
+        is still searched by its string entries (no TypeError abandons the
+        provenance check)."""
+        env = await _provenance_env(tmp_path)
+        try:
+            await _use_real_message_fts(env)
+            earlier = await _log(env, "the quarterly audit deadline is Thursday")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kn", origin_rowid=origin)
+            claim = {"claim": "deadline", "queries": [None, 42, "quarterly audit deadline"]}
+            evidence = await env.plugin._gather_evidence(env.channel, "kn", [claim])
+            assert evidence is not None
+            assert _candidate_rowids(evidence) == [[earlier]]
+        finally:
+            await _teardown(env)
+
+
 class TestProvenanceEvidence:
     async def test_rows_before_the_exchange_are_candidates(self, tmp_path):
         env = await _provenance_env(tmp_path)
@@ -1186,20 +1233,39 @@ class TestProvenanceCritic:
         finally:
             await _teardown(env)
 
-    async def test_failed_search_never_reaches_the_critic_as_no_match(self, tmp_path, caplog):
+    async def test_failed_search_never_reaches_the_critic_as_no_match(
+        self, tmp_path, caplog, monkeypatch
+    ):
         # A search that raised looked at nothing: telling the critic "no
         # earlier message matched" would turn a supported claim into an
-        # objection. A lone surrogate (a truncated emoji escape in the
-        # model's JSON) is one real input that makes sqlite's bind raise.
+        # objection. #1186: a lone surrogate no longer raises (it is not a
+        # search term), so the failure is injected at the second claim's
+        # search, the seam where sqlite's own error would surface.
+        import sqlite3
+
+        from corvidae_cognition import critique as critique_module
+
+        real_where = critique_module.keyword_where
+        calls = {"n": 0}
+
+        def failing_where(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise sqlite3.OperationalError("injected search failure")
+            return real_where(*args, **kwargs)
+
+        monkeypatch.setattr(critique_module, "keyword_where", failing_where)
         env = await _provenance_env(tmp_path)
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(
                 env, agent, trace_id="kfail",
                 support="Heads up: the quarterly audit deadline is Thursday.")
-            claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["\ud83d Tuesday"]}]
+            claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["Tuesday"]}]
             with caplog.at_level("WARNING", logger="corvidae.critique"):
+                calls["n"] = 0
                 assert await env.plugin._gather_evidence(env.channel, "kfail", claims) is None
+                calls["n"] = 0
                 await _run_provenance(env, "kfail", claims)
             assert agent.calls == [] and env.stub.chat_calls == []
             assert "evidence search failed for trace kfail" in caplog.text

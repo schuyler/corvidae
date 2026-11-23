@@ -63,6 +63,21 @@ def _cut_codepoints(piece: str, max_len: int) -> list[str]:
     return parts
 
 
+def _fold_separators(parts: list[str | None]) -> list[str]:
+    """Turn re.split output with two separator groups into sentence/separator pairs.
+
+    Each match contributes two entries (one group is None); the one that took
+    part is the separator, so the folded list has one separator per sentence.
+    """
+    folded: list[str] = []
+    for i in range(0, len(parts) - 1, 3):
+        folded.append(parts[i] or "")
+        folded.append(parts[i + 1] or parts[i + 2] or "")
+    # The text after the last match is the final sentence.
+    folded.append(parts[-1] or "")
+    return folded
+
+
 def _split(text: str, max_len: int) -> list[str]:
     """Recursive worker for split_message; assumes max_len >= 6."""
     if len(text.encode('utf-8')) <= max_len:
@@ -103,27 +118,26 @@ def _split(text: str, max_len: int) -> list[str]:
             chunks.append(current)
         return chunks
 
-    # Tier 2: Try splitting on sentence boundaries (.!? + whitespace)
-    # Use lookahead to preserve the whitespace after sentence endings
-    sentences = re.split(r'(?<=[.!?])(\s+)', text)
-    # A trailing whitespace group after the sole sentence in the text makes
-    # re.split return more than one element even though there is only one
-    # real sentence to split on. Counting only the non-whitespace segments
-    # detects that case: recursing on that "sentence" would hand the next
-    # call the exact same text back (whitespace re-split the same way),
-    # making no progress toward a base case and recursing without bound.
-    real_sentences = [s for s in sentences if s.strip()]
+    # Tier 2: Try splitting on sentence boundaries: .!? followed by whitespace,
+    # or full-width 。！？ followed by optional whitespace. The separator is
+    # captured, so the result alternates sentence / separator (odd indices are
+    # separators, possibly "" after a full-width terminal) and rejoins to text.
+    sentences = re.split(r'(?<=[.!?])(\s+)|(?<=[。！？])(\s*)', text)
+    # re.split yields None for the group that did not take part; fold the two
+    # groups into one separator slot so the list keeps strict alternation.
+    sentences = _fold_separators(sentences)
+    # A trailing separator after the sole sentence makes the list longer than
+    # one even though there is only one real sentence. Counting only the
+    # non-whitespace segments detects that case: recursing on that "sentence"
+    # would hand the next call the same text back, making no progress.
+    real_sentences = [s for s in sentences[::2] if s.strip()]
     if len(real_sentences) > 1:
         current = ""
-        i = 0
-        while i < len(sentences):
+        # Pair each sentence with the separator that follows it.
+        for i in range(0, len(sentences), 2):
             sentence = sentences[i]
-            # Include the whitespace that follows the sentence
-            if i + 1 < len(sentences) and re.match(r'^\s+$', sentences[i + 1]):
+            if i + 1 < len(sentences):
                 sentence += sentences[i + 1]
-                i += 2
-            else:
-                i += 1
 
             candidate = current + sentence
             if len(candidate.encode('utf-8')) <= max_len:

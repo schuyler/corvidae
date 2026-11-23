@@ -1,6 +1,8 @@
 """Unit tests for chunking — no ChromaDB required."""
 
-from corvidae_cognition.markdown_recall.chunking import OVERLAP_WORDS, chunk_page
+import pytest
+
+from corvidae_cognition.markdown_recall.chunking import chunk_page
 
 
 class TestChunkPage:
@@ -69,9 +71,14 @@ class TestChunkPage:
         assert overlap_count > 0, "Expected overlap between adjacent chunks"
 
     def test_overlap_is_capped(self):
-        """Overlap should never exceed OVERLAP_WORDS, even for short chunks."""
-        # Create content that exceeds MIN_CHUNK_WORDS so multiple chunks are produced.
-        # 5 paragraphs of ~160 words each, all under a single heading so they form
+        """Overlap should never exceed OVERLAP_BYTES, even for short chunks.
+
+        #1186 R4: the overlap is a span of the source ahead of the chunk's
+        own text, measured in UTF-8 bytes. It is the longest tail of the
+        previous chunk that opens the next one."""
+        from corvidae_cognition.markdown_recall.chunking import OVERLAP_BYTES
+
+        # 5 paragraphs of ~160 words each under one heading, so they form
         # one large section that gets split.
         filler = " ".join(f"word{j}" for j in range(155))
         paragraphs = [f"Paragraph {i}. {filler}" for i in range(5)]
@@ -81,13 +88,15 @@ class TestChunkPage:
         result = chunk_page("test", content)
         assert len(result) > 1, "Expected multiple chunks for overlap cap test"
 
-        for i in range(1, len(result)):
+        for prev, cur in zip(result, result[1:]):
             # Strip the [section_path] prefix before inspecting overlap
-            text_without_prefix = result[i]["text"].split("] ", 1)[-1]
-            parts = text_without_prefix.split("\n\n", 1)
-            if len(parts) == 2:
-                overlap_word_count = len(parts[0].split())
-                assert overlap_word_count <= OVERLAP_WORDS
+            prev_text = prev["text"].split("] ", 1)[-1]
+            cur_text = cur["text"].split("] ", 1)[-1]
+            shared = max(
+                k for k in range(len(cur_text) + 1) if prev_text.endswith(cur_text[:k])
+            )
+            assert shared > 0, "adjacent chunks should overlap"
+            assert len(cur_text[:shared].encode("utf-8")) <= OVERLAP_BYTES
 
     def test_frontmatter_only_no_body(self):
         content = "---\ntitle: Empty\n---\n"
@@ -229,14 +238,14 @@ class TestSectionAwareChunking:
         assert last["text"].startswith("[Deep Doc > L1 > L2 > L3]")
         assert "> L4]" not in last["text"].split("]")[0]
 
-    def test_section_metadata_page_word_count_and_total_chunks(self):
+    def test_section_metadata_page_bytes_and_total_chunks(self):
         paragraphs = [f"Paragraph {i}. " + " ".join(f"word{j}" for j in range(25)) for i in range(20)]
         content = "\n\n".join(paragraphs)
         result = chunk_page("test", content)
-        assert all("page_word_count" in c["metadata"] for c in result)
+        assert all("page_bytes" in c["metadata"] for c in result)
         assert all("total_chunks" in c["metadata"] for c in result)
-        word_counts = set(c["metadata"]["page_word_count"] for c in result)
-        assert len(word_counts) == 1  # all same
+        sizes = set(c["metadata"]["page_bytes"] for c in result)
+        assert len(sizes) == 1  # all same
         total = set(c["metadata"]["total_chunks"] for c in result)
         assert len(total) == 1
         assert total.pop() == len(result)
@@ -263,7 +272,6 @@ class TestSectionAwareChunking:
         assert "def foo():" in full_text
 
     def test_no_cross_section_overlap(self):
-        from corvidae_cognition.markdown_recall.chunking import OVERLAP_WORDS
         section_body = " ".join([f"word{i}" for i in range(200)])
         content = f"---\ntitle: Overlap Test\n---\n# Section A\n\n{section_body}\n\n# Section B\n\n{section_body}"
         result = chunk_page("test", content)
@@ -271,8 +279,80 @@ class TestSectionAwareChunking:
         sections_a = [c for c in result if c["metadata"]["section"] == "Section A"]
         sections_b = [c for c in result if c["metadata"]["section"] == "Section B"]
         assert len(sections_a) > 0 and len(sections_b) > 0
-        last_a_words = sections_a[-1]["text"].split()[-OVERLAP_WORDS:]
+        last_a_words = sections_a[-1]["text"].split()[-30:]
         first_b_text = sections_b[0]["text"]
         # First chunk of Section B should NOT start with overlap from Section A
         overlap_str = " ".join(last_a_words)
         assert not first_b_text.startswith(f"[Overlap Test > Section B] {overlap_str}")
+
+
+# ---------------------------------------------------------------------------
+# #1186 R4: size is measured without spaces; chunks are spans of the source
+# ---------------------------------------------------------------------------
+
+
+def _body(chunk: dict) -> str:
+    """A chunk's text after its ``[section_path] `` prefix."""
+    return chunk["text"].split("] ", 1)[1]
+
+
+def _cjk_sentences(n_chars: int) -> str:
+    """``n_chars`` characters of unspaced Chinese sentences, each ending in
+    the full-width stop, with no whitespace anywhere."""
+    sentence = "我喜欢吃苹果也喜欢吃香蕉。"
+    return (sentence * (n_chars // len(sentence) + 1))[:n_chars]
+
+
+def _cjk_run(n_chars: int) -> str:
+    """``n_chars`` distinct-ish CJK characters with no punctuation and no
+    whitespace (the split_message code-point path)."""
+    return "".join(chr(0x4E00 + (i * 7) % 2000) for i in range(n_chars))
+
+
+class TestUnspacedChunking:
+    """An unspaced page over the chunk size splits into several chunks, none
+    gaining text the source did not have, and no 3-character window is lost
+    at a cut (the trigram index would miss it)."""
+
+    @staticmethod
+    def _check(text: str) -> None:
+        result = chunk_page("test", text)
+        # (a) 1,200 CJK characters are 3,600 bytes: more than one chunk.
+        assert len(result) >= 2, f"{len(result)} chunk(s) for an unspaced page"
+        bodies = [_body(c) for c in result]
+        # (b) every chunk is a slice of the source: nothing inserted (no
+        # space, no blank line) and nothing reordered.
+        for body in bodies:
+            assert body in text, f"chunk is not a substring of the source: {body[:40]!r}"
+        # (c) every 3-character window of the source is in some chunk.
+        for i in range(len(text) - 2):
+            window = text[i:i + 3]
+            assert any(window in body for body in bodies), (
+                f"trigram {window!r} at {i} is in no chunk"
+            )
+
+    def test_sentences_ending_in_full_width_stop(self):
+        """R4/R5: a long paragraph of unspaced sentences."""
+        self._check(_cjk_sentences(1200))
+
+    def test_unpunctuated_run(self):
+        """R4: one long unpunctuated line reaches the code-point cut path."""
+        self._check(_cjk_run(1200))
+
+
+class TestSentenceBoundaries:
+    """#1186 R5: a sentence end has no condition on what follows, and
+    full-width terminals need no whitespace after them. The pieces
+    concatenate to the paragraph exactly."""
+
+    @pytest.mark.parametrize("text,pieces", [
+        ("Один. два три. Четыре", ["Один. ", "два три. ", "Четыре"]),
+        ("我喜欢吃苹果。你呢？我也是", ["我喜欢吃苹果。", "你呢？", "我也是"]),
+        ("Hi.\nNext line", ["Hi.\n", "Next line"]),
+        ("version 1.5 works", ["version 1.5 works"]),
+    ])
+    def test_pieces(self, text, pieces):
+        from corvidae_cognition.markdown_recall.chunking import _split_sentences
+
+        assert _split_sentences(text) == pieces
+        assert "".join(_split_sentences(text)) == text

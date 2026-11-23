@@ -61,7 +61,7 @@ Config:
                                      # (0.60 under score/similarity)
       entry_target_tokens: 256       # size target for one consolidation
                                      # entry (positive int, #686); sent to
-                                     # the model as words and checked at
+                                     # the model as tokens and checked at
                                      # write time; static config
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
@@ -83,7 +83,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 import sqlite3
 import time
 from bisect import bisect_left, bisect_right
@@ -129,6 +128,12 @@ from corvidae.held import Contribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
 from corvidae_cognition.config_keys import read_count
+from corvidae_cognition.fts import (
+    TOKENIZE_CLAUSE,
+    create_fts_table,
+    keyword_query,
+    keyword_where,
+)
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -219,20 +224,6 @@ CANDIDATES_CHOICES = ("hybrid", "vector")
 # shortcut: a constant with equal list weights; make it (or per-list
 # weights) a memory.retrieval key if the labelled set shows a need.
 RRF_C = 60
-# Common words the hybrid side's FTS query leaves out (#666), so a chatty
-# message can't buy fusion rank on "what" or "the". Matched lowercased.
-# shortcut: a small English list; a deployment conversing in another
-# language gets no stopwording, so extend it if one shows up.
-FTS_STOPWORDS = frozenset("""
-a about above after again all also am an and any are as at be because been
-before being both but by can could did do does doing done for from had has
-have having he her here hers him his how i if in into is it its just me
-more most my no not now of off on once only or other our ours out over own
-same she should so some such than that the their theirs them then there
-these they this those through to too under until up us very was we were
-what when where which while who whom why will with would yes you your yours
-ok okay oh hi hey thanks thank please
-""".split())
 # Honest similarity stand-in for a keyword hit whose cosine cannot be
 # measured (FTS5-degraded retrieval, or a hit with no stored vector). It is
 # logged as the similarity; it no longer sets the band (#409).
@@ -404,7 +395,7 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
 
 # Size target for one consolidation entry, in tokens (#686): 256 is the
 # memory admission budget (2048) divided by retrieval k (8). Sent to the
-# model as words and used as the write-time overrun threshold.
+# model as tokens and used as the write-time overrun threshold.
 DEFAULT_ENTRY_TARGET_TOKENS = 256
 
 # How a consolidation range gets its record (MemoryPlugin._live_record).
@@ -1418,33 +1409,6 @@ def _format_age(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
-def _fts_match_query(text: str, stopwords: bool = False) -> str | None:
-    """Build a safe FTS5 MATCH expression from free text.
-
-    Raw user text can be FTS5 syntax-invalid; quote each word token and OR
-    them. Returns None when the text has no word tokens. With ``stopwords``
-    (the hybrid side, #666), words in ``FTS_STOPWORDS`` are left out before
-    the cap, so the cap counts content words.
-
-    The 20-token cap applies per blank-line-separated paragraph, so a
-    coalesced burst (messages joined by blank lines, #398) keeps each
-    message's tokens; single-paragraph text is capped at 20 as always.
-    shortcut: a message or ``memory_search`` query that itself contains blank
-    lines gets 20 tokens per paragraph, and there is no total cap (a 100-message
-    burst gives ~2000 OR terms); add a cap if bursts that size ever appear.
-    """
-    # Cap each paragraph's tokens separately, then pool them all.
-    tokens: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", text):
-        words = re.findall(r"\w+", paragraph)
-        if stopwords:
-            words = [w for w in words if w.lower() not in FTS_STOPWORDS]
-        tokens.extend(words[:20])
-    if not tokens:
-        return None
-    return " OR ".join(f'"{token}"' for token in tokens)
-
-
 def _fused_keys(
     pool_rows: list[dict], in_window_rows: list[dict],
     vec_keys: dict[int, float], fts_order: list[int],
@@ -1662,13 +1626,13 @@ def resolve_entry_target_tokens(config: dict) -> int:
 def entry_size_sentence(target_tokens: int) -> str:
     """The sentence asking for entries of about ``target_tokens`` tokens.
 
-    Stated in words (0.75 words per token, an English-prose estimate).
+    Stated in tokens, the unit the config key and the overrun check use, so
+    no per-language words-per-token ratio is involved (#1186).
     """
-    words = round(target_tokens * 0.75)
     return (
-        f"Keep each entry's narrative to about {words} words or fewer; if "
-        "one topic needs more, give it consecutive entries rather than one "
-        "long one."
+        f"Keep each entry's narrative to about {target_tokens} tokens or "
+        "fewer; if one topic needs more, give it consecutive entries rather "
+        "than one long one."
     )
 
 
@@ -1697,9 +1661,10 @@ CREATE TABLE IF NOT EXISTS embedding_meta (
 )
 """
 
-MEMORY_FTS_DDL = """
+MEMORY_FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    summary, content='memory', content_rowid='id'
+    summary, content='memory', content_rowid='id',
+    {TOKENIZE_CLAUSE}
 )
 """
 
@@ -1846,8 +1811,10 @@ CREATE TABLE IF NOT EXISTS retention_meta (
 # uses plain DELETE because the FTS5 'delete' command is only valid for
 # external-content tables (verified empirically, SQLite 3.47.1 — plain DELETE
 # works correctly for regular FTS5 tables).
-MESSAGE_FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content_text)
+MESSAGE_FTS_DDL = f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+    content_text, {TOKENIZE_CLAUSE}
+)
 """
 
 MESSAGE_FTS_INSERT_TRIGGER = """
@@ -4293,7 +4260,7 @@ class MemoryPlugin(CorvidaePlugin):
     ) -> tuple[list[CandidateRow], list[int], set[int]]:
         """Add the FTS side to vec candidates for fusion (#666).
 
-        Runs the stopworded FTS search over the same records (``k ×
+        Runs the FTS search over the same records (``k ×
         VEC_OVERFETCH``, in-window rows flagged, not filtered), measures the
         real cosine of every FTS hit the KNN didn't return from its stored
         vector, and falls back to ``FTS_SIMILARITY_PROXY`` for a hit with no
@@ -4306,7 +4273,7 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             fts_rows = await self._fts_candidates(
                 db, text, k * VEC_OVERFETCH, exclude,
-                flag_window=True, stopwords=True,
+                flag_window=True,
             )
             known = {row[0] for row in vec_rows}
             extra = [row for row in fts_rows if row[0] not in known]
@@ -4362,7 +4329,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _fts_candidates(
         self, db: aiosqlite.Connection, text: str, k: int,
         exclude: tuple[str, int] | None = None,
-        *, flag_window: bool = False, stopwords: bool = False,
+        *, flag_window: bool = False,
     ) -> list[CandidateRow]:
         """FTS5 keyword candidates with a fixed similarity proxy:
         (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY,
@@ -4372,11 +4339,14 @@ class MemoryPlugin(CorvidaePlugin):
         LIMIT, so it applies before the cut to k. With ``flag_window`` (the
         hybrid side, #666) in-window rows are returned flagged instead, as
         the vec path does, with the LIMIT raised by their count so they
-        can't take every slot; ``stopwords`` drops common words from the
-        MATCH. Rows come back in bm25 order."""
-        match = _fts_match_query(text, stopwords=stopwords)
-        if match is None:
+        can't take every slot. Rows come back in bm25 order (newest first for
+        a query of only short terms, which has no rank)."""
+        q = keyword_query(text, cap_per_paragraph=20)
+        if not q.terms:
             return []
+        # MATCH over 3-character pieces, or LIKE for a short-terms-only query.
+        kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
+        order = "rank" if q.match is not None else "m.created_at DESC"
         exclude_sql, exclude_params = _exclude_clause(exclude)
         if flag_window:
             # Fetch past the in-window rows (an upper bound, as for vec).
@@ -4392,9 +4362,9 @@ class MemoryPlugin(CorvidaePlugin):
                 "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, "
                 + exclude_sql + " AS in_window "
                 "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-                "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-                "ORDER BY rank LIMIT ?",
-                (*exclude_params, match, limit),
+                f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0 "
+                f"ORDER BY {order} LIMIT ?",
+                (*exclude_params, *kw_params, limit),
             ) as cursor:
                 flagged = await cursor.fetchall()
             return [
@@ -4406,9 +4376,9 @@ class MemoryPlugin(CorvidaePlugin):
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0"
-            " AND NOT " + exclude_sql + " ORDER BY rank LIMIT ?",
-            (match, *exclude_params, k),
+            f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0"
+            " AND NOT " + exclude_sql + f" ORDER BY {order} LIMIT ?",
+            (*kw_params, *exclude_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -4425,15 +4395,16 @@ class MemoryPlugin(CorvidaePlugin):
         Same MATCH and status filters as ``_fts_candidates``, with the
         window condition un-negated. Count only: no scores without rows.
         """
-        match = _fts_match_query(text)
-        if match is None:
+        q = keyword_query(text, cap_per_paragraph=20)
+        if not q.terms:
             return 0
+        kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
         exclude_sql, exclude_params = _exclude_clause(exclude)
         async with db.execute(
             "SELECT COUNT(*) FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 AND "
+            f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0 AND "
             + exclude_sql,
-            (match, *exclude_params),
+            (*kw_params, *exclude_params),
         ) as cursor:
             (count,) = await cursor.fetchone()
         return count
@@ -4695,7 +4666,7 @@ class MemoryPlugin(CorvidaePlugin):
                     f"ALTER TABLE embedding_meta ADD COLUMN {col} "
                     f"TEXT NOT NULL DEFAULT ''"
                 )
-        await db.execute(MEMORY_FTS_DDL)
+        await create_fts_table(db, "memory_fts", MEMORY_FTS_DDL)
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
@@ -4717,7 +4688,7 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "retrieval_candidate", "fts_rank", "INTEGER")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
-        await db.execute(MESSAGE_FTS_DDL)
+        await create_fts_table(db, "message_fts", MESSAGE_FTS_DDL)
         await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
         await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
         await db.execute(RETENTION_META_DDL)
