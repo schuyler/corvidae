@@ -576,7 +576,7 @@ violates one is a bug even if its tests pass.
    misses (it failed to escalate). The framework MUST let the core label
    a false alarm when it handles an escalation that needed no
    deliberation. A miss MUST be labelled from any of: a user correction
-   on the channel (base PRD §3.7 Calibration and corrections), a
+   on the channel (base PRD §3.7 Corrections), a
    critique verdict on the periphery's reply, or the core's review of a
    peripheral's tail (§3.1.12). Each label MUST name its source.
 
