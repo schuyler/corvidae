@@ -579,6 +579,8 @@ class MarkdownIndex:
         # Rows for paths the walk no longer yields: the manifest is rewritten
         # per file above, so this is the only place a stale row can still hide.
         kept = list(files)
+        if not kept:  # reconcile() aborts on an empty walk; belt on the braces,
+            return    # because NOT IN () would delete every row in both tables
         marks = ",".join("?" * len(kept))
         await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
         await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
