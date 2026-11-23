@@ -1284,14 +1284,14 @@ search_notes.reads_only = True
 ```
 
 Declare it only when the tool changes no stored state, access statistics
-and caches included, and sends nothing anywhere but the operator's
+included, and sends nothing anywhere but the operator's
 configured model providers (an embedding call is fine; a web request is
 not). No tool is read-only by default, and the kernel takes your word for
 it: `corvidae.tool.declares_read_only(fn)` reads the attribute, and only
 `True` counts. MCP tools are never declared. A fork calls such a tool only
 when its caller passes `max_tool_calls` above 0 (see
 [Forking the window](#forking-the-window)). The call is not offered to
-`should_execute_tool` and fires no tool hook, and its result reaches the
+the pre-tool-use check (`should_execute_tool`, once built) and fires no tool hook, and its result reaches the
 fork fenced as untrusted whatever `returns_untrusted` says. A tool that
 writes on some path (lazy schema creation, a statistics bump) is not
 read-only on that path, so guard the path or don't declare it.
@@ -1583,7 +1583,8 @@ class MyPlugin(CorvidaePlugin):
   goes to that stage's profile: the one the operator maps it to under
   `llm.stages`, else the default chat profile. Name the stage, never a
   profile.
-- It sends the agent's tool schemas with `tool_choice: "none"` and the
+- It sends the agent's tool schemas with `tool_choice: "none"` (`"auto"`
+  while `max_tool_calls` leaves calls) and the
   channel's runtime overrides, so the render matches the main turn; the
   prefix is cached only if the stage's profile is the main turn's, or
   differs from it in sampler-side keys. Don't pass `reasoning_effort` or

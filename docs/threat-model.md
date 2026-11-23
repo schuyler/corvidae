@@ -794,7 +794,7 @@ never declared, and markdown_recall's search is reached through
   every channel's stored memory and transcripts, which a main turn's
   `search_memory` already reaches, so this opens no new store. It does open
   a new path to them that **no refusal plugin sees**. Fork calls are not
-  offered to the pre-tool-use check (`should_execute_tool`, PRD §3.5.12),
+  offered to the pre-tool-use check (`should_execute_tool` once it is built, PRD §3.5.12),
   and they fire none of the main loop's tool hooks
   (`transform_tool_result`). That is the owner's choice, made for fast
   critique (#1190, 7092516304), and is open to revisiting.

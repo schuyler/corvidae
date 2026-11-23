@@ -2619,7 +2619,7 @@ is left alone, because Qwen 3.8/Swift's template renders the effort
 sentence first in the system block: a fork at a different effort would
 miss the cache from its first token.
 On top of that a fork sends `tool_choice: "none"` (tools stay in the
-render) and the stage's own `extra_body` (`response_format`; consolidation
+render; `"auto"` while a fork with `max_tool_calls` has calls left) and the stage's own `extra_body` (`response_format`; consolidation
 sends the memory-record schema). A reasoning budget is no longer a fork
 setting: put `reasoning_budget_tokens` in the `extra_body` of the profile the
 stage maps to, and a fork sends none when its profile has none.

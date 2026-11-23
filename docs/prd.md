@@ -1545,9 +1545,9 @@ never uses it (item 2). How the deployed backend uses forks
 design, not requirement. The requirements are outcomes:
 
 1. A fork can't act, so the window and the log change only through main
-   turns (principles 2 and 4). It changes no stored state, persists
-   nothing and fires no hooks of its own. The one call it may make is to a
-   tool its plugin declares read-only: one that changes no stored state,
+   turns (principles 2 and 4). It changes no stored state and fires
+   no hooks of its own. The only calls it may make are to tools their
+   plugin declares read-only: tools that change no stored state,
    access statistics included, and sends nothing anywhere but the
    operator's configured model providers. No tool is read-only unless its
    plugin says so. Such a call is not offered for refusal (§3.5.12), and

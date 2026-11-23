@@ -41,7 +41,8 @@ class MarkdownRecallSpec:
     async def resolve_markdown_recall_search(self, query: str) -> str | None:
         """Search the indexed roots for ``query`` and return the rendered hits.
 
-        One ``<path>: <text>`` line per hit, or "" for no hits. None means
+        One ``<path>: <text>`` entry per hit, newline-separated (a hit's text
+        may itself span lines), or "" for no hits. None means
         there is nothing to search now: no index, or its schema is not built
         yet (the search would create it). Never writes.
         """
@@ -172,7 +173,8 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
 
         None when there is no index or its schema is not built: search would
         run ``_ensure_schema`` and create the file and tables. Otherwise the
-        top hits, one ``<path>: <render(hit)>`` line each.
+        top hits, one ``<path>: <render(hit)>`` entry each (newline-separated;
+        a hit may span lines).
 
         shortcut: reads the index's private ``_schema_ready``; add a public
         ``ready()`` on MarkdownIndex if a second caller appears.
