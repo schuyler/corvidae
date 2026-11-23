@@ -2320,6 +2320,10 @@ checked.
   no `origin` annotation, so it never takes the batch.
 - **Not durable.** The held objections and the stub are in memory; a restart
   between the hold and the revision loses both and the draft stays unsent.
+- **A stub that never reaches a turn.** If the revision's stub is dropped
+  before its turn composes, or keeps failing to fire, the objections are
+  never offered and the channel stays unchecked until a later turn of that
+  origin takes them, or a restart.
 - **Cost.** A held draft normally costs one extra turn per exchange (a deferred stub and another gate's veto each add one), and a
   late refusal costs none (it is delivered as a late check at the next turn).
 

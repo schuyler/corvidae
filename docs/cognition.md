@@ -1891,7 +1891,7 @@ held back for one revision. Nothing is withheld on a lens's say-so.
 
 - **Held.** The kernel decides whether the refusal came in time. If it did,
   the draft is stored unsent with the window's not-sent marker, so
-  transports never see it. Appraisal records `{"held": {"objections":
+  transports never see it. The hold's owner (appraisal, or critique's fallback) records `{"held": {"objections":
   [...]}}` on `on_trace_record` and hands the objections to the kernel's
   held-text store with `held.hold_and_wake` (source `pre-send check`,
   origin of the held exchange: the `origin` annotation, else the trace's
@@ -1930,7 +1930,7 @@ Known behaviours:
   and the revision loses both.
 - A hold whose origin already has a pending stub for the same (channel,
   origin) reuses that stub's text; for a `critique`-origin hold the revising
-  turn gets critique's stub, which offers `NO_REPLY` (follow-up filed).
+  turn gets critique's stub, which offers `NO_REPLY` (#1222).
 - Over ACP, `cancel_prompt` empties the channel's outstanding-call set, so
   an interleaved final can end the unchecked span early and the revision's
   final can then be checked.
