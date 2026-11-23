@@ -81,8 +81,8 @@ does not reach and pointing here.
   could write it back into new rows. Stop the daemon before redacting.
 - Restatements: later replies, memory records outside the covered range,
   goals, notes and critique objections that paraphrase the message.
-- `exchange_log` rows whose `message_rowid` is NULL, and outcome log lines of
-  a trace with no persisted message at or below the redacted id on its
+- `exchange_log` rows whose `message_rowid` is NULL, and outcome log lines
+  for a redacted id that has no persisted trace at or below it on its
   channel.
 - Free text the outcome log holds outside the scrubbed fields: the reasons in
   `silence_reason` and in `speak_up`.
