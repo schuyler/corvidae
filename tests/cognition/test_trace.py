@@ -68,6 +68,8 @@ class TestDisabledOutcomeLog:
         text = warnings[0].getMessage()
         assert "outcome_log" in text
         assert "gates" in text and "silence" in text
+        # Only loaded reporters are named, not a fixed list.
+        assert "appraisal" not in text
         assert "plugins.disabled" in text
 
     async def test_no_warning_when_outcome_log_is_loaded(self, caplog):

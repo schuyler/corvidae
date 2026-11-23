@@ -8,7 +8,7 @@ WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
      admitted -> outcome_log records origin='user', message_rowid populated
      after the turn.
   3. Gate plugin returns False -> on_message_rejected fires, outcome_log
-     records with null message_rowid and outcomes {"gate": "rejected"}.
+     records a {"event": "rejected"} line with no message_rowid.
   4. Tool cycle: Task stamped with key+origin; tool-result notification
      turn inherits the same key (no second exchange row); final
      on_agent_response carries originating_text.

@@ -304,9 +304,9 @@ class _FakePM:
 
 
 def _writes(recorder) -> list[dict]:
-    """The gate's trace records, as ``{"trace_id", "outcomes"}`` dicts."""
+    """The gate's trace records, as ``{"trace_id", "origin", "outcomes"}`` dicts."""
     return [
-        {"trace_id": r["trace_id"], "outcomes": r["record"]}
+        {"trace_id": r["trace_id"], "origin": r["origin"], "outcomes": r["record"]}
         for r in recorder.by_source("gates")
     ]
 
