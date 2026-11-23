@@ -52,11 +52,23 @@ CREATE TABLE IF NOT EXISTS fork_log (
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     cached_tokens INTEGER,
-    snapshot_sha256 TEXT
+    snapshot_sha256 TEXT,
+    chain_parent INTEGER,
+    chain_from INTEGER NOT NULL DEFAULT 0,
+    reconstructable INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS fork_log_ts ON fork_log (ts);
 CREATE INDEX IF NOT EXISTS fork_log_stage_ts ON fork_log (stage, ts);
 CREATE INDEX IF NOT EXISTS fork_log_label ON fork_log (label, stage);
+
+-- Only the block digests a fork appends to its parent's list: repeating the
+-- whole array per fork costs more than the row (measured, #1204).
+CREATE TABLE IF NOT EXISTS fork_digest (
+    fork_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    digest BLOB NOT NULL,
+    PRIMARY KEY (fork_id, ordinal)
+);
 
 -- Rendered text that has no durable home elsewhere, compressed, by hash.
 CREATE TABLE IF NOT EXISTS fork_block (
@@ -79,6 +91,11 @@ def prompt_sha256(messages: Sequence[dict]) -> str:
         messages, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
     return hashlib.sha256(blob).hexdigest()
+
+
+def digest_of(text: str) -> bytes:
+    """A message block's 16-byte digest: cheap to store, cheap to compare."""
+    return hashlib.blake2b(text.encode(), digest_size=16).digest()
 
 
 def question_sha256(question: str | None) -> str | None:
@@ -164,6 +181,9 @@ class ForkLog:
         cached_tokens: int | None = None,
         system_prompt: str | None = None,
         store_snapshot: bool = False,
+        digests: Sequence[bytes] | None = None,
+        chain_parent: int | None = None,
+        chain_from: int = 0,
     ) -> int:
         """Write one fork row; returns its id.
 
@@ -188,8 +208,8 @@ class ForkLog:
                 window_first_rowid, window_last_rowid, window_cut,
                 prompt_sha256, renderer_sha, findings_json, verdict, label,
                 latency_ms, prompt_tokens, completion_tokens, cached_tokens,
-                snapshot_sha256
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                snapshot_sha256, chain_parent, chain_from
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 stage,
@@ -214,11 +234,71 @@ class ForkLog:
                 completion_tokens,
                 cached_tokens,
                 snapshot_sha,
+                chain_parent,
+                chain_from,
             ),
         )
+        fork_id = int(cur.lastrowid)
+        if digests:
+            await db.executemany(
+                "INSERT OR REPLACE INTO fork_digest (fork_id, ordinal, digest)"
+                " VALUES (?, ?, ?)",
+                [(fork_id, chain_from + i, d) for i, d in enumerate(digests)],
+            )
         await db.commit()
-        assert cur.lastrowid is not None
-        return int(cur.lastrowid)
+        return fork_id
+
+    async def resolve_chain(
+        self, fork_id: int, _memo: dict[int, list[bytes]] | None = None
+    ) -> list[bytes] | None:
+        """The fork's full block list, walked back through its parents.
+
+        None when the chain cannot be rebuilt: a missing parent, a row marked
+        ``reconstructable = 0``, or a parent whose length does not match the
+        offset this row claims. A partial list would describe a different
+        prompt, so it is not returned.
+        """
+        db = await self._conn()
+        memo = {} if _memo is None else _memo
+        if fork_id in memo:
+            return memo[fork_id]
+        async with db.execute(
+            "SELECT chain_parent, chain_from, reconstructable FROM fork_log"
+            " WHERE id = ?",
+            (fork_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or not row["reconstructable"]:
+            return None
+        async with db.execute(
+            "SELECT ordinal, digest FROM fork_digest WHERE fork_id = ?"
+            " ORDER BY ordinal",
+            (fork_id,),
+        ) as cur:
+            own_rows = list(await cur.fetchall())
+        own = [bytes(r["digest"]) for r in own_rows]
+        if own_rows and own_rows[0]["ordinal"] != row["chain_from"]:
+            return None
+        base, parent = row["chain_from"], row["chain_parent"]
+        if base == 0:
+            blocks = [] if parent is None else None
+        elif parent is None:
+            blocks = None
+        else:
+            inherit = await self.resolve_chain(parent, memo)
+            blocks = None if inherit is None or len(inherit) != base else inherit
+        if blocks is None:
+            return None
+        memo[fork_id] = [*blocks, *own]
+        return memo[fork_id]
+
+    async def mark_unreconstructable(self, fork_ids: Iterable[int]) -> None:
+        db = await self._conn()
+        await db.executemany(
+            "UPDATE fork_log SET reconstructable = 0 WHERE id = ?",
+            [(i,) for i in fork_ids],
+        )
+        await db.commit()
 
     async def set_label(
         self, fork_id: int, label: str, *, reason: str | None = None
