@@ -18,7 +18,9 @@ Two independent paths:
     (on the draft, before it is sent); the top one runs (#1078, #1169). Before
     send, retention is not offered and a plugin lens only when it declares
     ``before_send=True``; the before-send lens runs inline and its objections
-    only queue for the channel's next turn (#1192). When "none" tops the
+    go back to appraisal, which refuses the draft on them and holds it for one
+    revising turn (#1149; critique does the same itself when appraisal is
+    absent). When "none" tops the
     vector, critique still fires a random offered lens with probability
     ``critique.sample_below_rate`` — the standing experiment's false-negative
     bound (operator directive 3). Without an appraisal plugin (checked once,
@@ -45,7 +47,8 @@ Two independent paths:
     judges language on this path. Confident phrasing is never evidence; the
     generator's confidence never substitutes for a record.
 
-Every main-loop turn that has a trace is judged, whatever started it
+Every main-loop turn that has a trace is judged (except a draft held for
+revision, #1149: the revision is judged, the draft is not), whatever started it
 (#1031; PRD §3.7 Critique 3): user, reminder, heartbeat, notification,
 note-woken and subagent-result turns, and corrections (``critique``-origin
 turns, which a waking finding woke). Stage forks never
@@ -54,7 +57,7 @@ delivery, not eligibility (Critique 4): non-empty findings on a
 ``critique``-origin turn never wake a turn; they wait as CONTEXT for the
 channel's next turn, so no chain of corrections forms. The origin propagates
 through tool cycles and onto notes (§3.5.10), so tool use can't bypass it. A
-response another gate withheld stays eligible — the agent thought it, so
+response another gate withheld stays eligible (a hold for revision is not such a gate) — the agent thought it, so
 critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
@@ -87,6 +90,7 @@ from corvidae.persistence import decode_message_row
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
+from corvidae_cognition.presend import PreSendHold
 from corvidae_cognition.probe import ReadOnlyProbe
 from corvidae_cognition.silence import decline_kind, is_decline
 
@@ -809,6 +813,16 @@ class CritiquePlugin(CorvidaePlugin):
         # an appraisal plugin is registered (decided once, at on_start).
         self._lenses: dict[str, _Added] = {}
         self._appraisal = False
+        # The pre-send hold, built on first use (pm is known by then); used
+        # only while appraisal is absent (#1149 R9).
+        self._presend_hold: PreSendHold | None = None
+
+    @property
+    def _hold(self) -> PreSendHold:
+        """This plugin's ``PreSendHold``, created on first use."""
+        if self._presend_hold is None:
+            self._presend_hold = PreSendHold(self.pm, "critique")
+        return self._presend_hold
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1194,8 +1208,12 @@ class CritiquePlugin(CorvidaePlugin):
 
         When the exchange answers a burst of unanswered user messages, the
         provenance search must not count the burst's own messages as earlier
-        evidence.
+        evidence. Without appraisal it also tells the pre-send hold which turn
+        is starting, before any early return (#1149 R6).
         """
+        # The hold's turn note comes first so a turn without a trace still counts.
+        if not self._appraisal:
+            self._hold.on_turn(channel, trace_id, annotations)
         if trace_id is None:
             return
         conv = getattr(channel, "conversation", None)
@@ -1224,8 +1242,9 @@ class CritiquePlugin(CorvidaePlugin):
         The veto comes first and returns before any fork. Without an
         appraisal plugin, an eligible final (not a decline, with a trace) then
         runs one random before-send lens on a share of drafts
-        (``critique.fallback_rate``); its objections only queue. With appraisal
-        the lens comes through ``on_appraisal_before_send`` instead. Always
+        (``critique.fallback_rate``) unless a hold is outstanding; objections
+        refuse the draft and it is held for one revising turn (#1149). With
+        appraisal the lens comes through ``on_appraisal_before_send`` instead.
         None otherwise. Errors fail open: a broken check never silences the
         agent.
         """
@@ -1242,15 +1261,20 @@ class CritiquePlugin(CorvidaePlugin):
                 and emission == "final"
                 and trace_id is not None
                 and decline_kind(text) is None
+                and not self._hold.suppressed(channel.id)
                 and self._rng.random() < self._fallback_rate(channel)
             ):
                 offered = [name for name, _ in self._offers("before_send")]
                 if offered:
                     # sampled=False, as at idle: a fallback run is not a
                     # "none won" sample below threshold.
-                    await self._run_before_send(
+                    objections = await self._run_before_send(
                         channel, trace_id, text, annotations,
                         self._random_lens(offered), False)
+                    # Objections refuse the draft; the hold decides at the final.
+                    if objections:
+                        return await self._hold.refuse(
+                            channel, trace_id, text, annotations, objections)
             return None
         except Exception:
             logger.warning(
@@ -1281,7 +1305,18 @@ class CritiquePlugin(CorvidaePlugin):
         its critique vector when appraisal's stage 2 lands
         (on_appraisal_idle), and so is the provenance check (it waits for
         stage 2's past_claims).
+
+        Without appraisal the pre-send hold learns the final's outcome first,
+        before any early return, so a declined revision still clears it; a
+        held trace is not judged (#1149 R8).
         """
+        # Hold outcome first (fallback only): True means this trace was held.
+        # on_final does not suspend on its False paths, so _declined and
+        # _record_reply below still run before this hook's first real await.
+        if not self._appraisal and await self._hold.on_final(
+            channel, trace_id, response_text, annotations
+        ):
+            return
         if not self._eligible(trace_id):
             return
 
@@ -1310,6 +1345,14 @@ class CritiquePlugin(CorvidaePlugin):
                 await self._enqueue_lens(
                     channel, trace_id, annotations, request_text, response_text,
                     self._random_lens(offered), sampled=False)
+
+    @hookimpl
+    async def on_held_admitted(
+        self, channel, source, trace_id, admitted_keys, duplicate_keys,
+    ) -> None:
+        """Tell the pre-send hold a batch was offered (fallback only, #1149 R6)."""
+        if not self._appraisal:
+            await self._hold.on_admitted(channel, source, admitted_keys, duplicate_keys)
 
     def _record_reply(self, channel, trace_id) -> None:
         """Note which window row is the exchange's final reply, for the
@@ -1518,14 +1561,14 @@ class CritiquePlugin(CorvidaePlugin):
         recorded as ``lens_selection_before_send``. The lens runs inline, not
         queued: the reply waits on it within the check allowance, and if the
         allowance runs out the run still finishes in the background. Returns
-        None: objections refuse nothing (#1192), they queue for the
-        channel's next turn.
+        the objection texts (or None): appraisal refuses the draft on them.
         """
         offered = [name for name, _ in self._offers("before_send")]
         lens, sampled, basis = self._choose_lens(
             trace_id, channel, lenses if isinstance(lenses, dict) else None,
             offered, "the before-send scoring produced no vector",
-            warn=lenses is None,
+            # Appraisal already warned about a missed vector.
+            warn=False,
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}
@@ -1536,7 +1579,8 @@ class CritiquePlugin(CorvidaePlugin):
             origin=None, record={"lens_selection_before_send": selection},
         )
         if lens is not None:
-            await self._run_before_send(channel, trace_id, text, annotations, lens, sampled)
+            return await self._run_before_send(
+                channel, trace_id, text, annotations, lens, sampled) or None
         return None
 
     @hookimpl
@@ -1596,16 +1640,15 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _run_before_send(
         self, channel, trace_id, text, annotations, lens: str, sampled: bool,
-    ) -> None:
-        """Fork one lens on the draft and queue its objections; inline.
+    ) -> list[str]:
+        """Fork one lens on the draft and return its objection texts; inline.
 
         Records ``outcomes.critique_before_send = {lens, objections, sampled,
         detail?}`` under its own key, so the idle run never overwrites it. A
-        lens fork that misses records nothing, as at idle. Every objection is
-        registered as waiting (``waking_allowed=False``): the draft is about
-        to be sent, so a wake would race the reply (#1192).
+        lens fork that misses records nothing, as at idle, and returns no
+        objections. The caller refuses the draft on the texts (#1149); nothing
+        is held here.
         """
-        origin = (annotations or {}).get("origin")
         token = set_attribution(
             stage="critique", channel_id=channel.id, trace_id=trace_id
         )
@@ -1615,14 +1658,15 @@ class CritiquePlugin(CorvidaePlugin):
                 channel, lens, trace_id, self._originating_text(trace_id, None),
                 text, point="before_send")
             if objs is None:
-                return
+                return []
             entry: dict = {"lens": lens, "objections": len(objs), "sampled": sampled}
             if objs:
                 entry["detail"] = objs
-            await self._record_and_register(
-                channel, trace_id, {"critique_before_send": entry}, objs,
-                wake=False, origin=origin, waking_allowed=False,
+            await self.pm.ahook.on_trace_record(
+                trace_id=trace_id, channel_id=channel.id, source="critique",
+                origin=None, record={"critique_before_send": entry},
             )
+            return [self._format_objection(o) for o in objs]
         finally:
             reset_attribution(token)
 
@@ -1939,7 +1983,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
-        origin: str | None, waking_allowed: bool = True,
+        origin: str | None,
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
@@ -1959,9 +2003,6 @@ class CritiquePlugin(CorvidaePlugin):
         correction) nothing wakes, whatever ``wake`` or the lens says: every
         finding waits for the channel's next turn, so a correction can never
         start another one (the recursion brake, PRD §3.7 Critique 4).
-
-        With ``waking_allowed`` False (the before-send run) every finding
-        waits, as on a ``critique`` origin: a reply is about to be sent.
         """
         await self.pm.ahook.on_trace_record(
             trace_id=trace_id, channel_id=channel.id, source="critique",
@@ -1972,7 +2013,7 @@ class CritiquePlugin(CorvidaePlugin):
             return  # silent: nothing re-enters the window
 
         # Split by delivery: what wakes the channel now, what waits.
-        if origin == "critique" or not waking_allowed:
+        if origin == "critique":
             waking, waiting = [], list(objections)
         elif wake:
             waking, waiting = list(objections), []

@@ -1238,7 +1238,8 @@ trigger)` collects `(lens, question)` offers from whoever implements it,
 and `on_appraisal_before_send` and `on_appraisal_idle` hand the scores back.
 Critique implements them and appraisal never names critique. Treat what a
 contribution hook returns as untrusted input: appraisal drops a malformed
-or duplicate offer with a warning.
+or duplicate offer, and a non-list result or non-string objection, with a
+warning.
 
 **No plugin reads another plugin's tables.** Table and column names are not
 a contract; raw SQL on a peer's table is a service call with no interface.
@@ -1627,7 +1628,8 @@ wait as CONTEXT for the next turn). `before_send` (default `False`) also
 offers the lens on a final draft before it is sent, scored by the same
 `appraisal_question`; leave it off unless the lens makes sense on text not
 yet sent. A before-send lens runs inline in the send check, and its
-objections queue for the next turn and never wake (#1192). Built-ins other
+objections go back to appraisal, which refuses the draft on them and holds it
+for one revising turn (#1149). Built-ins other
 than retention are always offered there. There are no thresholds, reply
 patterns or sample rate (#1078); a lens without a question is rejected with
 a warning.

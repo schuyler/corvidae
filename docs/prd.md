@@ -1352,8 +1352,7 @@ deciding only what to newly append and in what order.
 3. Per-emission firings at the progress, thinking, and error-fallback
    sites suppress that emission only, with a window annotation for
    suppressed text.
-4. Apart from the pre-send check (item 7), no gate withholds a direct
-   user reply by default.
+4. No gate withholds a direct user reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
    (Grice's maxims). The channel's register (§3.3.10) sets the norm:
@@ -1375,14 +1374,14 @@ deciding only what to newly append and in what order.
    an LLM error, with an `error` emission naming the channel and a warning
    in the log (principle 5). No text in the window, whoever wrote it, can
    leave a channel unable to answer (principle 9).
-7. A reply may be checked before it is sent. The check ends one of three
-   ways: the reply is sent as written; it is held back for a revision; or
-   it is withheld. A held-back draft is not sent: it stays in the window
+7. A reply may be checked before it is sent. The check ends one of two
+   ways: the reply is sent as written, or it is held back for a revision.
+   A held-back draft is not sent: it stays in the window
    as a vetoed final does (item 2), and the check's objections reach the
    turn that revises it as framed CONTEXT. That turn is expected to
    reply, so Critique 4's silence default does not apply to it, though
    the agent may still decline (item 5). For now a revision is not held
-   back again; if it is checked, it has its own allowance. A held-back draft and a withheld reply are each recorded
+   back again; if it is checked, it has its own allowance. A held-back draft is recorded
    in the outcome log with the reason. The check may delay a reply for
    no longer than the channel's check allowance (§3.13.5), counted from
    when the check starts. When the
@@ -1391,7 +1390,7 @@ deciding only what to newly append and in what order.
    check that finishes once the allowance has run out holds nothing
    back, but what it found still reaches the channel, at its next turn,
    as framed CONTEXT; it wakes no turn. What
-   the check looks for, and how it chooses among the three, is the
+   the check looks for, and how it chooses between the two, is the
    plugin's choice.
 
 **Outcome log.** The outcome log keeps every record reported about a
@@ -1984,7 +1983,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Every heartbeat beat reviews extant goals and any other information that might be relevant to taking action; recent memory is no longer a required input, since the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
-| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); apart from the pre-send check (§3.7 Output gate 7), gates still never withhold a direct reply by default | #215 |
+| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
@@ -2039,6 +2038,7 @@ record that holds the reasoning.
 | The kernel holds text for a channel's next turn, admits it at the tail and frames it one way whoever offered it, so principle 9 has one framing chokepoint; it has no admission budget and never expires held text. Dedupe, budgets, order and expiry are admission policy, a replaceable plugin (the funnel), and with none loaded entries are admitted as offered | principle 1; principle 9; §3.1.22; §3.7 Funnel; #1176; owner, 2026-11-22 and 2026-11-23 |
 | A check that misses its allowance is not discarded: what it returns late reaches the channel at its next turn and wakes no turn, because the work is done and the result may still be useful in the main window, as critique after the fact already is; the agent decides whether to correct course | §3.5.12; §3.7 Output gate 7; #148, #1149; operator, 2026-11-22 |
 | A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
-| A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
+| A reply may be checked before it is sent, ending in send or held back for a revision; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
+| The pre-send check has two outcomes, send or hold back for a revision, and never withholds: the revising turn may still decline, so a lens never silences a reply on its own | §3.7 Output gate 7; #1149; owner, 2026-11-23 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
 | A fork may call tools its plugin declares read-only, meaning no stored state changed and nothing sent beyond the configured model providers; no tool is read-only by default; a critique fork calls them only after the exchange, capped by an operator-set count with a small default; the calls are not offered to the pre-tool-use check, a choice made for speed that the threat model records and that is open to revisiting; provenance stays a check, not a lens, until tool-using forks are measured | principle 9; §3.5.12; §3.7 Critique 1, 4; §3.8.1; #1190; owner, 2026-11-23 |

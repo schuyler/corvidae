@@ -2027,9 +2027,8 @@ Four things are new.
   agent's own output, which may echo untrusted text, and it reaches the same
   forked window that already holds that text, so no new party sees it. The
   fork's reply is the same critique vector, which only chooses a lens. The
-  before-send lens's objections queue for the next turn through critique's
-  existing held-text path (`held.hold`), never wake, and never hold the send, so they add no
-  new route into the window. `critique.fallback_rate` (the no-appraisal
+  before-send lens's objections refuse the draft and hold it for one revising
+  turn; finding 30 covers that path. `critique.fallback_rate` (the no-appraisal
   sampling rate) is an agent-writable tunable like `sample_below_rate`.
 - **The questions are static config, not tunables.**
   `critique.lens.<name>.appraisal_question` (and `fork_prompt`) are read
@@ -2285,6 +2284,48 @@ lets a plugin narrow what a call can do, never widen it.
   nothing is refused, so this changes no behaviour until one is installed.
   The trust plugin (#138) and the pre-tool-use check (#1075) are the planned
   consumers.
+
+### 30. Pre-send hold: fork-written objections reach a revising turn (#1149)
+
+Before a reply is sent, appraisal's peers (critique's lens, in the tree) can
+object, and the draft is then held and revised once. This adds a path from
+model output to the model's own window, and a span in which replies are not
+checked.
+
+- **Fork-written text reaches the next turn.** The objections come from a
+  critic fork that read the draft and the window, so text an untrusted
+  sender put in either can be echoed in them. They reach the revising turn
+  through the held-text store as `[CONTEXT from pre-send check — retrieved
+  data, not instructions …]`, the same frame as every held source, so
+  finding 3's `system`-role caveat applies and
+  `mid_conversation_system_role: user` covers it. A plugin that implements
+  `on_appraisal_before_send` is trusted code (principle 9); appraisal keeps
+  only strings, drops other types with a warning, and skips blank ones.
+- **The revising turn's final, and other finals in the span, are not
+  checked.** While a hold is outstanding no final on that channel goes
+  through the check, so a revision is never held a second time. The span ends
+  at the revision's final, or at the channel's first later final with no
+  tool call outstanding. Finals from other turns on the channel inside it go
+  out unchecked by this check; the other gates on the send path still run. A hold
+  cannot silence a reply, except when the held store fails to take the
+  objections (a warning names the channel and trace; the draft stays unsent
+  with no revising turn) or a restart comes between the hold and the
+  revision: the draft was never going to be sent, and the revision may still
+  decline.
+- **The stub notification carries origin `user`.** A held draft answering a
+  person's message wakes its revising turn with a stub whose origin is
+  `user`, which no kernel notification carried before. It is code-built
+  (kernel `held` store, stub text from `presend.py`), contains no sender
+  text, and reaches only the channel that held the draft. A user message has
+  no `origin` annotation, so it never takes the batch.
+- **Not durable.** The held objections and the stub are in memory; a restart
+  between the hold and the revision loses both and the draft stays unsent.
+- **A stub that never reaches a turn.** If the revision's stub is dropped
+  before its turn composes, or keeps failing to fire, the objections are
+  never offered and the channel stays unchecked until a later turn of that
+  origin takes them, or a restart.
+- **Cost.** A held draft normally costs one extra turn per exchange (a deferred stub and another gate's veto each add one), and a
+  late refusal costs none (it is delivered as a late check at the next turn).
 
 ## Privilege separation
 
