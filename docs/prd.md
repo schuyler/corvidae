@@ -424,9 +424,8 @@ one is a bug even if its tests pass.
     the hook requires with a default.
 13. Every dependency is declared and checked before any plugin starts; a
     missing required one stops startup naming it; an absent optional one is
-    not an error; nothing depends on load order. A plugin that works
-    without another declares it optional, and implementations of the absent
-    plugin's hooks stay inactive. A hook implementation with no hook spec
+    not an error; nothing depends on load order. Implementations of an
+    absent optional dependency's hooks stay inactive. A hook implementation with no hook spec
     is logged at startup, at WARNING unless its owner is an absent optional
     dependency. Plugins start concurrently; the Agent starts after every
     plugin has started, and producers that inject notifications wait for
@@ -606,7 +605,8 @@ Per transport:
   URL; a provided token shorter than 16 characters is rejected; there is no
   setting that turns auth off; comparisons are constant-time. Login sets a
   cookie that script cannot read and the browser does not send cross-site,
-  whose value is derived from the token, so sessions survive a restart with
+  whose value is a keyed one-way hash of the token, so the cookie does not
+  reveal it, and sessions survive a restart with
   the same token and die when it changes. Every route needs the cookie; the
   WebSocket also needs an allowed `Origin`; every request needs an allowed
   `Host`. A strict content-security policy confines the page to its own
@@ -630,7 +630,8 @@ Per transport:
 - **ACP**: Agent Client Protocol v1 over stdio, as a dedicated ACP-agent
   subprocess that owns stdio (JSON-RPC only on stdout; logs to stderr or a
   file). Inert under the daemon and the terminal client. Requires the
-  optional ACP client library install. `authMethods: []`. Sessions are
+  optional ACP client library install, which CI installs so the ACP tests
+  run. `authMethods: []`. Sessions are
   `acp:<sessionId>`; `session/new` stores the client's working directory as
   transport metadata, never merged into LLM request bodies. Advertises
   `loadSession`, `list`, `resume`, `close`, not `delete`; load and resume
@@ -656,7 +657,7 @@ Per transport:
 
 ### 3.3 Context window, compaction, prompt construction
 
-1. Each channel has an operator-set token budget, estimated by token count
+1. Each channel has an operator-set token budget, estimated with a tokenizer
    over the JSON-serialized visible fields of every message (tool-call
    arguments and reasoning included), with a character-based fallback. A
    row whose provenance record renders into a metadata header and a payload
@@ -875,8 +876,8 @@ Per transport:
 
 1. Built-in tools: the shell, file read and write, web fetch and web
    search, the task pipeline and its status, the agent's settings tool,
-   subagent, fork, the scheduler's reminder and job tools (set, list,
-   cancel, update), memory's search, transcript search and raw recall,
+   subagent, fork, the scheduler's reminder tools (set, list, cancel) and
+   job tools (add, update), memory's search, transcript search and raw recall,
    and the send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; parameters that carry
    call context (channel, tool-call id, task queue) are injected, never
@@ -1208,7 +1209,7 @@ per-source ceiling on what one window holds
 (operator-set), admitting in priority order,
 skipping entries that don't fit, drops logged; data-not-instructions
 framing of retrieved data, labelled with where it came from, written
-once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-tool-call notification payloads are ingested by the funnel and admitted at the turn their stub triggers, coalesced per `(channel, origin)`, so a critique verdict cannot ride a reminder's stub; an ingested payload leaves the queue at admission, and the pending flag clears when a drain is attempted. A payload can instead be ingested without a stub; it is admitted at the channel's next turn, whatever that turn's origin, and wakes nothing. A source can also hand the funnel a promise of entries before a turn; the funnel admits it through the same path once it resolves. A stub-less payload or promise older than an operator-set time-to-live is dropped. Salience
+once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row, which carries its row id. Non-tool-call notification payloads are ingested by the funnel and admitted at the turn their stub triggers, coalesced per `(channel, origin)`, so a critique verdict cannot ride a reminder's stub; an ingested payload leaves the queue at admission, and the pending flag clears when a drain is attempted. A payload can instead be ingested without a stub; it is admitted at the channel's next turn, whatever that turn's origin, and wakes nothing. A source can also hand the funnel a promise of entries before a turn; the funnel admits it through the same path once it resolves. A stub-less payload or promise older than an operator-set time-to-live is dropped. Salience
 arbitration across sources is a policy swap inside the funnel (a toggle,
 below),
 deciding only what to newly append and in what order.
@@ -1346,10 +1347,10 @@ deciding only what to newly append and in what order.
    plugin's choice.
 
 **Outcome log.** One outcome-log row per trace (origin, originating
-rowid, retrieval profile, appraisal, outcomes),
+row id, retrieval profile, appraisal, outcomes),
 written at admission or rejection and merged in place by every writer
 atomically. Rejected messages keep their row
-with a null rowid.
+with a null row id.
 
 **Calibration and corrections.** The operator's calibration command reports rates per
 gate from the outcome log and suggests threshold changes; the command
@@ -1550,11 +1551,11 @@ design, not requirement. The requirements are outcomes:
 ### 3.9 Scheduler
 
 1. Scheduled rows are stored durably: due time, optional interval,
-   target channel id, text, origin (a reminder), creator (config or
+   target channel id, text, origin (always reminder), creator (config or
    tool), enabled flag and a durable disabled reason. There is no firing
    log; a firing is a persisted conversation row.
 2. Each row fires at its due time, using the kernel clock (§3.1.15), and
-   only after the database is open and the agent has started. A due row's channel
+   only after the database is open and the Agent has started. A due row's channel
    is resolved first. If the owning transport declines (§3.2.7), the row
    stays due and is retried. Then the row is advanced or disabled before
    anything else happens, so it fires at most once.
