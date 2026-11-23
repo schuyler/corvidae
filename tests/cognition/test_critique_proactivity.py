@@ -25,6 +25,7 @@ from tests.cognition.test_critique import _fire, _read_outcomes, _teardown
 from tests.cognition.test_critique_vector import (
     _drain,
     _env,
+    _offer,
     _warnings,
     _watch_funnel,
 )
@@ -94,7 +95,7 @@ class TestChosenByTheVector:
         TestOffers' in test_critique_vector.py)."""
         env = await _env(tmp_path)
         try:
-            assert dict(env.appraisal.offer())["proactivity"] == (
+            assert dict(await _offer(env))["proactivity"] == (
                 BUILTIN_LENSES["proactivity"][0])
         finally:
             await _teardown(env)
@@ -104,7 +105,7 @@ class TestChosenByTheVector:
         env = await _env(tmp_path, config={"critique": {"lens": {"proactivity": {
             "appraisal_question": "OPERATOR-PROACTIVITY-Q"}}}})
         try:
-            assert dict(env.appraisal.offer())["proactivity"] == "OPERATOR-PROACTIVITY-Q"
+            assert dict(await _offer(env))["proactivity"] == "OPERATOR-PROACTIVITY-Q"
         finally:
             await _teardown(env)
 
@@ -184,7 +185,7 @@ class TestEnabled:
         that still names it runs nothing."""
         env = await _env(tmp_path, chat_text=VERDICT, config={"critique": OFF})
         try:
-            assert "proactivity" not in [n for n, _ in env.appraisal.offer()]
+            assert "proactivity" not in [n for n, _ in await _offer(env)]
             await _turn(env, "kp9", {"proactivity": 1.0})
             assert _proactivity_runs(env) == 0
         finally:
@@ -211,7 +212,7 @@ class TestEnabled:
                 "enabled": "no"}}}}
             await env.plugin.on_config_reload(config)
             assert _warnings(caplog, "critique.lens.proactivity.enabled"), caplog.text
-            assert "proactivity" in [n for n, _ in env.appraisal.offer()]
+            assert "proactivity" in [n for n, _ in await _offer(env)]
         finally:
             await _teardown(env)
 

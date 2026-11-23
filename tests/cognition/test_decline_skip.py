@@ -134,30 +134,21 @@ class TestAppraisalSkipsDeclines:
 # ---------------------------------------------------------------------------
 
 
-class _LensAppraisal(CorvidaePlugin):
-    """An appraisal store with no stage-2 listener calls, so a judged turn
-    gets one random lens."""
-
-    depends_on = frozenset()
-
-    def get_originating_text(self, trace_id):
-        return "q"
-
-    def add_stage2_listener(self, callback):
-        pass
-
-
 async def _critique_env(tmp_path):
-    """CritiquePlugin with a lens-selecting appraisal and a queue spy."""
+    """CritiquePlugin with no appraisal plugin (the fallback samples every
+    exchange at critique.fallback_rate 1.0, so a judged turn gets one random
+    lens) and a queue spy."""
     from corvidae_cognition.critique import CritiquePlugin
 
     pm = create_plugin_manager()
     spy = _QueueSpy()
     pm.register(spy, name="task")
-    pm.register(_LensAppraisal(), name="appraisal")
     critique = CritiquePlugin()
     pm.register(critique, name="critique")
-    cfg = {"daemon": {"session_db": str(tmp_path / "sessions.db")}}
+    cfg = {
+        "daemon": {"session_db": str(tmp_path / "sessions.db")},
+        "critique": {"fallback_rate": 1.0},
+    }
     await critique.on_init(pm=pm, config=cfg)
     return SimpleNamespace(pm=pm, spy=spy, critique=critique)
 
@@ -177,7 +168,7 @@ class TestCritiqueSkipsDeclines:
             trace_id="t-decline", annotations={}, logprobs=None,
         )
 
-        # With no stage-2 listener a judged turn gets one random lens task;
+        # With no appraisal a judged turn gets one random lens task (rate 1.0);
         # proactivity is a lens (#1126), so a permission question adds nothing.
         expected = ["critique"] if judged else []
         assert env.spy.descriptions == expected

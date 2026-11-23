@@ -9,19 +9,27 @@ deferred registration, at the turn its stub triggers.
 
 Two independent paths:
 
-  * At most one lens runs per exchange: the built-ins (predictive /
-    constrained / adversarial / retention / proactivity) and plugin lenses
-    are offered to the stage-2 appraisal fork, which scores them in a critique vector, and
-    the top one runs (#1078). When "none" tops it, critique still fires a
-    random offered lens with probability ``critique.sample_below_rate`` — the
-    standing experiment's false-negative bound (operator directive 3). The
-    lens runs as a fork of the live window; a lens whose fork can't run (forks off, no
+  * At most one lens runs per exchange at each of two points: the built-ins
+    (predictive / constrained / adversarial / retention / proactivity) and
+    plugin lenses are offered to appraisal through its ``on_appraisal_prompts``
+    hook, which scores them in a critique vector and tells critique through
+    ``on_appraisal_idle`` (after the exchange) and ``on_appraisal_before_send``
+    (on the draft, before it is sent); the top one runs (#1078, #1169). Before
+    send, retention is not offered and a plugin lens only when it declares
+    ``before_send=True``; the before-send lens runs inline and its objections
+    only queue for the channel's next turn (#1192). When "none" tops the
+    vector, critique still fires a random offered lens with probability
+    ``critique.sample_below_rate`` — the standing experiment's false-negative
+    bound (operator directive 3). Without an appraisal plugin (checked once,
+    at ``on_start``) one random lens runs at each point on a share of
+    exchanges, ``critique.fallback_rate``, and the provenance check is off.
+    The lens runs as a fork of the live window; a lens whose fork can't run (forks off, no
     window, the exchange compacted out, the fork failed or its reply was
     unusable) is skipped with a warning, like provenance, and makes no
     standalone call (PRD §3.8.5, #320). A run in which no lens ran records
     no outcome.
-  * The provenance check (trap #4, redesigned in #155) runs when stage-2
-    appraisal, a model, lists claims the reply makes about the past. It runs
+  * The provenance check (trap #4, redesigned in #155) runs when appraisal's
+    stage-2 fork, a model, lists claims the reply makes about the past. It runs
     only as a fork of the live window cut at the exchange's final reply, so
     the judge sees the system prompt and the exchange's own tool results as
     records. The code only fetches evidence: per claim, the closest
@@ -50,11 +58,11 @@ critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
 The built-in and plugin lenses are chosen per exchange from the critique
-vector stage-2 appraisal returns: each lens's one-line appraisal question is
+vector appraisal returns: each lens's one-line appraisal question is
 scored, and the top share runs unless "none" wins (#1078).
-``critique.sample_below_rate`` resolves through ``resolve_tunable`` at
-decision time (operator directive 2); the questions and fork prompts are
-static config.
+``critique.sample_below_rate`` and ``critique.fallback_rate`` resolve through
+``resolve_tunable`` at decision time (operator directive 2); the questions and
+fork prompts are static config.
 """
 
 from __future__ import annotations
@@ -78,7 +86,7 @@ from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
-from corvidae_cognition.silence import is_decline
+from corvidae_cognition.silence import decline_kind, is_decline
 
 # Why a lens skips when forks are off for the stage (shared by both skip texts).
 FORKS_OFF_REASON = (
@@ -94,6 +102,9 @@ logger = logging.getLogger("corvidae.critique")
 # decision time — never cached at init).
 # --------------------------------------------------------------------------
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
+# critique.fallback_rate: the share of exchanges that run one random lens, at
+# each point, when no appraisal plugin is loaded (owner ruling, #1169).
+FALLBACK_RATE_DEFAULT = 0.25
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
 # critique.lens.proactivity.enabled: static config, not a tunable, so the
 # agent can't switch off the critic that checks it (#1126).
@@ -186,7 +197,7 @@ BUILTIN_LENSES: dict[str, tuple[str, bool]] = {
 }
 
 # Bound on the per-trace maps CritiquePlugin keeps (_originating_rowid,
-# _reply): old traces fall off the front.
+# _originating_texts, _reply): old traces fall off the front.
 ADMITTED_LRU_MAXSIZE = 512
 
 # JSON schema constraining objection output on servers that honour it.
@@ -633,6 +644,8 @@ class Lens:
     on every exchange; the lens runs when it wins (or is drawn at
     ``critique.sample_below_rate``). Critique appends the JSON reply schema
     to ``fork_prompt``. ``wakes`` makes its findings wake the channel.
+    ``before_send`` also offers the lens on the draft before a reply is sent
+    (#1169); its question is the same at both points.
     """
 
     name: str                     # ^[a-z][a-z0-9_]*$ - a config-key segment
@@ -641,6 +654,7 @@ class Lens:
     # a lens without one is rejected with a warning naming what to add).
     appraisal_question: str = ""
     wakes: bool = False           # findings wake the channel (still brakes on critique turns)
+    before_send: bool = False     # also offered on the draft, before the reply is sent
 
 
 @dataclass(frozen=True)
@@ -685,6 +699,8 @@ def _lens_problem(lens: object) -> str | None:
             "of the block the appraisal fork reads; remove the newline")
     if not isinstance(lens.wakes, bool):
         return f"wakes {lens.wakes!r} must be True or False"
+    if not isinstance(lens.before_send, bool):
+        return f"before_send {lens.before_send!r} must be True or False"
     return None
 
 
@@ -742,10 +758,18 @@ class CritiqueSpec:
 
 
 class CritiquePlugin(CorvidaePlugin):
-    """Deferred, salience-gated self-critique plus the provenance check."""
+    """Self-critique plus the provenance check, driven by appraisal's hooks.
+
+    Implements ``on_appraisal_prompts`` (the lenses it offers),
+    ``on_appraisal_before_send`` (run the chosen lens on the draft, inline)
+    and ``on_appraisal_idle`` (the provenance check and the chosen lens,
+    queued). With no appraisal plugin it samples lenses itself at
+    ``critique.fallback_rate``.
+    """
 
     # trace owns the hook critique reports its outcomes on (#1179).
     depends_on = frozenset({"task", "llm", "trace"})
+    optional_depends_on = frozenset({"appraisal"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
 
@@ -769,6 +793,9 @@ class CritiquePlugin(CorvidaePlugin):
         # rowid, fed by on_message_persisted: a lens forks only while that
         # row is still in the window (#51).
         self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
+        # Bounded map of trace id -> the exchange's true originating text,
+        # fed by on_message_persisted (the opening message a lens quotes).
+        self._originating_texts: collections.OrderedDict[str, str] = collections.OrderedDict()
         # Bounded map of trace id -> (rowid of the exchange's final reply or
         # None, the channel's compaction count then): where the provenance
         # fork cuts, and whether the window has been compacted since.
@@ -777,9 +804,9 @@ class CritiquePlugin(CorvidaePlugin):
         # Compactions seen per channel id (before_compaction).
         self._compactions: dict[str, int] = {}
         # Plugin-contributed lenses by name (fixed after on_init), and whether
-        # handle_stage2 was registered with an appraisal plugin.
+        # an appraisal plugin is registered (decided once, at on_start).
         self._lenses: dict[str, _Added] = {}
-        self._stage2_listening = False
+        self._appraisal = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1034,20 +1061,29 @@ class CritiquePlugin(CorvidaePlugin):
             )
         return prompts
 
-    def _offers(self) -> list[tuple[str, str]]:
-        """The lenses the appraisal fork scores: ``(name, question)``, in
-        fixed order (built-ins in table order, then added lenses by name).
+    def _offers(self, trigger: str) -> list[tuple[str, str]]:
+        """The lenses the appraisal fork scores at ``trigger``: ``(name,
+        question)``, in fixed order (built-ins in table order, then added
+        lenses by name).
 
-        A built-in is offered while ``_builtin_offered`` says so. The question
+        A built-in is offered while ``_builtin_offered`` says so. At
+        "before_send" retention is not offered (a fact filed from a draft
+        may never be sent) and an added lens only when it declares
+        ``before_send``; any other trigger gets the full "idle" list. The question
         is read from static config (``critique.lens.<name>.appraisal_question``)
         so ``set_settings`` can't reword the critic it is scored for.
         """
+        before_send = trigger == "before_send"
         offers: list[tuple[str, str]] = []
         for name, (question, _wakes) in BUILTIN_LENSES.items():
             if not self._builtin_offered(name):
                 continue
+            if before_send and name == "retention":
+                continue
             offers.append((name, self._question(name, question)))
         for name in sorted(self._lenses):
+            if before_send and not self._lenses[name].lens.before_send:
+                continue
             offers.append(
                 (name, self._question(name, self._lenses[name].lens.appraisal_question)))
         return offers
@@ -1083,7 +1119,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Build the lazy read-only evidence probe and listen for stage 2.
+        """Build the lazy read-only evidence probe and note whether appraisal is loaded.
 
         The raw-dialog FTS table is 1b's. The probe opens nothing here: it
         connects on first use and retries at a bounded rate, so a missing DB
@@ -1093,10 +1129,20 @@ class CritiquePlugin(CorvidaePlugin):
         the critic "nothing matched" without having looked would turn every
         true recollection into an objection.
 
-        Past claims come from stage-2 appraisal, so the provenance check
-        registers a stage-2 listener; without AppraisalPlugin it's off.
+        Past claims come from appraisal's ``on_appraisal_idle``, so without
+        AppraisalPlugin the provenance check is off and one INFO line says
+        lenses are sampled at ``critique.fallback_rate`` instead.
         """
-        self._listen_for_stage2()
+        # The one presence check: critique acts through the hooks when
+        # appraisal is registered and samples lenses itself when it is not.
+        self._appraisal = self.pm.has_plugin("appraisal") if hasattr(self, "pm") else False
+        if not self._appraisal:
+            logger.info(
+                "critique: no appraisal plugin is loaded; one random lens runs "
+                "at the send and after the exchange on a share of exchanges "
+                "(critique.fallback_rate, default %s), and the provenance check "
+                "is off (enable the appraisal plugin to turn both on)",
+                FALLBACK_RATE_DEFAULT)
         db_path = config.get("daemon", {}).get("session_db", "sessions.db")
         base_dir = config.get("_base_dir", Path("."))
         db_path = str(Path(base_dir) / db_path)
@@ -1107,25 +1153,6 @@ class CritiquePlugin(CorvidaePlugin):
             "the provenance check stays off until message_fts exists",
         )
 
-    def _listen_for_stage2(self) -> None:
-        """Register handle_stage2 with AppraisalPlugin, or warn that the
-        provenance check is off without it."""
-        appraisal = self.pm.get_plugin("appraisal") if hasattr(self, "pm") else None
-        add_listener = getattr(appraisal, "add_stage2_listener", None)
-        if not callable(add_listener):
-            logger.warning(
-                "critique provenance check disabled: no appraisal plugin to "
-                "detect past claims (enable the appraisal plugin to turn it on)"
-            )
-            return
-        add_listener(self.handle_stage2)
-        self._stage2_listening = True
-        # Hand appraisal the lenses to score; an appraisal without the seam
-        # simply produces no vector (selection then logs and runs none).
-        set_offer = getattr(appraisal, "set_lens_offer", None)
-        if callable(set_offer):
-            set_offer(self._offers)
-
     @hookimpl
     async def on_stop(self) -> None:
         # Close the probe connection; later get() calls open nothing.
@@ -1134,8 +1161,13 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_persisted(self, channel, trace_id, rowid, text, annotations) -> None:
-        """Record the exchange's originating rowid for the fork containment
-        check. Unpersisted exchanges (rowid None) are never forked."""
+        """Record the exchange's originating text, and its rowid for the fork
+        containment check. Unpersisted exchanges (rowid None) are never forked."""
+        # The opening text a lens quotes, kept whether or not it persisted.
+        self._originating_texts[trace_id] = text
+        self._originating_texts.move_to_end(trace_id)
+        while len(self._originating_texts) > ADMITTED_LRU_MAXSIZE:
+            self._originating_texts.popitem(last=False)
         if rowid is None:
             return
         self._originating_rowid[trace_id] = rowid
@@ -1187,8 +1219,13 @@ class CritiquePlugin(CorvidaePlugin):
     async def should_send_response(self, channel, text, emission, trace_id, annotations):
         """Veto a critique wake turn's final reply when it is the no-reply marker.
 
-        Anything else is no opinion. Errors fail open: a broken check never
-        silences the agent.
+        The veto comes first and returns before any fork. Without an
+        appraisal plugin, an eligible final (not a decline, with a trace) then
+        runs one random before-send lens on a share of drafts
+        (``critique.fallback_rate``); its objections only queue. With appraisal
+        the lens comes through ``on_appraisal_before_send`` instead. Always
+        None otherwise. Errors fail open: a broken check never silences the
+        agent.
         """
         try:
             if (
@@ -1197,6 +1234,19 @@ class CritiquePlugin(CorvidaePlugin):
                 and text.strip() == NO_REPLY_MARKER
             ):
                 return False
+            # The no-appraisal fallback: sample a share of eligible drafts.
+            if (
+                not self._appraisal
+                and emission == "final"
+                and trace_id is not None
+                and decline_kind(text) is None
+                and self._rng.random() < self._fallback_rate(channel)
+            ):
+                offered = [name for name, _ in self._offers("before_send")]
+                if offered:
+                    await self._run_before_send(
+                        channel, trace_id, text, annotations,
+                        self._random_lens(offered), True)
             return None
         except Exception:
             logger.warning(
@@ -1206,6 +1256,12 @@ class CritiquePlugin(CorvidaePlugin):
             )
             return None
 
+    def _fallback_rate(self, channel) -> float:
+        """``critique.fallback_rate``: the share of exchanges that run one
+        random lens, per point, when no appraisal plugin is loaded."""
+        return resolve_tunable(
+            channel, self.config, "critique.fallback_rate", FALLBACK_RATE_DEFAULT)
+
     # ------------------------------------------------------------------
     # Eligibility + gating (§2.4)
     # ------------------------------------------------------------------
@@ -1214,12 +1270,13 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_agent_response(
         self, channel, request_text, response_text, trace_id, annotations, logprobs,
     ) -> None:
-        """Record the reply; with no stage 2 to choose a lens, run one
-        random offered lens.
+        """Record the reply; with no appraisal to choose a lens, run one
+        random offered lens on a share of exchanges.
 
         Eligibility: see _eligible. The lens for an exchange is chosen from
-        its critique vector when stage 2 lands (handle_stage2), and so is the
-        provenance check (it waits for stage 2's past_claims).
+        its critique vector when appraisal's stage 2 lands
+        (on_appraisal_idle), and so is the provenance check (it waits for
+        stage 2's past_claims).
         """
         if not self._eligible(trace_id):
             return
@@ -1239,10 +1296,12 @@ class CritiquePlugin(CorvidaePlugin):
 
         self._record_reply(channel, trace_id)
 
-        # Without stage 2 to choose, degrade TO spec (§3.2 contract): one
-        # random offered lens per exchange. With it, handle_stage2 chooses.
-        if not self._stage2_listening:
-            offered = [name for name, _ in self._offers()]
+        # Without appraisal to choose, degrade TO spec (§3.2 contract): one
+        # random offered lens on critique.fallback_rate of exchanges. With it,
+        # on_appraisal_idle chooses. sampled stays False: "sampled below
+        # threshold" means "none won", and the fallback is not that.
+        if not self._appraisal and self._rng.random() < self._fallback_rate(channel):
+            offered = [name for name, _ in self._offers("idle")]
             if offered:
                 await self._enqueue_lens(
                     channel, trace_id, annotations, request_text, response_text,
@@ -1292,11 +1351,9 @@ class CritiquePlugin(CorvidaePlugin):
             return False
 
     def _originating_text(self, trace_id, fallback):
-        """The exchange's true opening text from AppraisalPlugin's LRU, else
+        """The exchange's true opening text from critique's own LRU, else
         ``fallback`` (the request text of the exchange's last item)."""
-        appraisal = self.pm.get_plugin("appraisal")
-        get_originating = getattr(appraisal, "get_originating_text", None)
-        text = get_originating(trace_id) if callable(get_originating) else None
+        text = self._originating_texts.get(trace_id)
         return text if text is not None else fallback
 
     async def _enqueue(self, channel, trace_id, annotations, description, work) -> None:
@@ -1441,20 +1498,61 @@ class CritiquePlugin(CorvidaePlugin):
     # The provenance check (trap #4, #155)
     # ------------------------------------------------------------------
 
-    async def handle_stage2(self, channel, trace_id, response_text, annotations, stage2) -> None:
-        """AppraisalPlugin's stage-2 listener: start the provenance check and
-        run the lens this exchange's critique vector chose.
+    @hookimpl
+    async def on_appraisal_prompts(self, channel, trigger):
+        """Offer this plugin's lenses to appraisal: the before-send list for
+        "before_send", the idle list for any other trigger (appraisal has
+        only the two)."""
+        return self._offers(trigger)
+
+    @hookimpl
+    async def on_appraisal_before_send(self, channel, trace_id, text, annotations, lenses):
+        """Run the lens the draft's scores chose, inline, before the send.
+
+        ``lenses`` None (the scoring fork missed) is "no vector", sampled at
+        ``critique.sample_below_rate`` like an idle miss. The choice is
+        recorded as ``lens_selection_before_send``. The lens runs inline, not
+        queued: the reply waits on it within the check allowance, and if the
+        allowance runs out the run still finishes in the background. Returns
+        None: objections refuse nothing (#1192), they queue for the
+        channel's next turn.
+        """
+        offered = [name for name, _ in self._offers("before_send")]
+        lens, sampled, basis = self._choose_lens(
+            trace_id, channel, lenses if isinstance(lenses, dict) else None,
+            offered, "the before-send scoring produced no vector",
+            warn=lenses is None,
+        )
+        # Record the choice even when nothing runs, so a "none" is countable.
+        selection: dict = {"sampled": sampled, "basis": basis}
+        if lens is not None:
+            selection["lens"] = lens
+        await self.pm.ahook.on_trace_record(
+            trace_id=trace_id, channel_id=channel.id, source="critique",
+            origin=None, record={"lens_selection_before_send": selection},
+        )
+        if lens is not None:
+            await self._run_before_send(channel, trace_id, text, annotations, lens, sampled)
+        return None
+
+    @hookimpl
+    async def on_appraisal_idle(
+        self, channel, trace_id, response_text, annotations, lenses, past_claims,
+    ) -> None:
+        """Appraisal's stage 2 has landed: start the provenance check and run
+        the lens this exchange's critique vector chose.
 
         Stage 2 (a model) has listed the claims the reply makes about the
         past. An eligible exchange with at least one claim gets one silent
         provenance task; the task gathers the evidence and forks the window
         to judge it. The same stage-2 reply scored the offered lenses: the
         top one (never another exchange's) runs as a second silent task, and the choice is recorded.
+        ``lenses`` and ``past_claims`` are both None when stage 2 missed.
         """
         if not self._eligible(trace_id):
             return
         # The provenance check: on when enabled and stage 2 listed claims.
-        claims = (stage2 or {}).get("past_claims") or []
+        claims = past_claims or []
         if claims and resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
         ):
@@ -1470,14 +1568,14 @@ class CritiquePlugin(CorvidaePlugin):
 
         # The lens: chosen from THIS exchange's vector, after provenance so a
         # problem choosing can't cost the provenance check its turn.
-        offered = [name for name, _ in self._offers()]
-        vector = (stage2 or {}).get("lenses")
+        offered = [name for name, _ in self._offers("idle")]
+        missed = lenses is None and past_claims is None
         lens, sampled, basis = self._choose_lens(
-            trace_id, channel, vector if isinstance(vector, dict) else None,
+            trace_id, channel, lenses if isinstance(lenses, dict) else None,
             offered,
-            "stage 2 produced no vector" if stage2 is None
+            "stage 2 produced no vector" if missed
             else "stage 2 has no usable lenses field",
-            warn=stage2 is None,
+            warn=missed,
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}
@@ -1491,6 +1589,38 @@ class CritiquePlugin(CorvidaePlugin):
             await self._enqueue_lens(
                 channel, trace_id, annotations, None, response_text, lens,
                 sampled=sampled)
+
+    async def _run_before_send(
+        self, channel, trace_id, text, annotations, lens: str, sampled: bool,
+    ) -> None:
+        """Fork one lens on the draft and queue its objections; inline.
+
+        Records ``outcomes.critique_before_send = {lens, objections, sampled,
+        detail?}`` under its own key, so the idle run never overwrites it. A
+        lens fork that misses records nothing, as at idle. Every objection is
+        registered as waiting (``waking_allowed=False``): the draft is about
+        to be sent, so a wake would race the reply (#1192).
+        """
+        origin = (annotations or {}).get("origin")
+        token = set_attribution(
+            stage="critique", channel_id=channel.id, trace_id=trace_id
+        )
+        try:
+            # A miss was already logged by _fork_lens; nothing is recorded.
+            objs = await self._fork_lens(
+                channel, lens, trace_id, self._originating_text(trace_id, None),
+                text, point="before_send")
+            if objs is None:
+                return
+            entry: dict = {"lens": lens, "objections": len(objs), "sampled": sampled}
+            if objs:
+                entry["detail"] = objs
+            await self._record_and_register(
+                channel, trace_id, {"critique_before_send": entry}, objs,
+                wake=False, origin=origin, waking_allowed=False,
+            )
+        finally:
+            reset_attribution(token)
 
     def _provenance_fork(self, channel, trace_id):
         """``(agent, cut)`` for the provenance fork, or the reason it can't run.
@@ -1805,7 +1935,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
-        origin: str | None,
+        origin: str | None, waking_allowed: bool = True,
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
@@ -1825,6 +1955,9 @@ class CritiquePlugin(CorvidaePlugin):
         correction) nothing wakes, whatever ``wake`` or the lens says: every
         finding waits for the channel's next turn, so a correction can never
         start another one (the recursion brake, PRD §3.7 Critique 4).
+
+        With ``waking_allowed`` False (the before-send run) every finding
+        waits, as on a ``critique`` origin: a reply is about to be sent.
         """
         await self.pm.ahook.on_trace_record(
             trace_id=trace_id, channel_id=channel.id, source="critique",
@@ -1839,7 +1972,7 @@ class CritiquePlugin(CorvidaePlugin):
             logger.debug("critique verdict not delivered: funnel unavailable")
             return
         # Split by delivery: what wakes the channel now, what waits.
-        if origin == "critique":
+        if origin == "critique" or not waking_allowed:
             waking, waiting = [], list(objections)
         elif wake:
             waking, waiting = list(objections), []
@@ -1900,13 +2033,17 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _fork_lens(
         self, channel, lens, trace_id, originating_text, response_text,
+        point: str = "idle",
     ) -> list[dict] | None:
         """One built-in or plugin lens as a fork of the full window; None (a logged
         skip) on any miss.
 
         The exchange is named by its opening message and the response the
         user was sent (which can differ from the window's last assistant
-        message, e.g. the max-turns fallback).
+        message, e.g. the max-turns fallback). At ``point`` "before_send"
+        ``response_text`` is the draft instead, quoted whole on one line
+        ("the reply you are about to send, in full"); everything else is
+        shared.
 
         Containment is checked per lens, after the last await that builds
         the instruction: an earlier lens's fork is an await, during which
@@ -1919,10 +2056,15 @@ class CritiquePlugin(CorvidaePlugin):
             self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
             return None
         prompt = self._fork_prompts[lens]
+        if point == "before_send":
+            reply = (
+                "the reply you are about to send, in full: "
+                f"«{quote(response_text, len(response_text))}»")
+        else:
+            reply = f"the response you sent began «{quote(response_text)}»"
         instruction = (
             f"{prompt}\n\nThe exchange began with the message "
-            f"«{quote(originating_text)}», and the response you sent began "
-            f"«{quote(response_text)}»."
+            f"«{quote(originating_text)}», and {reply}."
         )
         if lens == "retention":
             # The lens has to name a file, so it has to know where they live.

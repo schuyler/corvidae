@@ -77,23 +77,12 @@ class StubClient:
 
 
 class FakeAppraisal(CorvidaePlugin):
-    """Controllable appraisal store for lens-selection tests."""
+    """Stands for a registered appraisal plugin. Critique decides presence
+    with ``pm.has_plugin("appraisal")`` and acts through appraisal's hooks
+    only (#1169), so this has no methods: tests call critique's
+    ``on_appraisal_*`` hookimpls directly, as appraisal's task would."""
 
     depends_on = frozenset()
-
-    def __init__(self):
-        # trace_id -> originating text, standing in for the LRU
-        # AppraisalPlugin owns (§1.4); CritiquePlugin reads it via
-        # get_originating_text with a request_text fallback.
-        self._originating_text: dict[str, str] = {}
-        self.stage2_listeners: list = []
-
-    def get_originating_text(self, trace_id):
-        return self._originating_text.get(trace_id)
-
-    def add_stage2_listener(self, callback):
-        # CritiquePlugin registers here to hear the stage-2 past_claims.
-        self.stage2_listeners.append(callback)
 
 
 class FixedRng:
@@ -261,7 +250,7 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     lands."""
     await _admit(env, trace_id, origin)
     if env.appraisal is not None:
-        env.appraisal._originating_text[trace_id] = originating_text
+        env.plugin._originating_texts[trace_id] = originating_text
     # A lens forks only while the exchange's originating row is known and in
     # the window (#320); persist row 1 unless the test already recorded one.
     if env.fork_agent is not None and trace_id not in env.plugin._originating_rowid:
@@ -277,10 +266,9 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     )
     # Stage 2 lands for the same trace, carrying the critique vector.
     if vector is not None:
-        [listener] = env.appraisal.stage2_listeners
-        await listener(
+        await env.plugin.on_appraisal_idle(
             channel=env.channel, trace_id=trace_id, response_text=response_text,
-            annotations=annotations, stage2={"past_claims": [], "lenses": vector},
+            annotations=annotations, lenses=vector, past_claims=[],
         )
 
 
@@ -483,8 +471,13 @@ class TestLensSelection:
         await _teardown(env)
 
     async def test_no_appraisal_plugin_critiques_everything(self, tmp_path):
+        """With no appraisal plugin a lens runs on the exchanges the fallback
+        rate samples (here every one, critique.fallback_rate 1.0; the share
+        itself is tested in test_critique_hooks.py)."""
         env = await build_critique(tmp_path, appraisal=None,
-                                   chat_text=EMPTY_VERDICT)
+                                   chat_text=EMPTY_VERDICT,
+                                   config={"critique": {"fallback_rate": 1.0}})
+        env.plugin._rng = FixedRng(value=0.5)
         await _fire(env, "kna", origin="user", response_text="anything")
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
@@ -763,12 +756,22 @@ async def _begin_exchange(env, trace_id, origin_rowid, origin="user"):
     )
 
 
+async def _stage2_hook(env, *, channel, trace_id, response_text, annotations, stage2):
+    """Deliver a stage-2 dict (None: a miss) as appraisal's on_appraisal_idle
+    does: its lens vector and past claims as the hook's two arguments."""
+    await env.plugin.on_appraisal_idle(
+        channel=channel, trace_id=trace_id, response_text=response_text,
+        annotations=annotations,
+        lenses=None if stage2 is None else stage2.get("lenses"),
+        past_claims=None if stage2 is None else stage2.get("past_claims", []),
+    )
+
+
 async def _stage2(env, trace_id, claims, annotations=None, response_text=CUE_FREE_REPLY):
-    """Deliver a stage-2 result the way AppraisalPlugin's listener call does."""
-    [listener] = env.appraisal.stage2_listeners
-    await listener(
+    """Deliver a stage-2 result the way AppraisalPlugin's on_appraisal_idle does."""
+    await env.plugin.on_appraisal_idle(
         channel=env.channel, trace_id=trace_id, response_text=response_text,
-        annotations=annotations or {}, stage2={"past_claims": claims},
+        annotations=annotations or {}, lenses=None, past_claims=claims,
     )
 
 
@@ -858,18 +861,11 @@ def _provenance_fork_prompt():
 
 
 class TestProvenanceTrigger:
-    async def test_registers_a_stage2_listener(self, tmp_path):
-        env = await _provenance_env(tmp_path)
-        try:
-            assert len(env.appraisal.stage2_listeners) == 1
-        finally:
-            await _teardown(env)
-
     async def test_no_appraisal_warns_that_provenance_is_off(self, tmp_path, caplog):
-        with caplog.at_level("WARNING", logger="corvidae.critique"):
+        with caplog.at_level("INFO", logger="corvidae.critique"):
             env = await build_critique(tmp_path)
         try:
-            assert "provenance check disabled" in caplog.text
+            assert "provenance check is off" in caplog.text
             assert "appraisal" in caplog.text
         finally:
             await _teardown(env)

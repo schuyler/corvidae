@@ -1,11 +1,21 @@
-"""AppraisalPlugin — the stage-2 appraisal of a finished exchange.
+"""AppraisalPlugin — the stage-2 appraisal of a finished exchange, and the
+lens scores before a reply is sent.
+
+Appraisal owns the lens contract (#1169): ``AppraisalSpec`` declares three
+hooks, and peers such as critique implement them. ``on_appraisal_prompts``
+collects the ``(lens, question)`` offers for a trigger ("idle" or
+"before_send"); ``on_appraisal_before_send`` tells peers the scores of a
+draft before it is sent; ``on_appraisal_idle`` tells them the scores and
+past claims after the exchange.
 
 After the agent answers, a silent task forks the live window and asks the
 agent to list the claims about the past its reply made and to score the
-critique lenses on offer. The claims feed critique's provenance check and
-the lens scores its lens selection; both are persisted to the outcome log,
-where the lens scores are the labels a trained readout head learns from
-(#141). Stage-1 appraisal, which scored text at the gates from English word
+lenses on offer; the claims and scores reach peers through
+``on_appraisal_idle`` and are persisted to the outcome log, where the lens
+scores are the labels a trained readout head learns from (#141). Before a
+final reply is sent, ``should_send_response`` forks once on the draft to
+score the before-send offers and fires ``on_appraisal_before_send``; it
+never vetoes. Stage-1 appraisal, which scored text at the gates from English word
 lists and a probe of memory's full-text index, was removed (#1185); the
 five-dimension appraisal vector, the correction flag, the importance prior
 built from them and memory's valence tag were removed as unused (#1189).
@@ -17,15 +27,14 @@ import collections
 import json
 import logging
 import math
-from collections.abc import Awaitable, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
 from corvidae_cognition.config_keys import warn_removed_keys
-from corvidae_cognition.silence import is_decline
+from corvidae_cognition.silence import decline_kind, is_decline
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.appraisal.
@@ -95,6 +104,19 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     "}"
 )
 
+# Fork instruction for the before-send scoring fork. Appended as a user turn
+# before the quoted draft and the offer block; asks only for the lens scores.
+# Documented copy in prompts/appraisal_before_send_fork.md; the static config
+# key appraisal.before_send_fork_prompt (not a runtime tunable) overrides it.
+DEFAULT_BEFORE_SEND_FORK_PROMPT = (
+    "[Appraisal] Pause the conversation here. You have drafted the reply "
+    "quoted below but not sent it yet. For your own perception system, score "
+    "the self-checks listed below against that draft: which one, if any, is "
+    "most worth running on the reply before it goes out.\n\n"
+    "Do not call tools. Respond with a single JSON object, nothing else, "
+    'holding only the "lenses" object described below.'
+)
+
 # JSON schema constraining the stage-2 call on servers that honour it
 # (llama-server grammar / json_schema via extra_body). Providers that ignore
 # it still return the JSON the prompt asks for; _parse_json_block reads it.
@@ -129,21 +151,25 @@ STAGE2_EXTRA_BODY = {
 }
 
 
-def _extra_body_with_lenses(names: list[str]) -> dict:
+def _extra_body_with_lenses(names: list[str], *, claims: bool = True) -> dict:
     """STAGE2_EXTRA_BODY with a required ``lenses`` object scoring ``names``
-    and "none". Built per call from a copy; the shared schema is untouched."""
+    and "none"; with ``claims`` False the reply holds the ``lenses`` object
+    only (the before-send fork asks for no past claims). Built per call from
+    a copy; the shared schema is untouched."""
     keys = [*names, "none"]
+    # The claims part of the schema, or an empty object schema without it.
+    base = STAGE2_SCHEMA if claims else {"type": "object", "properties": {}, "required": []}
     schema = {
-        **STAGE2_SCHEMA,
+        **base,
         "properties": {
-            **STAGE2_SCHEMA["properties"],
+            **base["properties"],
             "lenses": {
                 "type": "object",
                 "properties": {key: {"type": "number"} for key in keys},
                 "required": keys,
             },
         },
-        "required": [*STAGE2_SCHEMA["required"], "lenses"],
+        "required": [*base["required"], "lenses"],
     }
     return {
         "response_format": {
@@ -166,7 +192,9 @@ def _parse_json_block(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, float] | None:
+def _lens_vector(
+    raw: object, offered: list[str], trace_id: str, point: str = "stage-2",
+) -> dict[str, float] | None:
     """Normalize stage 2's critique vector: shares of 1 over ``offered`` + "none".
 
     Drops (each with a warning naming the entry and the trace) names that
@@ -179,13 +207,13 @@ def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, fl
     # The field must be an object of name -> percentage.
     if raw is None:
         logger.warning(
-            "stage-2 lenses for trace %s: the reply has no \"lenses\" field; "
-            "no critique vector for this exchange", trace_id)
+            "%s lenses for trace %s: the reply has no \"lenses\" field; "
+            "no critique vector for this exchange", point, trace_id)
         return None
     if not isinstance(raw, dict):
         logger.warning(
-            "stage-2 lenses for trace %s: \"lenses\" is a %s, not an object; "
-            "no critique vector for this exchange", trace_id, type(raw).__name__)
+            "%s lenses for trace %s: \"lenses\" is a %s, not an object; "
+            "no critique vector for this exchange", point, trace_id, type(raw).__name__)
         return None
     allowed = {*offered, "none"}
     usable: dict[str, float] = {}
@@ -193,8 +221,8 @@ def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, fl
         # An unknown name cannot be run, so it takes no share.
         if name not in allowed:
             logger.warning(
-                "stage-2 lenses for trace %s: dropped %r, which was not "
-                "offered (offered: %s)", trace_id, name, ", ".join(sorted(allowed)))
+                "%s lenses for trace %s: dropped %r, which was not "
+                "offered (offered: %s)", point, trace_id, name, ", ".join(sorted(allowed)))
             continue
         # A share must be a finite, non-negative real number.
         if (
@@ -202,15 +230,15 @@ def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, fl
             or not math.isfinite(value) or value < 0
         ):
             logger.warning(
-                "stage-2 lenses for trace %s: dropped %r, whose value %r is not "
-                "a finite non-negative number", trace_id, name, value)
+                "%s lenses for trace %s: dropped %r, whose value %r is not "
+                "a finite non-negative number", point, trace_id, name, value)
             continue
         usable[name] = float(value)
     total = sum(usable.values())
     if total <= 0:
         logger.warning(
-            "stage-2 lenses for trace %s: no usable shares left (sum is 0); "
-            "no critique vector for this exchange", trace_id)
+            "%s lenses for trace %s: no usable shares left (sum is 0); "
+            "no critique vector for this exchange", point, trace_id)
         return None
     return {name: value / total for name, value in usable.items()}
 
@@ -345,26 +373,87 @@ def _declined(channel, response_text: str, trace_id: str | None) -> bool:
         return False
 
 
+# One lens on offer: (lens name, one-line question).
+LensOffer = tuple[str, str]
+# Shares over the offered lens names plus "none", summing to 1.
+LensScores = dict[str, float]
+
+
+def _offer_block(offer: list[LensOffer]) -> str:
+    """The "[Critique selection]" block of a fork instruction: each offered
+    lens as a ``- name: question`` line and the shape of the ``lenses`` reply."""
+    return (
+        "[Critique selection] Which ONE of these self-checks is "
+        "most worth running on this exchange, if any? Give each a "
+        'percentage, plus "none", summing to 100.\n'
+        + "\n".join(f"- {name}: {question}" for name, question in offer)
+        + '\nInclude them in your JSON object as "lenses": {'
+        + ", ".join(f'"{name}": 0' for name, _ in offer)
+        + ', "none": 0}.'
+    )
+
+
+class AppraisalSpec:
+    """Hooks the appraisal plugin owns (#1169): the lens contract peers
+    such as critique implement."""
+
+    @hookspec
+    async def on_appraisal_prompts(self, channel, trigger: str) -> list[LensOffer] | None:
+        """Offer lenses for appraisal to score at ``trigger``.
+
+        ``trigger`` is "idle" (after the exchange) or "before_send" (on a
+        draft, before it is sent). Return ``(lens name, one-line question)``
+        pairs, or None to offer nothing. Offers merge in hook-result order; a
+        later duplicate name, a non-list result and a malformed pair are
+        dropped with a warning.
+        """
+
+    @hookspec
+    async def on_appraisal_before_send(
+        self, channel, trace_id: str, text: str, annotations: dict,
+        lenses: LensScores | None,
+    ) -> list[dict] | None:
+        """Hear the scores of a final draft before it is sent.
+
+        ``lenses`` is the normalized share per offered lens and "none", or
+        None when the scoring fork missed. Return objections, a list of
+        dicts, or None. Appraisal discards the result and the send is never
+        held for it (#1192): an implementation that finds fault queues it
+        for the channel's next turn.
+        """
+
+    @hookspec
+    async def on_appraisal_idle(
+        self, channel, trace_id: str, response_text: str, annotations: dict,
+        lenses: LensScores | None, past_claims: list[dict] | None,
+    ) -> None:
+        """Hear the scores and past claims of a finished exchange.
+
+        Fires once per exchange appraisal ran on, after its fork lands and
+        outside the appraisal attribution. ``lenses`` is the normalized
+        critique vector (None when the fork gave none) and ``past_claims``
+        the claims the reply made about the past (None when the fork missed).
+        """
+
+
 class AppraisalPlugin(CorvidaePlugin):
     """Stage-2 appraisal: a fork of the window lists each finished
-    exchange's past claims and scores the critique lenses on offer.
+    exchange's past claims and scores the lenses peers offer; the same
+    scoring runs on a final draft before it is sent. Peers hear both
+    through ``AppraisalSpec``'s hooks.
 
     Reports each stage 2 on ``on_trace_record`` (source ``appraisal``).
     """
 
     # trace owns the hook stage 2 is reported on (#1179).
     depends_on = frozenset({"persistence", "trace", "task"})
+    # Owns the on_appraisal_* hooks peers implement.
+    hookspecs = AppraisalSpec
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
         self.config: dict = {}
-        # Callbacks awaited after each stage 2 lands (add_stage2_listener):
-        # how CritiquePlugin hears past_claims without waiting on a task.
-        self._stage2_listeners: list[Callable[..., Awaitable[None]]] = []
-        # The critique lenses stage 2 scores (set_lens_offer): a provider of
-        # (name, question) pairs, or None when no plugin offers any.
-        self._lens_offer: Callable[[], list[tuple[str, str]]] | None = None
         # Trace-keyed LRU of originating text (the exchange's true
         # originating USER/notification text), bounded so long-running
         # exchanges don't leak memory. Fed by on_message_persisted.
@@ -390,6 +479,21 @@ class AppraisalPlugin(CorvidaePlugin):
         self._fork_prompt = resolve_prompt(
             config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
         )
+        self._before_send_prompt = resolve_prompt(
+            config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
+        )
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        """Warn once when forks are off for appraisal: with no fork it scores
+        nothing, so peers hear no vector and no claims (#1169 R5.5)."""
+        if fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal") is None:
+            logger.warning(
+                "appraisal: forks are not enabled for the appraisal stage, so "
+                "it scores no lenses and lists no claims, before or after the "
+                "send; set agent.forks.enabled and add appraisal to "
+                "agent.forks.stages"
+            )
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -400,6 +504,9 @@ class AppraisalPlugin(CorvidaePlugin):
         try:
             self._fork_prompt = resolve_prompt(
                 config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
+            )
+            self._before_send_prompt = resolve_prompt(
+                config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
             )
         except (OSError, ValueError) as exc:
             logger.warning(
@@ -426,10 +533,6 @@ class AppraisalPlugin(CorvidaePlugin):
             while len(self._originating_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
                 self._originating_rowid.popitem(last=False)
 
-    def get_originating_text(self, trace_id: str) -> str | None:
-        """Pure reader for the exchange's true originating text, or None."""
-        return self._originating_text.get(trace_id)
-
     def get_originating_rowid(self, trace_id: str) -> int | None:
         """Pure reader for the originating row's message_log rowid, or None."""
         return self._originating_rowid.get(trace_id)
@@ -438,45 +541,44 @@ class AppraisalPlugin(CorvidaePlugin):
     # Readers
     # ------------------------------------------------------------------
 
-    def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
-        """Register a coroutine function to hear each completed stage 2.
+    async def _collect_offers(self, channel, trigger: str) -> list[LensOffer]:
+        """The lens offers peers make for ``trigger``, merged in hook-result order.
 
-        Every enqueued stage 2 notifies each listener exactly once, awaited
-        with keyword arguments ``channel, trace_id, response_text, annotations,
-        stage2``, outside the appraisal attribution: ``stage2`` is the
-        persisted stage 2, or ``None`` when none was produced (the fork
-        missed, the reply was unusable, or the task raised). A listener must
-        accept ``None``. Cancellation (shutdown) notifies no one.
-        A listener's exception is logged and never reaches the others. This
-        is a push, not a wait: a consumer that awaited stage 2 from a queued
-        task would hold a TaskQueue worker the stage-2 task may need.
+        Any plugin may implement the hook and its output is not trusted: a
+        non-list result and a malformed pair are dropped with a warning, and
+        a later duplicate name is dropped with a warning naming it.
         """
-        self._stage2_listeners.append(callback)
-
-    def set_lens_offer(
-        self, provider: Callable[[], list[tuple[str, str]]] | None,
-    ) -> None:
-        """Register the provider of the critique lenses stage 2 scores.
-
-        Called by CritiquePlugin at start-up. The provider returns the
-        ``(name, question)`` pairs on offer at the moment of each stage-2
-        call; one provider, since critique is the only consumer.
-        """
-        self._lens_offer = provider
-
-    async def _notify_stage2(self, channel, trace_id, response_text, annotations, stage2) -> None:
-        """Await every stage-2 listener; one failure doesn't stop the rest."""
-        for listener in list(self._stage2_listeners):
-            try:
-                await listener(
-                    channel=channel, trace_id=trace_id, response_text=response_text,
-                    annotations=annotations, stage2=stage2,
-                )
-            except Exception:
+        offers: list[LensOffer] = []
+        seen: set[str] = set()
+        for result in await self.pm.ahook.on_appraisal_prompts(channel=channel, trigger=trigger):
+            if result is None:
+                continue
+            if not isinstance(result, list):
                 logger.warning(
-                    "stage-2 listener %r failed for trace %s", listener, trace_id,
-                    exc_info=True, extra={"channel": channel.id, "trace_id": trace_id},
-                )
+                    "appraisal: on_appraisal_prompts(%s) result %r is a %s, not a "
+                    "list of (name, question) pairs; dropped", trigger, result,
+                    type(result).__name__)
+                continue
+            for pair in result:
+                # A pair is two non-blank strings: the lens name, its question.
+                if (
+                    not isinstance(pair, (tuple, list)) or len(pair) != 2
+                    or not all(isinstance(part, str) and part.strip() for part in pair)
+                ):
+                    logger.warning(
+                        "appraisal: on_appraisal_prompts(%s) offered %r, which is not "
+                        "a (name, question) pair of non-blank strings; dropped",
+                        trigger, pair)
+                    continue
+                name, question = pair
+                if name in seen:
+                    logger.warning(
+                        "appraisal: lens %r was offered twice for %s; the later "
+                        "offer is dropped", name, trigger)
+                    continue
+                seen.add(name)
+                offers.append((name, question))
+        return offers
 
     # ------------------------------------------------------------------
     # Stage 2 — LLM appraisal off the response path (WP2.5)
@@ -507,26 +609,32 @@ class AppraisalPlugin(CorvidaePlugin):
         if queue is None:
             logger.debug("stage-2 appraisal skipped: task queue unavailable")
             return
-        text_in = self.get_originating_text(trace_id) or request_text
+        text_in = self._originating_text.get(trace_id) or request_text
 
         async def _work() -> str:
             # An unexpected Exception is a miss like any other: log it and
-            # notify with None. Cancellation (shutdown) is a BaseException,
-            # passes through, and notifies no one.
+            # fire the hook with None. Cancellation (shutdown) is a
+            # BaseException, passes through, and fires nothing.
             try:
                 stage2 = await self._run_stage2(
                     channel, trace_id, text_in, response_text, logprobs)
             except Exception:
                 logger.warning(
                     "stage-2 appraisal failed unexpectedly for trace %s on %s; "
-                    "listeners are told stage 2 is missing", trace_id, channel.id,
+                    "peers are told stage 2 is missing", trace_id, channel.id,
                     exc_info=True, extra={"channel": channel.id, "trace_id": trace_id},
                 )
                 stage2 = None
-            # Every enqueued stage 2 notifies exactly once, with the result or
-            # None on a miss. Listeners run after _run_stage2 has reset its
-            # attribution, so their own work isn't billed to appraisal.
-            await self._notify_stage2(channel, trace_id, response_text, annotations, stage2)
+            # Every enqueued stage 2 fires on_appraisal_idle exactly once, with
+            # the result or None on a miss. It fires after _run_stage2 has
+            # reset its attribution, so the peers' own work isn't billed to
+            # appraisal.
+            await self.pm.ahook.on_appraisal_idle(
+                channel=channel, trace_id=trace_id,
+                response_text=response_text, annotations=annotations,
+                lenses=(stage2 or {}).get("lenses"),
+                past_claims=None if stage2 is None else stage2["past_claims"],
+            )
             return ""
 
         try:
@@ -568,7 +676,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 channel, trace_id, originating_text, response_text
             )
             # A miss was already logged by _fork_stage2: the exchange gets
-            # no stage 2 (no persist, no listeners, no standalone call).
+            # no stage 2 (no persist, no standalone call).
             if stage2 is None:
                 return None
 
@@ -599,43 +707,53 @@ class AppraisalPlugin(CorvidaePlugin):
             extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
         )
 
+    def _fork_target(self, channel, trace_id: str):
+        """The Agent to fork through, or the reason a fork cannot run.
+
+        Forks only when forks are on for "appraisal" and the exchange's
+        originating row is still in the window (compaction hasn't dropped
+        it). Synchronous on purpose: callers run it with no await between it
+        and ``agent.fork``, whose prompt render then sees the same window.
+        A string result is the miss reason.
+        """
+        # Forks off for this stage (or no agent plugin) is a miss.
+        agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
+        if agent is None:
+            return "forks are not enabled for appraisal (agent.forks.enabled / agent.forks.stages)"
+        # The originating row must be known and still in the window.
+        rowid = self.get_originating_rowid(trace_id)
+        conv = getattr(channel, "conversation", None)
+        if rowid is None:
+            return "the originating message was not recorded or not persisted"
+        if conv is None:
+            return "no live window"
+        if rowid not in window_db_ids(conv.messages):
+            return "the exchange is not in the window"
+        return agent
+
     async def _fork_stage2(
         self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None,
     ) -> dict | None:
         """Stage 2 from a fork of the channel's live window, or None (a skip).
 
-        Forks only when forks are on for "appraisal" and the exchange's
-        originating row is still in the window (compaction hasn't dropped
-        it). Reads the window at run time: if the user has said more since,
+        Reads the window at run time: if the user has said more since,
         the fork still sees the exchange, named by its opening message and
         the response the user was sent (which can differ from the window's
-        last assistant message, e.g. the max-turns fallback). The check and
-        Agent.fork's prompt render run with no await between them.
+        last assistant message, e.g. the max-turns fallback). The offers are
+        collected first; the containment check (``_fork_target``) and
+        Agent.fork's prompt render then run with no await between them.
         Every miss (forks off, row unknown or out of the window, fork
         refused, failed, empty or unparseable) logs a skip warning and
         returns None; there is no standalone call.
         """
-        # Forks off for this stage (or no agent plugin) is a miss.
-        agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
-        if agent is None:
-            self._skip_stage2(
-                channel, trace_id,
-                "forks are not enabled for appraisal (agent.forks.enabled / agent.forks.stages)",
-            )
-            return None
-        # The originating row must be known and still in the window.
-        rowid = self.get_originating_rowid(trace_id)
-        conv = getattr(channel, "conversation", None)
-        if rowid is None:
-            self._skip_stage2(
-                channel, trace_id, "the originating message was not recorded or not persisted")
-            return None
-        if conv is None:
-            self._skip_stage2(channel, trace_id, "no live window")
-            return None
-        if rowid not in window_db_ids(conv.messages):
-            self._skip_stage2(channel, trace_id, "the exchange is not in the window")
+        # The lenses on offer at the idle trigger, each with its question
+        # (none when no peer offers: stage 2 then asks for the claims only).
+        # Collected before the containment check: the dispatch awaits.
+        offer = await self._collect_offers(channel, "idle")
+        agent = self._fork_target(channel, trace_id)
+        if isinstance(agent, str):
+            self._skip_stage2(channel, trace_id, agent)
             return None
         # Build the instruction from the static fork prompt and the exchange.
         prompt = self._fork_prompt
@@ -644,20 +762,9 @@ class AppraisalPlugin(CorvidaePlugin):
             f"The exchange began with the message «{quote(originating_text)}», "
             f"and the response you sent began «{quote(response_text)}»."
         )
-        # The critique lenses on offer, each with its question (none when no
-        # provider is set or it raised: stage 2 then asks for the claims only).
-        offer = self._current_offer(trace_id)
         extra_body = STAGE2_EXTRA_BODY
         if offer:
-            instruction += (
-                "\n\n[Critique selection] Which ONE of these self-checks is "
-                "most worth running on this exchange, if any? Give each a "
-                'percentage, plus "none", summing to 100.\n'
-                + "\n".join(f"- {name}: {question}" for name, question in offer)
-                + '\nInclude them in your JSON object as "lenses": {'
-                + ", ".join(f'"{name}": 0' for name, _ in offer)
-                + ', "none": 0}.'
-            )
+            instruction += "\n\n" + _offer_block(offer)
             extra_body = _extra_body_with_lenses([name for name, _ in offer])
         # Fork and parse; any failure or unusable reply is a miss.
         try:
@@ -674,20 +781,110 @@ class AppraisalPlugin(CorvidaePlugin):
             )
             return None
 
-    def _current_offer(self, trace_id: str) -> list[tuple[str, str]]:
-        """The lenses on offer for this stage-2 call; empty when none.
+    # ------------------------------------------------------------------
+    # Before send — the lens scores of a draft (#1169)
+    # ------------------------------------------------------------------
 
-        A provider that raises costs the exchange its critique vector, not
-        its claims: warn naming the trace and offer nothing.
+    @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
+        """Score a final draft's lenses before it is sent; never veto.
+
+        Fails open: every Exception is caught and logged, and the answer is
+        always None (no opinion), so appraisal never holds a reply.
         """
-        if self._lens_offer is None:
-            return []
         try:
-            return list(self._lens_offer())
+            await self._score_before_send(channel, text, emission, trace_id, annotations)
         except Exception:
             logger.warning(
-                "stage-2 lens offer failed for trace %s; stage 2 asks for "
-                "the claims only and the exchange gets no critique vector",
-                trace_id, exc_info=True, extra={"trace_id": trace_id},
+                "before-send appraisal failed unexpectedly for trace %s on %s; "
+                "allowing send", trace_id, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
             )
-            return []
+        return None
+
+    async def _score_before_send(self, channel, text, emission, trace_id, annotations) -> None:
+        """Fork once on the draft and fire ``on_appraisal_before_send``.
+
+        Only a final that is not a decline and has a trace is scored
+        (``is_decline`` can't be used: the draft is not in the window yet).
+        No offers fires nothing. A miss after that (forks off, the exchange
+        out of the window, the fork failing or unusable) logs a warning and
+        fires the hook with ``lenses=None``. Runs under attribution
+        ``appraisal``. The hook's results are discarded.
+        """
+        if emission != "final" or trace_id is None or decline_kind(text) is not None:
+            return
+        token = set_attribution(
+            stage="appraisal", channel_id=channel.id, trace_id=trace_id)
+        try:
+            # An empty offer is a configuration, not a miss.
+            offer = await self._collect_offers(channel, "before_send")
+            if not offer:
+                logger.debug(
+                    "before-send appraisal skipped for trace %s on %s: no lenses "
+                    "are offered", trace_id, channel.id,
+                    extra={"channel": channel.id, "trace_id": trace_id},
+                )
+                return
+            lenses = await self._fork_before_send(channel, trace_id, text, offer)
+            await self.pm.ahook.on_appraisal_before_send(
+                channel=channel, trace_id=trace_id,
+                text=text, annotations=annotations, lenses=lenses,
+            )
+        finally:
+            reset_attribution(token)
+
+    async def _fork_before_send(
+        self, channel, trace_id: str, text: str, offer: list[LensOffer],
+    ) -> LensScores | None:
+        """The lens scores of the draft from one fork of the window, or None
+        (a logged miss).
+
+        The instruction quotes the whole draft on one line, untruncated: it is
+        the thing being scored and the window doesn't hold it yet. No claims
+        are listed (provenance runs only after the exchange). The containment
+        check and the fork have no await between them.
+        """
+        # Without its opening text the fork could not name the exchange.
+        originating_text = self._originating_text.get(trace_id)
+        if originating_text is None:
+            self._skip_before_send(channel, trace_id, "the originating message was not recorded")
+            return None
+        agent = self._fork_target(channel, trace_id)
+        if isinstance(agent, str):
+            self._skip_before_send(channel, trace_id, agent)
+            return None
+        instruction = (
+            f"{self._before_send_prompt}\n\n"
+            f"The exchange began with the message "
+            f"«{quote(originating_text)}». The reply you are "
+            f"about to send, in full: «{quote(text, len(text))}».\n\n"
+            + _offer_block(offer)
+        )
+        names = [name for name, _ in offer]
+        try:
+            result = await agent.fork(
+                channel, instruction, stage="appraisal",
+                extra_body=_extra_body_with_lenses(names, claims=False),
+            )
+            return _lens_vector(
+                _parse_json_block(result.text).get("lenses"), names, trace_id,
+                point="before-send")
+        except Exception as exc:
+            self._skip_before_send(
+                channel, trace_id,
+                f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                exc_info=True,
+            )
+            return None
+
+    def _skip_before_send(self, channel, trace_id: str, reason: str, **kwargs) -> None:
+        """Log that the before-send scoring missed, naming the point, trace,
+        channel and what was missing; peers are told there is no vector."""
+        logger.warning(
+            "before-send appraisal skipped for trace %s on channel %s: %s; "
+            "peers are told there is no lens vector",
+            trace_id, channel.id, reason,
+            extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
+        )
+
