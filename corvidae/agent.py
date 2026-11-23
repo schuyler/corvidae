@@ -93,7 +93,8 @@ from corvidae.fork import (
 )
 from corvidae.idle import IdleTracker
 from corvidae.thinking import apply_reasoning_history
-from corvidae.checks import resolve_check_allowance, run_checks
+from corvidae.checks import gather, resolve_check_allowance
+from corvidae.held import LATE_CHECK_SOURCE, STUB_ANNOTATION, Contribution, HeldContext
 from corvidae.hooks import (
     CorvidaePlugin,
     Refusal,
@@ -195,6 +196,11 @@ def _llm_error_message(exc: Exception, retry_armed: bool = False) -> str:
     """
     template = _LLM_RETRY_TEMPLATE if retry_armed else _LLM_ERROR_TEMPLATE
     return template.format(cause=_describe_llm_failure(exc))
+
+
+def _is_refusal(answer: object) -> bool:
+    """The before-effect ``stop_on``: a bare False or a ``Refusal`` ends the gather."""
+    return answer is False or isinstance(answer, Refusal)
 
 
 class QueueItemRole(Enum):
@@ -306,7 +312,7 @@ class Agent(CorvidaePlugin):
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
-    depends_on = frozenset({"registry", "task", "llm", "tools"})
+    depends_on = frozenset({"registry", "task", "llm", "tools", "held"})
 
     # Class-level default so an Agent built without __init__ (as some tests do)
     # still reads as having no tracker.
@@ -334,9 +340,6 @@ class Agent(CorvidaePlugin):
         # (channel id, call id) -> (tool name, declared untrusted), recorded at
         # dispatch so a registry change before the result cannot unfence it.
         self._dispatched_calls: dict[tuple[str, str], tuple[str, bool]] = {}
-        # Channel id -> late-check rows waiting for the channel's next turn
-        # with no call outstanding (#1162). In memory only; see _drain_late_checks.
-        self._late_checks: dict[str, list[str]] = {}
         # Set once the no-clock fallback in _check_clock has logged.
         self._warned_no_clock = False
         self._registry: ChannelRegistry | None = None
@@ -1193,21 +1196,23 @@ class Agent(CorvidaePlugin):
         """The final firing of should_send_response, under the check allowance.
 
         Returns True when ``text`` may be sent. Verdicts that arrive in time
-        resolve reject-wins; a refusal (``Refusal`` or bare ``False``) that
-        arrives later is held for the channel's next turn (_drain_late_checks).
+        resolve reject-wins, and an in-time refusal ends the wait at once; a
+        refusal (``Refusal`` or bare ``False``) that
+        arrives later is held for the channel's next turn (the held store).
         """
         assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
 
         async def on_late(plugin_name: str, verdict: object) -> None:
             # A late refusal still reaches the channel, a bare False included
             # (it refuses with no reason, #1201); the miss is already counted.
             if verdict is False or isinstance(verdict, Refusal):
                 reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
-                self._late_checks.setdefault(channel.id, []).append(
-                    late_check_text(text, plugin_name, reason)
+                await held.hold_late(
+                    channel, LATE_CHECK_SOURCE, late_check_text(text, plugin_name, reason)
                 )
 
-        results = await run_checks(
+        gathered = await gather(
             self.pm, "should_send_response",
             channel=channel,
             kwargs={
@@ -1217,8 +1222,10 @@ class Agent(CorvidaePlugin):
             allowance=resolve_check_allowance(self.pm, self._registry, channel),
             clock=self._check_clock(),
             on_late=on_late,
+            phase="before_effect",
+            stop_on=_is_refusal,
         )
-        return resolve_reject_wins(results) is not False
+        return resolve_reject_wins(gathered.results) is not False
 
     async def check_tool_call(
         self, channel: Channel, tool_name: str, arguments: dict, trace_id: str | None
@@ -1226,25 +1233,27 @@ class Agent(CorvidaePlugin):
         """Offer one validated tool call to should_execute_tool (#148).
 
         PRD §3.5.12. Every implementation runs under the channel's check
-        allowance (``run_checks``). Returns the refusal text the call's result
+        allowance (``gather``). Returns the refusal text the call's result
         carries when any in-time verdict refuses, else None and the call
         runs. A refusal (``Refusal`` or bare ``False``) that arrives after the
         allowance refuses nothing;
-        it is held for the channel's next turn (_drain_late_checks). Every
+        it is held for the channel's next turn (the held store). Every
         dispatch path passes this as dispatch_tool_call's ``check``.
         """
         assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
 
         async def on_late(plugin_name: str, verdict: object) -> None:
             # A late refusal still reaches the channel, a bare False included
             # (it refuses with no reason); the miss is already counted.
             if verdict is False or isinstance(verdict, Refusal):
                 reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
-                self._late_checks.setdefault(channel.id, []).append(
-                    late_tool_check_text(tool_name, arguments, plugin_name, reason)
+                await held.hold_late(
+                    channel, LATE_CHECK_SOURCE,
+                    late_tool_check_text(tool_name, arguments, plugin_name, reason),
                 )
 
-        results = await run_checks(
+        gathered = await gather(
             self.pm, "should_execute_tool",
             channel=channel,
             kwargs={
@@ -1254,7 +1263,10 @@ class Agent(CorvidaePlugin):
             allowance=resolve_check_allowance(self.pm, self._registry, channel),
             clock=self._check_clock(),
             on_late=on_late,
+            phase="before_effect",
+            stop_on=_is_refusal,
         )
+        results = gathered.results
         if resolve_reject_wins(results) is not False:
             return None
         # Any refusal wins; name every reason, a bare False as having none.
@@ -1270,26 +1282,85 @@ class Agent(CorvidaePlugin):
         )
         return tool_refusal_text(tool_name, reasons)
 
-    def _drain_late_checks(self, channel: Channel, conv: ContextWindow) -> None:
-        """Append the channel's held late-check rows to its window.
+    def _can_append(self, channel: Channel) -> bool:
+        """Whether text appended to ``channel``'s window now is safe (R3.3).
 
-        Runs at step 6, before before_agent_turn, so the rows persist with
-        that hook's injections. Only when no call on the channel is waiting
-        for its result: then nothing appended now can fall between a tool
-        call and its result. Otherwise the rows wait for a later turn. The
+        True when no call on the channel is waiting for its result: then
+        nothing appended can fall between a tool call and its result. The
         dispatched-call record is what is checked, not the pending set: every
         pending call is in it until its result is processed, and ACP's
         cancel_prompt clears the pending set while tools keep running.
-
-        shortcut: held in memory, so a restart before delivery loses them;
-        persist them if that loss shows up in practice.
         """
-        if channel.id not in self._late_checks:
+        return not any(cid == channel.id for cid, _ in self._dispatched_calls)
+
+    async def _compose_held(
+        self, channel: Channel, conv: ContextWindow, item: QueueItem
+    ) -> None:
+        """Step 6, before compose: gather contributions and admit held text (#1176).
+
+        Every implementation of ``before_compose`` is called under the
+        channel's check allowance. On a turn that can append, the held store
+        admits what is due plus the in-time contributions. On one that cannot
+        (a call is outstanding), the contributions are held for the next turn
+        that can, and a held-text stub that arrived mid-call is deferred.
+        """
+        assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
+        annotations = item.annotations or {}
+
+        async def on_late(plugin_name: str, answer: object) -> None:
+            # A late contribution is held for the next turn; it wakes nothing.
+            if isinstance(answer, Contribution):
+                await held.hold_contribution(channel, answer, trace_id=item.trace_id)
+            elif answer is not None:
+                logger.warning(
+                    "before_compose implementation %s returned %s on channel %s; "
+                    "dropped. Return a corvidae.held.Contribution or None",
+                    plugin_name, type(answer).__name__, channel.id,
+                    extra={"channel": channel.id},
+                )
+
+        gathered = await gather(
+            self.pm, "before_compose",
+            channel=channel,
+            kwargs={
+                "channel": channel, "trace_id": item.trace_id, "annotations": annotations,
+            },
+            allowance=resolve_check_allowance(self.pm, self._registry, channel),
+            clock=self._check_clock(),
+            on_late=on_late,
+            phase="before_compose",
+        )
+        held.hold_stragglers(channel.id, gathered.stragglers)
+        # Only a Contribution counts; anything else non-None is a plugin bug.
+        contributions = [r for r in gathered.results if isinstance(r, Contribution)]
+        stray = [r for r in gathered.results if r is not None and not isinstance(r, Contribution)]
+        for answer in stray:
+            logger.warning(
+                "a before_compose implementation returned %s on channel %s; dropped. "
+                "Return a corvidae.held.Contribution or None",
+                type(answer).__name__, channel.id, extra={"channel": channel.id},
+            )
+        origin = annotations.get("origin")
+        # A turn that can append admits now (R3.3).
+        if self._can_append(channel):
+            await held.admit_for_turn(
+                channel, conv, trace_id=item.trace_id, origin=origin,
+                contributions=contributions,
+            )
             return
-        if any(cid == channel.id for cid, _ in self._dispatched_calls):
-            return
-        for content in self._late_checks.pop(channel.id):
-            conv.append({"role": "system", "content": content}, MessageType.CONTEXT)
+        # A call is outstanding: nothing may land between it and its result.
+        for contribution in contributions:
+            await held.hold_contribution(channel, contribution, trace_id=item.trace_id)
+        # A held-text stub, recognised by the kernel's key and never by its
+        # origin, has spent its wake: have the store re-fire it later.
+        if (
+            item.role == QueueItemRole.NOTIFICATION
+            and not item.tool_call_id
+            and STUB_ANNOTATION in annotations
+            and origin is not None
+        ):
+            held.stub_deferred(channel, origin)
 
     async def _append_unsent_marker(
         self, channel: Channel, emission: str, text: str
@@ -1791,9 +1862,6 @@ class Agent(CorvidaePlugin):
                 # 6. Let plugins inject context before the LLM call
                 _t_before_turn_start = time.monotonic()
                 msg_count_before = len(conv.messages)
-                # Late-check rows held for this turn (#1162); the loop below
-                # persists them with the hook's injections.
-                self._drain_late_checks(channel, conv)
                 # Observe hook, as above (#1094, #1097).
                 await self.pm.ahook.before_agent_turn(
                     channel=channel, trace_id=item.trace_id, annotations=item.annotations,
@@ -1801,7 +1869,8 @@ class Agent(CorvidaePlugin):
                 # Fire persist_message for any messages injected by
                 # before_agent_turn. Messages already carrying a _db_id were
                 # persisted by their producer — firing again would double-store
-                # them.
+                # them. Runs before the held store appends, so message_log
+                # order matches window order.
                 for msg in conv.messages[msg_count_before:]:
                     if isinstance(msg.get("_db_id"), int):
                         continue
@@ -1816,6 +1885,9 @@ class Agent(CorvidaePlugin):
                             msg["_db_id"] = rowid
                     except Exception:
                         logger.warning("persist_message hook failed", exc_info=True)
+                # Before compose: gather contributions under the check
+                # allowance, then admit held text and the in-time answers.
+                await self._compose_held(channel, conv, item)
                 _phases["before_turn"] = time.monotonic() - _t_before_turn_start
 
             # 7. Build prompt and call run_agent_turn (single LLM invocation)
@@ -1945,6 +2017,18 @@ class Agent(CorvidaePlugin):
                 },
             )
         finally:
+            # The end of a tool cycle: let the held store re-fire a stub whose
+            # turn could not append. Before _note_settled, so the channel is
+            # not reported settled just before the stub is queued.
+            if _started and self._can_append(channel):
+                try:
+                    await get_dependency(self.pm, "held", HeldContext).turn_ended(channel)
+                except Exception:
+                    logger.warning(
+                        "held store turn_ended failed on channel %s; a deferred stub "
+                        "is retried at the end of the next tool cycle",
+                        channel.id, exc_info=True, extra={"channel": channel.id},
+                    )
             # Every item that starts closes: an early return (an absorbed
             # tool result, a turn that produced no result, no conversation
             # message) or an exception would otherwise leave the start
