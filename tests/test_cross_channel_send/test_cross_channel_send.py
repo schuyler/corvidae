@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from helpers import add_kernel_held
 from cross_channel_send import CrossChannelSendPlugin
 from llm_response_fixtures import _make_text_response
 
@@ -58,6 +59,7 @@ async def _build_harness(
     pm.register(thinking_plugin, name="thinking")
     await thinking_plugin.on_init(pm=pm, config=full_config)
 
+    await add_kernel_held(pm)
     plugin = Agent()
     pm.register(plugin, name="agent")
     plugin.pm = pm
@@ -708,6 +710,7 @@ class TestIntegration:
         pm.register(thinking_plugin, name="thinking")
         await thinking_plugin.on_init(pm=pm, config={})
 
+        await add_kernel_held(pm)
         agent = Agent()
         pm.register(agent, name="agent")
         agent.pm = pm
@@ -795,6 +798,7 @@ class TestIntegration:
         pm.register(thinking_plugin, name="thinking")
         await thinking_plugin.on_init(pm=pm, config={})
 
+        await add_kernel_held(pm)
         agent = Agent()
         pm.register(agent, name="agent")
         agent.pm = pm
@@ -880,6 +884,7 @@ class TestIntegration:
         pm.register(thinking_plugin, name="thinking")
         await thinking_plugin.on_init(pm=pm, config={})
 
+        await add_kernel_held(pm)
         agent = Agent()
         pm.register(agent, name="agent")
         agent.pm = pm
@@ -1109,6 +1114,7 @@ class TestHopPropagation:
         pm.register(thinking_plugin, name="thinking")
         await thinking_plugin.on_init(pm=pm, config={})
 
+        await add_kernel_held(pm)
         agent = Agent()
         pm.register(agent, name="agent")
         agent.pm = pm
@@ -1189,6 +1195,7 @@ class TestHopPropagation:
         pm.register(thinking_plugin, name="thinking")
         await thinking_plugin.on_init(pm=pm, config={})
 
+        await add_kernel_held(pm)
         agent = Agent()
         pm.register(agent, name="agent")
         agent.pm = pm
