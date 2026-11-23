@@ -396,7 +396,11 @@ class ForkLog:
         ) as cur:
             own_rows = list(await cur.fetchall())
         own = [bytes(r["digest"]) for r in own_rows]
-        if own_rows and own_rows[0]["ordinal"] != row["chain_from"]:
+        # The stored ordinals must be contiguous from the offset the row claims:
+        # checking only the first would rebuild a short chain out of a gap.
+        if own_rows and [r["ordinal"] for r in own_rows] != list(
+            range(row["chain_from"], row["chain_from"] + len(own_rows))
+        ):
             return None
         base, parent = row["chain_from"], row["chain_parent"]
         if base == 0:
