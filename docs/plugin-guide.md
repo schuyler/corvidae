@@ -123,11 +123,11 @@ Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP
 
 ## Registering a redact scrubber
 
-`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table or file of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
 
 ```toml
 [project.entry-points."corvidae.redact"]
-exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+outcome_log_jsonl = "corvidae_cognition.outcome_log:redact_outcomes_jsonl"
 ```
 
 The entry-point name labels the surface in the CLI output (`2 outcome_log_jsonl rows`) and in skip notices. The object is an async function:
@@ -1381,9 +1381,10 @@ hooks.
 **No plugin reads another plugin's tables.** Table and column names are not
 a contract; raw SQL on a peer's table is a service call with no interface.
 Prefer pushing the data on an event, so no read is needed; otherwise ask
-through a `resolve_` hook the reader owns or depends on. The tree
-complies for this rule: appraisal's read of `exchange_log` went with the
-removal of the appraisal vector, and gates' went when it began asking
+through a `resolve_` hook the reader owns or depends on. The tree does not
+fully comply yet: critique's provenance check still searches memory's
+`message_fts`. The reads of `exchange_log` are gone: appraisal's went with
+the removal of the appraisal vector, and gates' went when it began asking
 `resolve_trace_origin`.
 
 **Hint the types on both sides.** The spec carries the return annotation, as
