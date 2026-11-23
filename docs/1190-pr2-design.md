@@ -88,7 +88,8 @@ Callers:
   for added lenses that ran. `_record_and_register`'s `outcome: dict` becomes
   `outcomes: list[dict]`: it writes each record through `on_trace_record`,
   then registers all objections once (waking split per lens is already done
-  there by `o["lens"]`). Provenance passes a one-element list.
+  there by `o["lens"]`). Provenance passes a one-element list. Its docstring
+  says "records" (plural).
   `_run_critique`, `_run_added_lenses` and `_enqueue_lens`'s two branches fold into this.
 - **Before send:** `_run_before_send` forks once for the selected lenses and
   records `{"critique_before_send": {"lenses", "objections", "sampled", "detail"?}}`
@@ -128,7 +129,9 @@ hook: the fork still fires no hooks (PRD §3.8 item 1).
 Critique's wait (idle point only): `_wait_quiet(channel)` loops while
 `agent.waiting_messages().get(channel.id)` is non-zero, sleeping
 `YIELD_POLL_SECONDS` (module constant, 1.0). `_fork_lenses` awaits it before
-building the instruction and running the containment check (I3), and passes
+building the instruction and running the containment check (I3), which at
+the idle point is `_provenance_fork`'s reply-row lookup returning the `cut`
+passed to `fork`, and passes
 a callback that awaits it again, then compares
 `self._compactions.get(channel.id, 0)` with the value taken at fork start on
 **every** call, raising `_ForkStale` on a change. `_fork_lenses` catches
@@ -189,6 +192,9 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 - A lens the reply omits is skipped alone; no retry.
 - Poll granularity: a turn that starts and finishes within 1 s between polls is not waited for. Mid-fork, harmless: the fork's messages are fixed at render. Before render, harmless too: the `cut` at the reply excludes it.
 
+- An unpersisted reply (`_db_id` None) now skips the idle lenses ("the reply was not recorded or not persisted"), as provenance already does; today they run. A PRD §3.8 item 2 miss; noted in `cognition.md`.
+- Max-turns fallback: the last assistant row may carry tool calls, so the cut falls inside a tool cycle (degraded context, no crash). Provenance has the same edge today.
+
 ## Open (for the owner at the design gate)
 
 - **R6′:** §7 in this PR, or defer to its own issue.
@@ -199,3 +205,4 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 
 - Design round 1 (cold): FAIL. Important: R6 unplanned → §7 added, still open to the owner; PRD Critique 1 edit missing → added to R9; I2 reschedule could not work → I2 flipped to wall clock (also fixes the worker-starvation edge). Edges fixed: wait before render (I3), staleness check on every callback, `cm.expired()`, before-send findings quote the draft. Cosmetics fixed: §6 against #1221, hookspec docstring and prompt copies in R9, R7 wording, S1 example, `.get`.
 - Design round 2 (cold): PASS, no critical or important. Cosmetics fixed: stale rejected alternative (C1); I3's reason was backwards (C2) → the idle fork now passes `cut` at the reply, per PRD §3.8 item 2 (new behaviour, small; re-reviewed in round 3); `returns_untrusted` (C3); `outcomes: list[dict]` (C4); fork-time validation and placement (C5); busy-channel timeout message (C6). Edges fixed: compaction check after `fork` returns (E1); empty search result (E2); Deferred poll note (E3).
+- Design round 3 (cold): PASS. Two cosmetics fixed (the cut named in §4; plural docstring); two edges deferred.
