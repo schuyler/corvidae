@@ -135,7 +135,9 @@ class GoalsPlugin(CorvidaePlugin):
     depends_on = frozenset({"persistence", "memory", "clock"})
     # The heartbeat owns the hook spec goals' beat section implements; it is
     # optional so a config without a heartbeat starts quietly (#1079).
-    optional_depends_on = frozenset({"heartbeat"})
+    # corvidae_planning owns resolve_corvidae_planning_goals, which goals
+    # answers; optional for the same reason (#1181).
+    optional_depends_on = frozenset({"heartbeat", "corvidae_planning"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -332,6 +334,11 @@ class GoalsPlugin(CorvidaePlugin):
             {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text, "status": status}
             for gid, text, created_at, status in rows
         ]
+
+    @hookimpl
+    async def resolve_corvidae_planning_goals(self) -> list[dict]:
+        """Answer the planning lens's request for the open goal list (#1181)."""
+        return await self.open_goals()
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:

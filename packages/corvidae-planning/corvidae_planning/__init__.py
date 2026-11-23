@@ -9,7 +9,9 @@ agent reads it at its next turn and decides whether to act.
 
 The plugin also implements ``transform_critique_prompt`` to append the
 current open goal list to the fork instruction, so the fork can name
-specific goal ids and avoid suggesting goals that already exist.
+specific goal ids and avoid suggesting goals that already exist. It asks for
+the list through a hook it owns, ``resolve_corvidae_planning_goals``, which
+the goals plugin implements (#1181), so planning never looks goals up.
 """
 
 from __future__ import annotations
@@ -17,9 +19,8 @@ from __future__ import annotations
 import logging
 
 from corvidae.fork import quote
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
 from corvidae_cognition.critique import Lens
-from corvidae_cognition.goals import GoalsPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,19 @@ If the suggested goal is already in the goal list, do not suggest it. If you wou
 Report each goal action as one objection. Its "claim" is the action and the goal: "create: <a short new goal title>", "update: #<goal id>" or "retire: #<goal id>". Its "objection" is a one-sentence rationale. If no goal action is warranted, return an empty objections list."""
 
 
+class PlanningSpec:
+    """Hooks the planning plugin owns."""
+
+    @hookspec(firstresult=True)
+    async def resolve_corvidae_planning_goals(self) -> list[dict] | None:
+        """The open goals, front of the queue first, or None when no goals
+        plugin answers.
+
+        Each dict has at least "id" (int) and "summary" (the goal's text,
+        str). An empty list means goals answered and none are open.
+        """
+
+
 class PlanningLensPlugin(CorvidaePlugin):
     """Contributes the planning lens to the critique plugin.
 
@@ -60,6 +74,19 @@ class PlanningLensPlugin(CorvidaePlugin):
     # goals disabled the fork runs without the goal list. A hard dependency
     # would stop the daemon from starting on a config that disables either.
     optional_depends_on = frozenset({"critique", "goals"})
+    # The goal list is read through this hook; goals implements it (#1181).
+    hookspecs = PlanningSpec
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        # An absent goals plugin is a configuration the operator chose:
+        # report the fallback once here, not on every fork (plugin-guide,
+        # "When nobody answers").
+        if not self.pm.has_plugin("goals"):
+            logger.info(
+                "planning lens: no goals plugin loaded, so planning forks "
+                "run without the goal list",
+            )
 
     @hookimpl
     async def on_critique_init(self, config: dict, add_lens) -> None:
@@ -87,24 +114,20 @@ class PlanningLensPlugin(CorvidaePlugin):
         """
         if lens_name != LENS_NAME:
             return None
-        # Fetch the open goals; without them the fork still runs, unlisted.
-        goals_plugin = self.pm.get_plugin("goals")
-        if not isinstance(goals_plugin, GoalsPlugin):
-            logger.warning(
-                "planning lens: the goals plugin is not loaded, so the fork "
-                "for trace %s on channel %s runs without the goal list; "
-                "enable goals or list corvidae_planning under plugins.disabled",
-                trace_id, getattr(channel, "id", channel),
-            )
-            return None
+        # Ask for the open goals; with no goals plugin to answer (None) the
+        # fork runs unlisted, already reported at startup.
         try:
-            goals = await goals_plugin.open_goals()
+            goals: list[dict] | None = (
+                await self.pm.ahook.resolve_corvidae_planning_goals()
+            )
         except Exception:
             logger.warning(
                 "planning lens: could not fetch the goal list for trace %s "
                 "on channel %s; the fork runs without it",
                 trace_id, getattr(channel, "id", channel), exc_info=True,
             )
+            return None
+        if goals is None:
             return None
         # Render one line per goal; goal text is flattened and capped by
         # quote() so a goal can't break the list's format.
