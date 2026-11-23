@@ -144,7 +144,7 @@ def _late_rows(messages):
         m for m in messages
         if m.get("_message_type") == MessageType.CONTEXT
         and isinstance(m.get("content"), str)
-        and m["content"].startswith(f"[{LATE_CHECK_LABEL}")
+        and m["content"].startswith(f"[CONTEXT from {LATE_CHECK_LABEL}")
     ]
 
 
@@ -215,6 +215,7 @@ class TestFinalUnderAllowance:
                 "channel": channel.id,
                 "hook": "should_send_response",
                 "plugin": "clock_gate",
+                "phase": "before_effect",
             }),
         ]
 
@@ -265,11 +266,11 @@ class TestDeadlineInstant:
         """Regression: a check that finishes in the same loop step as the
         deadline, after the deadline fires, decides nothing and is still
         counted as a miss. The fake clock separates two releases with a
-        settle, so this drives run_checks on the real clock with a releaser
+        settle, so this drives gather on the real clock with a releaser
         timer due at the deadline's own instant (50 ms)."""
         from types import SimpleNamespace
 
-        from corvidae.checks import run_checks
+        from corvidae.checks import gather
         from corvidae.clock import Clock
 
         release = asyncio.Event()
@@ -304,12 +305,13 @@ class TestDeadlineInstant:
         clock.call_later = call_later
         channel = SimpleNamespace(id="x:y")
         try:
-            results = await run_checks(
+            gathered = await gather(
                 pm, "should_send_response", channel=channel,
                 kwargs={"channel": channel, "text": "hi", "emission": "final",
                         "trace_id": None, "annotations": {}},
-                allowance=0.05, clock=clock, on_late=on_late,
+                allowance=0.05, clock=clock, on_late=on_late, phase="before_effect",
             )
+            results = gathered.results
             await asyncio.sleep(0.05)
         finally:
             await clock.close()

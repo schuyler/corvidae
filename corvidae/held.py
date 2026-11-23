@@ -2,10 +2,10 @@
 
 PRD principle 3 and §3.5. Text that reaches a channel without being a message
 or a tool result (a late check refusal, a before-compose contribution that
-missed its allowance, a critique verdict, recall) is *held* here until the
+missed its allowance, a background reviewer's verdict, recall) is *held* here until the
 channel's next turn that can take it, then framed as data, not instructions,
 and appended as one CONTEXT row per batch. The store replaces the agent's
-late-check list and the funnel's queues and promises.
+late-check list and the policy plugin's queues and promises.
 
 What the store decides, and what it leaves to policy:
 
@@ -14,7 +14,7 @@ What the store decides, and what it leaves to policy:
   (``on_held_admitted``). It never places text between a tool call and its
   result: the agent calls ``admit_for_turn`` only on a turn that can append.
 * Dedupe, budgets and order are ``transform_held_admission``'s: the kernel's
-  trylast seed admits every entry as offered, a policy plugin (the funnel)
+  trylast seed admits every entry as offered, a policy plugin
   wraps it. No hook can remove the frame.
 * The store never expires text: each batch carries its creation time on the
   kernel clock, and a policy that wants a TTL reads it.

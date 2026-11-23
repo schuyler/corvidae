@@ -24,7 +24,7 @@ from corvidae.task import Task, TaskPlugin, TaskQueue
 from corvidae.tool import ToolContext
 
 from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts
+from helpers import add_kernel_held, build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -657,6 +657,7 @@ class TestNoTaskQueueLogsError:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        await add_kernel_held(pm)
         plugin = Agent(pm)
         pm.register(plugin, name="agent")
         plugin._registry = registry
@@ -718,6 +719,7 @@ class TestNoTaskQueueEmitsToolResult:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        await add_kernel_held(pm)
         plugin = Agent(pm)
         pm.register(plugin, name="agent")
         plugin._registry = registry
@@ -790,6 +792,7 @@ async def _no_queue_setup(
         # Registration order does not matter: apluggy gathers hookimpls, so the
         # Agent's on_notify queues the result before the peer's raise lands.
         pm.register(_RaisingNotifier(), name="raiser")
+    await add_kernel_held(pm)
     plugin = Agent(pm)
     pm.register(plugin, name="agent")
     plugin._registry = registry

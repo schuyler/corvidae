@@ -263,8 +263,11 @@ async def gather(
         expired = True
         deadline_hit.set()
 
-    timer = clock.call_later(
-        allowance, _expire, name=f"check-deadline:{hook_name}:{channel.id}"
+    # No implementation, nothing to wait for and no deadline to arm.
+    timer = (
+        clock.call_later(allowance, _expire, name=f"check-deadline:{hook_name}:{channel.id}")
+        if voters
+        else None
     )
     try:
         if not voters:
@@ -291,7 +294,8 @@ async def gather(
         stopped_early = stop_hit.is_set() and not deadline_hit.is_set()
         expired = True
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
 
     # Record each implementation still running at the deadline. An early exit
     # records none: the allowance had not run out.

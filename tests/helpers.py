@@ -99,6 +99,11 @@ async def build_plugin_and_channel(
     pm.register(thinking_plugin, name="thinking")
     await thinking_plugin.on_init(pm=pm, config={})
 
+    # The Agent depends on the held store (#1176), which cuts an over-long
+    # entry through the spill and stamps entries from the kernel clock; both
+    # are resolved when needed, so a test installs its clock afterwards.
+    await add_kernel_held(pm)
+
     plugin = Agent()
     pm.register(plugin, name="agent")
     plugin.pm = pm
@@ -493,6 +498,29 @@ def skip_warnings(caplog, row_id: int, channel_id: str) -> list[str]:
         and re.search(rf"\b{row_id}\b", r.getMessage())
         and channel_id in r.getMessage()
     ]
+
+
+async def add_kernel_held(pm):
+    """Register the held store (and the spill it cuts through) and return it (#1176).
+
+    The Agent depends on ``held``, so a test that builds its plugin manager by
+    hand registers one here. Both are resolved when needed, so the test's
+    clock and registry may be added before or after. Anything already
+    registered under those names is kept.
+    """
+    from corvidae.held import HeldContext
+    from corvidae.spill import NotificationSpill
+
+    if pm.get_plugin("spill") is None:
+        spill = NotificationSpill()
+        pm.register(spill, name="spill")
+        await spill.on_init(pm=pm, config={})
+    held = pm.get_plugin("held")
+    if held is None:
+        held = HeldContext()
+        pm.register(held, name="held")
+        await held.on_init(pm=pm, config={})
+    return held
 
 
 def add_kernel_registry(pm, registry=None):

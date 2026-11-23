@@ -23,7 +23,7 @@ from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.context import ContextWindow
 from corvidae.persistence import init_db
 from corvidae.channel import resolve_system_prompt
-from helpers import stub_llm_config
+from helpers import add_kernel_held, stub_llm_config
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +851,7 @@ class TestAgentLogging:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
+        await add_kernel_held(pm)
         plugin = Agent(pm)
         pm.register(plugin, name="agent")
 
@@ -892,6 +893,7 @@ class TestAgentLogging:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        await add_kernel_held(pm)
         plugin = Agent(pm)
         pm.register(plugin, name="agent")
         plugin._registry = registry
