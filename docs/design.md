@@ -3408,7 +3408,7 @@ raise. The content-table triggers are created after the FTS table, so they
 never exist without it and the kernel's `message_log` writes are unaffected.
 The reverse also holds: a database holding trigram tables cannot be written
 by a Python linked to an older SQLite (the `message_log_ai` trigger fails each
-insert), and `corvidae redact` run from one fails at its first write (`error in tokenizer constructor`, from the `message_log_au`/`memory_au` trigger) and redacts nothing.
+insert).
 
 Markdown recall's chunker (`markdown_recall/chunking.py`) sizes in UTF-8 bytes
 (`TARGET_BYTES` 900, `OVERLAP_BYTES` 200, `MIN_CHUNK_BYTES` 1800,

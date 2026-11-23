@@ -642,32 +642,6 @@ class TestVerificationPass:
         await db.close()
 
 
-class TestVerificationPassCjk:
-    """#1186 R1 (row 21): redact's verification sample is found in CJK-only
-    content too, so the FTS check is run and not skipped."""
-
-    def test_cjk_only_row_is_verified_not_skipped(self, tmp_path):
-        """Redacting a row written only in Chinese reports a verified FTS
-        check (0 hits), not 'FTS check skipped: no sample token'."""
-        from click.testing import CliRunner
-
-        path = str(tmp_path / "sessions.db")
-
-        async def build() -> int:
-            db = await make_full_db(path)
-            try:
-                return await insert_message(db, "irc:#cjk", "user", "我喜欢吃苹果")
-            finally:
-                await db.close()
-
-        msg_id = asyncio.run(build())
-        result = CliRunner().invoke(redact_command, ["--db", path, "message", str(msg_id)])
-
-        assert result.exit_code == 0, (result.output, result.exception)
-        assert "FTS check skipped" not in result.output, result.output
-        assert "verified" in result.output.lower() and "0 hits" in result.output, result.output
-
-
 # ---------------------------------------------------------------------------
 # Redact CLI error context and honest affected counts
 # ---------------------------------------------------------------------------

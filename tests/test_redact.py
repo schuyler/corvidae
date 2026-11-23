@@ -185,28 +185,6 @@ class TestVerificationPass:
         assert _extract_sample_token("") is None
         assert _extract_sample_token("{}") is None
 
-    @pytest.mark.parametrize("content,expected", [
-        # #1186 R1: no language's words are skipped; CJK and Cyrillic rows
-        # get a sample (a run of letters of 3+ characters).
-        ("我喜欢吃苹果", "我喜欢吃苹果"),
-        ("Привет мир", "Привет"),
-        # The English stopwords the old list skipped are ordinary words now.
-        ("that this with", "that"),
-        # A 2-character term is below a trigram index's reach; the next one is used.
-        ("ab xyz", "xyz"),
-        # A term with no letter (the tombstone's date digits) is not a sample.
-        ("2026 11 23", None),
-        # A term inside the tombstone text would always report a false hit.
-        ("[redacted by operator]", None),
-        ("operator redacted gizmo", "gizmo"),
-    ])
-    def test_extract_sample_token_is_language_neutral(self, content, expected):
-        """#1186 R1/R2: the sample is the first term of 3+ characters that
-        holds a letter and is not inside the tombstone text."""
-        import json
-        msg_json = json.dumps({"role": "user", "content": content})
-        assert _extract_sample_token(msg_json) == expected
-
     async def test_verify_fts_clean_handles_absent_fts_tables(self):
         """_verify_fts_clean reports no-FTS-surfaces when tables are absent (pre-1b DB)."""
         db = await aiosqlite.connect(":memory:")

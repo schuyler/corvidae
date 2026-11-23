@@ -1568,7 +1568,7 @@ SQLite, Debian bookworm's 3.40 for one, does not). Below it:
   gives the manual switch (the daemon stopped, then drop, create and rebuild
   each FTS table).
 - A database whose tables are trigram cannot be written by a Python linked to
-  an older SQLite, and `corvidae redact` run from one fails at its first write (`error in tokenizer constructor`, from the `message_log_au`/`memory_au` trigger) and redacts nothing. Run every tool against the database with SQLite 3.45+.
+  an older SQLite. Run every tool against the database with SQLite 3.45+.
 
 ## Running in a container
 

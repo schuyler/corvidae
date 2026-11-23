@@ -1362,9 +1362,6 @@ script, spaced or not.
 - The index is about three times the size of the old one, and a query costs
   roughly twice a whole-word one (more for a burst of many messages: no cap
   on pieces exists).
-- `corvidae redact` verifies with one sample term of 3 or more characters
-  that contains a letter (not part of the tombstone text), so a CJK-only row is
-  verified too; a row with no such term skips the check, as before.
 - `search_transcripts` shows a snippet of about 64 trigram tokens around the
   match (roughly 64 characters).
 
@@ -1400,7 +1397,7 @@ ships 3.40) does not. Below the floor:
   finds `running`).
 - A database whose tables are trigram cannot be written by a Python linked to
   an older SQLite: the `message_log_ai` trigger fails every kernel insert.
-  `corvidae redact` run from such a Python fails at its first write (`error in tokenizer constructor`, from the `message_log_au`/`memory_au` trigger) and redacts nothing. Run every tool against the database with a
+  Run every tool against the database with a
   SQLite at or above the floor.
 
 **Switching an existing install by hand.** There is no automatic migration:
