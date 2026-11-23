@@ -2278,7 +2278,7 @@ per selected lens, the quote of the exchange, and one reply format that asks for
 a single JSON object with one key per lens (`{"<lens>": {"objections": [...]}}`).
 A lens whose key is missing from the reply, or is not an object, is skipped
 alone, with a warning; an unparseable reply skips them all. Each lens keeps
-its own record and its own wake setting, as when each had a fork. Before send,
+its own wake setting; their outcomes share one `critique` record (below). Before send,
 the fork makes no tool calls and does not wait. After the exchange:
 
 - It waits before it renders, and again before each request that follows a tool

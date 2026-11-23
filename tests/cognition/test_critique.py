@@ -1671,7 +1671,7 @@ class TestRetentionWakeNeedsARoot:
             "file": "people/yoz.md", "content": "- runs ARDC tech",
         }
         await env.plugin._record_and_register(
-            env.channel, "kwr", [{"critique": {"lenses": ["retention"], "objections": 1}}],
+            env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
             [objection], wake=False, origin=None, reply_ref="",
         )
 

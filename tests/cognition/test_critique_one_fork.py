@@ -1,11 +1,11 @@
 """Critique runs every selected lens in one fork (#1190 PR 2).
 
-One test (or one parametrized test) per acceptance criterion of
-docs/1190-pr2-design.md, named by its tag in the docstring:
+One test (or one parametrized test) per acceptance criterion of #1190
+PR 2's design (requirements on issue #1190), named by its tag:
 
 - S1      every offered lens above "none" is selected; "none" wins ties;
 - R1      the selected lenses are one fork, each lens's wake setting and
-          record survive;
+          outcome survive, in one record;
 - R5.1/2  the idle fork's tool cap is ``critique.max_tool_calls`` (3), the
           before-send fork's is 0;
 - R5.3    no model call while a user message waits (before render and

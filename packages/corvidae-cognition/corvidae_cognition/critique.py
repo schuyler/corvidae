@@ -1786,7 +1786,7 @@ class CritiquePlugin(CorvidaePlugin):
             if objections:
                 prov["detail"] = objections
             await self._record_and_register(
-                channel, trace_id, [{"provenance": prov}], objections, wake=True,
+                channel, trace_id, {"provenance": prov}, objections, wake=True,
                 origin=origin, reply_ref=f"on your reply «{quote(response_text)}»: ")
         finally:
             reset_attribution(token)
@@ -1950,7 +1950,7 @@ class CritiquePlugin(CorvidaePlugin):
                     entry["detail"] = objs
                 crit[name] = entry
             await self._record_and_register(
-                channel, trace_id, [{"critique": crit}], objections, wake=False, origin=origin,
+                channel, trace_id, {"critique": crit}, objections, wake=False, origin=origin,
                 reply_ref=f"on your reply «{quote(response_text)}»: ")
         finally:
             reset_attribution(token)
@@ -2004,16 +2004,16 @@ class CritiquePlugin(CorvidaePlugin):
         return frozenset(waking)
 
     async def _record_and_register(
-        self, channel, trace_id, outcomes: list[dict], objections, *, wake: bool,
+        self, channel, trace_id, outcome: dict, objections, *, wake: bool,
         origin: str | None, reply_ref: str,
     ) -> None:
-        """Record critique outcomes and register non-empty verdicts.
+        """Record a critique outcome and register non-empty verdicts.
 
-        Each of ``outcomes`` is reported on ``on_trace_record`` (source
-        ``critique``) as its own record: provenance passes one, a lens fork
-        passes the built-ins' and the added lenses' (#1190). Provenance
-        records under its own key, so a reader merging a trace's critique
-        records never loses the stylistic run's ``critique``. ``reply_ref``
+        The outcome is reported on ``on_trace_record`` (source
+        ``critique``) as its own record: a lens run's one ``critique``
+        record (the built-ins' keys beside each added lens's entry), or
+        provenance's, under its own key so a reader merging a trace's
+        critique records never loses the lenses' ``critique``. ``reply_ref``
         prefixes every registered finding so it names the reply (or draft)
         it judges (PRD Critique 4).
         Non-empty objections re-enter through the held-text store as CONTEXT.
@@ -2029,11 +2029,10 @@ class CritiquePlugin(CorvidaePlugin):
         finding waits for the channel's next turn, so a correction can never
         start another one (the recursion brake, PRD §3.7 Critique 4).
         """
-        for outcome in outcomes:
-            await self.pm.ahook.on_trace_record(
-                trace_id=trace_id, channel_id=channel.id, source="critique",
-                origin=None, record=outcome,
-            )
+        await self.pm.ahook.on_trace_record(
+            trace_id=trace_id, channel_id=channel.id, source="critique",
+            origin=None, record=outcome,
+        )
 
         if not objections:
             return  # silent: nothing re-enters the window
