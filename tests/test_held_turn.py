@@ -454,6 +454,45 @@ class TestRearm:
         last_result = max(i for i, m in enumerate(messages) if m.get("role") == "tool")
         assert last_result < messages.index(rows[0])
 
+    async def test_a_stub_turn_that_raises_before_admission_is_refired(self, env, monkeypatch, caplog):
+        """#1237: a stub item whose turn raises before admission is dropped by
+        the queue; its pair must not stay pending forever. It is re-fired when
+        the channel's next turn ends, and its batch is admitted then."""
+        plugin, channel, db, clock = env
+        held = plugin.pm.get_plugin("held")
+        spy = NotifySpy()
+        plugin.pm.register(spy, name="notify_spy")
+        # The first item processed (the stub) raises before admission; later ones run.
+        real_refresh = plugin._refresh_tools_if_changed
+        calls = {"n": 0}
+
+        def flaky_refresh() -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom before admission")
+            real_refresh()
+
+        monkeypatch.setattr(plugin, "_refresh_tools_if_changed", flaky_refresh)
+        script(plugin, _make_text_response("hi"), _make_text_response("after verdict"))
+
+        await held.hold_and_wake(channel, "critique", "critique", ["the verdict"])
+        await drain(plugin, channel)
+        # The dropped stub made no LLM call and admitted nothing, and a warning
+        # names the origin, the channel and when it is re-fired.
+        assert plugin._client.chat.await_count == 0
+        assert any(
+            "critique stub" in r.getMessage() and channel.id in r.getMessage()
+            and "re-fired" in r.getMessage()
+            for r in caplog.records if r.levelname == "WARNING"
+        )
+
+        # The next turn's end re-fires the pair's stub, which admits the batch.
+        await asyncio.wait_for(await send(plugin, channel, "hello"), 1)
+        await settle_all(plugin, channel)
+        assert len(spy.stubs("critique")) == 2
+        assert plugin._client.chat.await_count == 2
+        assert "the verdict" in prompt_text(plugin, 1)
+
 
 # ---------------------------------------------------------------------------
 # H13: before compose in the loop
