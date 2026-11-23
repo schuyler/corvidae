@@ -1973,7 +1973,8 @@ class CritiquePlugin(CorvidaePlugin):
         lens is on, then one note that also says how to file (#742).
 
         It depends on configuration only, never on what woke: the store
-        keeps the first pending stub of a drain. While proactivity is
+        keeps the first pending stub of a drain, except that a pre-send
+        revision's stub text wins over it (#1222). While proactivity is
         offered PROACTIVITY_WAKE_SENTENCE follows the note, and with a waking
         plugin lens loaded WAKE_LENSES_SENTENCE comes last.
         """

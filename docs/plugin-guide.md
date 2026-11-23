@@ -1374,7 +1374,7 @@ A plugin with text for the model (a recalled note, a reviewer's verdict, a heads
 |---|---|---|
 | `before_compose` returns a `Contribution` | you can answer for the turn being composed | in that turn's prompt if you answer within the channel's check allowance, else at the channel's next turn |
 | `held.hold(channel, source, entries)` | the text is ready outside a turn and can wait for any turn | at the channel's next turn, whatever its origin; wakes nothing |
-| `held.hold_and_wake(channel, origin, source, entries, stub_text=None)` | the text should also start a turn | one `on_notify` stub wakes the channel; the text is admitted at the turn of that `origin` |
+| `held.hold_and_wake(channel, origin, source, entries, stub_text=None, *, stub_text_wins=False)` | the text should also start a turn | one `on_notify` stub wakes the channel; the text is admitted at the turn of that `origin` |
 
 ### `before_compose`
 
@@ -1425,7 +1425,7 @@ class ReviewerPlugin(CorvidaePlugin):
 ```
 
 - Both are `async`; `entries` are pre-formatted lines, admitted as one frame in the order given. An empty list does nothing. `hold` wakes nothing.
-- `hold_and_wake` holds the entries for the channel's turn *of that origin*, and fires one `on_notify` stub (`tool_call_id=None`) to start it. While a stub for a `(channel, origin)` is pending, later batches for the pair queue behind it and fire no second stub. With `stub_text=None` the stub reads `<n> pending <source> item(s)`. The stub's annotations are `{"origin": origin, "held_stub": True}`; `corvidae.held.STUB_ANNOTATION` is that key, and the kernel recognises a stub by it, never by origin (task completions and cross-channel notes carry origins too). Keep `origin` short: it shows in the notification header.
+- `hold_and_wake` holds the entries for the channel's turn *of that origin*, and fires one `on_notify` stub (`tool_call_id=None`) to start it. While a stub for a `(channel, origin)` is pending, later batches for the pair queue behind it and fire no second stub, and the first stub's text stands. A batch passed with `stub_text_wins=True` (keyword-only, with a `stub_text`) replaces the pair's stub text instead: the queued stub's row, and any re-fire, carry the winner's text. Pass it only when the woken turn must read your text whatever else is pending; the pre-send revision is the one caller (#1222). `HeldContext.stub_text(channel_id, origin)` returns the pair's latest stub text, which the kernel writes into a stub's row when it builds it. With `stub_text=None` the stub reads `<n> pending <source> item(s)`. The stub's annotations are `{"origin": origin, "held_stub": True}`; `corvidae.held.STUB_ANNOTATION` is that key, and the kernel recognises a stub by it, never by origin (task completions and cross-channel notes carry origins too). Keep `origin` short: it shows in the notification header.
 - A stub whose turn cannot append (a tool call is outstanding) is deferred, not lost: the store re-fires it when the channel's next tool cycle ends. A stub that fails to fire is retried the same way, logged at WARNING.
 - Kept batches keep their keys and creation time when a policy leaves some of their entries out.
 - An entry over `agent.held_entry_max_chars` (default 8000) is cut to that many characters and the rest goes to the notification spill, with a line saying where. It is never dropped.

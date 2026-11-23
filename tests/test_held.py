@@ -715,3 +715,71 @@ class TestPolicyFailure:
         ]
         assert "Fix the transform_held_admission" in warning
         assert "every held entry is admitted" in warning
+
+
+class FailFirstThenRecord:
+    """A sibling ``on_notify`` that fails its first call and records the texts of later ones."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.texts: list[str] = []
+
+    @hookimpl
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
+        self.calls += 1
+        # Only the first firing fails, so the pair is marked for a re-fire.
+        if self.calls == 1:
+            raise RuntimeError("sibling on_notify exploded")
+        self.texts.append(text)
+
+
+class TestStubTextWins:
+    """#1222: a caller may declare its stub text the one a pending stub carries."""
+
+    async def test_a_winning_batch_replaces_the_pending_stub_text_and_a_later_plain_one_does_not(
+        self, store
+    ):
+        """#1222: with a critique stub pending, a ``stub_text_wins=True`` batch
+        makes ``stub_text`` return its text; a later batch without the flag
+        leaves it (the reverse-order case: the winner is not displaced)."""
+        await store.held.hold_and_wake(
+            store.channel, "critique", "critique", ["finding"], stub_text="critique note"
+        )
+        assert store.held.stub_text(store.channel.id, "critique") == "critique note"
+
+        # A winning batch queues behind the pending stub and takes its text.
+        await store.held.hold_and_wake(
+            store.channel, "critique", "pre-send check", ["objection"],
+            stub_text="revise please", stub_text_wins=True,
+        )
+        assert store.held.stub_text(store.channel.id, "critique") == "revise please"
+
+        # A later batch without the flag does not replace the winner.
+        await store.held.hold_and_wake(
+            store.channel, "critique", "critique", ["finding two"], stub_text="critique again"
+        )
+        assert store.held.stub_text(store.channel.id, "critique") == "revise please"
+        # Still one stub: every batch queued behind the first.
+        store.notify.assert_awaited_once()
+
+    async def test_a_winning_batch_text_is_what_a_rearmed_pair_refires(self, store):
+        """#1222: when the pair's stub failed to fire (marked for re-arm), a
+        winning batch's text is what ``turn_ended`` fires."""
+        recorder = FailFirstThenRecord()
+        # The real hook, so the failure comes from a sibling hookimpl.
+        del store.pm.ahook_raise.on_notify
+        store.pm.register(recorder, name="fail_first")
+
+        await store.held.hold_and_wake(
+            store.channel, "critique", "critique", ["finding"], stub_text="critique note"
+        )
+        assert recorder.calls == 1
+
+        # The pair is marked for re-arm; the winning batch queues behind it.
+        await store.held.hold_and_wake(
+            store.channel, "critique", "pre-send check", ["objection"],
+            stub_text="revise please", stub_text_wins=True,
+        )
+        await store.held.turn_ended(store.channel)
+
+        assert recorder.texts == ["revise please"]

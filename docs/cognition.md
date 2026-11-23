@@ -1331,7 +1331,7 @@ logs a warning for the missing policy, and goals, critique and memory start
 without it.
 
 **Origin and the wake stub.** `held.hold_and_wake(channel, origin, source,
-entries, stub_text=None)` stamps `origin` into the wake stub's
+entries, stub_text=None, *, stub_text_wins=False)` stamps `origin` into the wake stub's
 `annotations["origin"]` (see [Traces](plugin-guide.md#traces)), together with
 the kernel's `held_stub` key, so the turn the stub triggers, and any plugin
 gating eligibility off that origin, never has to infer it from stub text. The
@@ -1929,8 +1929,11 @@ Known behaviours:
 - Held objections and the stub are in memory only; a restart between the hold
   and the revision loses both.
 - A hold whose origin already has a pending stub for the same (channel,
-  origin) reuses that stub's text; for a `critique`-origin hold the revising
-  turn gets critique's stub, which offers `NO_REPLY` (#1222).
+  origin) queues behind it, and its revision text replaces that stub's
+  (#1222): the one turn reads the revision stub and admits both batches. If
+  that stub's turn was already deferred, its row with the earlier text stays
+  in the window ahead of the re-fired revision row; and a row whose text was
+  replaced keeps the earlier stub's source in its provenance.
 - Over ACP, `cancel_prompt` empties the channel's outstanding-call set, so
   an interleaved final can end the unchecked span early and the revision's
   final can then be checked.

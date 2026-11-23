@@ -74,12 +74,13 @@ class HeldSpy(HeldContext):
         self.holds: list[dict] = []
 
     async def hold_and_wake(
-        self, channel, origin, source, entries, stub_text=None,
+        self, channel, origin, source, entries, stub_text=None, *, stub_text_wins=False,
     ) -> None:
         # Record the call whatever the call style (positional or keyword).
         self.wakes.append({
             "channel": channel, "origin": origin, "source": source,
             "entries": list(entries), "stub_text": stub_text,
+            "stub_text_wins": stub_text_wins,
         })
 
     async def hold(self, channel, source, entries) -> None:

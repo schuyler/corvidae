@@ -799,3 +799,64 @@ class TestRevisionIsNeverHeld:
         assert env.checker.checked == ["the draft"]
         assert len(env.trace.held()) == 1
         assert sent(env)[-2:] == ["interleaved reply", "revised"]
+
+
+# ---------------------------------------------------------------------------
+# #1222: a revision queued behind another pending stub keeps its own text
+# ---------------------------------------------------------------------------
+
+#: Stands in for critique's wake note: text that must not stand in for the revision's.
+CRITIQUE_NOTE = "CRITIQUE WAKE NOTE: reply NO_REPLY unless the findings change something"
+
+#: A finding critique holds for its own origin's turn.
+FINDING = "critique finding: the plan skips a step"
+
+
+class TestRevisionBehindPendingStub:
+    async def test_r1_r2_revision_row_reads_the_revision_stub_and_both_batches_are_admitted(
+        self, make_env, P
+    ):
+        """#1222 R1/R2: a draft of a ``critique``-origin turn is refused while
+        critique's wake stub is pending for the same channel. The revising turn
+        (one turn) has the window's notification row read ``REVISION_STUB``,
+        not critique's note (R1), and both critique's finding and the pre-send
+        objections are admitted at it (R2)."""
+        from corvidae.held import HeldContext
+        from corvidae.hooks import get_dependency
+
+        env = await make_env({"the draft": OBJECTIONS})
+        held = get_dependency(env.plugin.pm, "held", HeldContext)
+
+        async def critique_wakes() -> None:
+            # Critique's wake lands while the draft is being written: its stub is pending.
+            # Equivalent to critique's own call (critique.py, the waking-findings
+            # hold_and_wake): same origin, source and a non-None stub text, no flag.
+            await held.hold_and_wake(
+                env.channel, "critique", "critique", [FINDING], stub_text=CRITIQUE_NOTE
+            )
+
+        script(
+            env.plugin,
+            Then(_make_text_response("the draft"), critique_wakes),
+            _make_text_response("revised"),
+        )
+
+        # The held exchange is a critique-origin notification (no stub annotation).
+        # Equivalent to a stub turn here: admit_for_turn keys on origin alone and
+        # spends the pair either way, so critique's later stub is a fresh one.
+        await notify(env, "critique", "critique", "tick")
+        await asyncio.wait_for(drain(env.plugin, env.channel), 2)
+
+        # One draft call and one revising call.
+        assert env.plugin._client.chat.await_count == 2
+        # R1: the stub row in the window and the revising prompt carry the revision's text.
+        window = "\n".join(str(m.get("content")) for m in env.channel.conversation.messages)
+        assert P.REVISION_STUB in window
+        assert CRITIQUE_NOTE not in window
+        assert P.REVISION_STUB in prompt_text(env.plugin, 1)
+        assert CRITIQUE_NOTE not in prompt_text(env.plugin, 1)
+        # R2: both batches reach the revising turn's prompt, and both were announced.
+        assert FINDING in prompt_text(env.plugin, 1)
+        assert OBJECTIONS[0] in prompt_text(env.plugin, 1)
+        assert len(env.offers.of(P.SOURCE)) == 1
+        assert len(env.offers.of("critique")) == 1
