@@ -82,9 +82,11 @@ class SidecarClient:
         self._read_task: asyncio.Task | None = None
         #: Notifications waiting for the worker, in arrival order.
         self._queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
-        #: The single worker, so notifications are handled in the order they
-        #: arrived (a chat's messages must not overtake each other) while the
-        #: read loop stays free to take the replies those handlers wait for.
+        #: One worker for every chat, so arrival order holds and the read loop
+        #: stays free to take the replies handlers wait for. Known limit: a
+        #: handler stuck on a slow `call()` (a media fetch, say) holds every
+        #: other chat behind it for up to `call_timeout` -- head-of-line
+        #: blocking, accepted rather than paying for a worker per chat.
         self._worker: asyncio.Task | None = None
 
     async def connect(self) -> None:
