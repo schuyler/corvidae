@@ -98,6 +98,17 @@ class TestScrub:
         assert _records(jsonl, "t2", "appraisal")[0]["stage2"]["past_claims"] == CLAIMS
         assert _records(jsonl, "tx", "critique")[0]["critique"]["detail"] == DETAIL
 
+    async def test_redacting_a_later_message_scrubs_the_later_trace(self, tmp_path):
+        # The owner is the largest persisted rowid at or below the id, so a
+        # message in the second exchange belongs to t2, not t1.
+        db, ids, jsonl = await _db_with_dialog(tmp_path)
+        try:
+            await redact_messages(db, [ids["u2"]])
+        finally:
+            await db.close()
+        assert "kestrel" not in json.dumps(_records(jsonl, "t2", "appraisal"))
+        assert _records(jsonl, "t1", "appraisal")[0]["stage2"]["past_claims"] == CLAIMS
+
     async def test_dry_run_counts_and_leaves_the_file(self, tmp_path):
         db, ids, jsonl = await _db_with_dialog(tmp_path)
         before = jsonl.read_text()
