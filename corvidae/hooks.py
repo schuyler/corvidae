@@ -1320,8 +1320,8 @@ class AgentSpec:
         Grammar class: observe (broadcast; return value ignored).
 
         Fired exactly once per admitted message, after reject-wins
-        resolution. Side effects only (e.g. OutcomeLogPlugin's
-        record_exchange).
+        resolution. Side effects only (e.g. outcome_log's admission
+        record).
 
         Args:
             channel: The Channel the message arrived on.

@@ -119,20 +119,22 @@ class OutcomeLogPlugin(CorvidaePlugin):
             self._origins.popitem(last=False)
         return origin
 
-    async def _path(self) -> Path | None:
-        """The file to append to, or None when there is nowhere to write.
+    async def _path(self) -> tuple[bool, Path | None]:
+        """Whether the session DB is open, and the file to append to (None
+        for a DB with no file).
 
-        Caches only a result read from an open DB; while persistence has not
-        opened its DB yet nothing is cached, so a later record retries.
+        Caches only a result read from an open DB; while the DB is not open
+        (before start, or after shutdown closed it) nothing is cached, so a
+        later record retries.
         """
         from corvidae.persistence import PersistencePlugin
 
         db = get_dependency(self.pm, "persistence", PersistencePlugin).db
         if db is None:
-            return None
+            return False, None
         if self._path_for is None or self._path_for[0] is not db:
             self._path_for = (db, await outcomes_path(db))
-        return self._path_for[1]
+        return True, self._path_for[1]
 
     async def _append(
         self, trace_id: str, channel_id: str, source: str,
@@ -144,13 +146,14 @@ class OutcomeLogPlugin(CorvidaePlugin):
         if not self._channel_is_known(channel_id, trace_id):
             return
         origin = self._index(trace_id, origin)
-        path = await self._path()
-        if path is None and self._path_for is None:
-            # Persistence has not opened its DB yet (records come after
-            # start, so this is rare): this record is lost, the next retries.
+        db_open, path = await self._path()
+        if not db_open:
+            # The session DB is not open (before start, or closed at
+            # shutdown; rare): this record is lost, the next one retries.
             logger.warning(
                 "outcome_log: the %s record for trace %s is not written: the "
-                "session DB is not open yet (daemon.session_db=%r)",
+                "session DB is not open (daemon.session_db=%r); the next "
+                "record retries",
                 source, trace_id, self._db_path,
                 extra={"trace_id": trace_id, "channel": channel_id},
             )
