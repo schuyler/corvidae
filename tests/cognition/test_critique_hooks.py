@@ -26,7 +26,7 @@ import json
 import logging
 from unittest.mock import AsyncMock, Mock
 
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, Refusal, hookimpl
 from tests.cognition.test_critique import (
     FixedRng,
     _fire,
@@ -143,13 +143,17 @@ async def test_before_send_offer_has_no_retention_and_only_opted_in_plugin_lense
 # ---------------------------------------------------------------------------
 
 
-async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_path):
-    """Item 9: on_appraisal_before_send runs the winning lens inline (the
-    fork has happened when the hook returns, nothing was queued) with the
-    whole draft in the instruction; its objections, proactivity's included,
-    go through held.hold and never hold_and_wake; the outcomes carry
-    critique_before_send and lens_selection_before_send; the hook returns
-    None."""
+async def test_chosen_before_send_lens_runs_inline_and_returns_its_objections(tmp_path):
+    """Item 9, as #1149 R1 changed it: on_appraisal_before_send runs the
+    winning lens inline (the fork has happened when the hook returns, nothing
+    was queued) with the whole draft in the instruction; its objections,
+    proactivity's included, come back as a list of strings for appraisal to
+    refuse with, and critique no longer queues them (no held.hold, no
+    hold_and_wake); the outcomes carry critique_before_send and
+    lens_selection_before_send.
+
+    The interim half of the old test (objections queued through held.hold,
+    hook returning None) is the behaviour the design removes."""
     env = await build_critique(
         tmp_path, PresentAppraisal(), chat_text=VERDICT, with_held=True)
     try:
@@ -159,7 +163,9 @@ async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_p
         result = await env.plugin.on_appraisal_before_send(
             channel=env.channel, trace_id="kb9", text=DRAFT, annotations={},
             lenses={"proactivity": 0.8, "none": 0.2})
-        assert result is None
+        # The objection is handed back as text, for appraisal to refuse with.
+        assert isinstance(result, list) and len(result) == 1
+        assert OBJECTION_TEXT in result[0]
         # Inline: one fork already ran, under critique's attribution, and
         # nothing waits on the task queue.
         [call] = env.fork_agent.calls
@@ -168,12 +174,9 @@ async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_p
         assert "[Self-critique: proactivity]" in call["instruction"]
         assert ABOUT_TO_SEND in call["instruction"]
         assert " ".join(DRAFT.split()) in call["instruction"]
-        # Queued, not waking: proactivity wakes after the exchange but not
-        # before the send.
+        # Critique does not queue or wake with them itself any more.
         env.held.hold_and_wake.assert_not_awaited()
-        env.held.hold.assert_called_once()
-        entries = env.held.hold.call_args.kwargs["entries"]
-        assert len(entries) == 1 and OBJECTION_TEXT in entries[0]
+        env.held.hold.assert_not_called()
         # Both records, under their own keys.
         outcomes = await _read_outcomes(env.recorder, "kb9")
         before = outcomes["critique_before_send"]
@@ -194,10 +197,9 @@ async def test_chosen_before_send_lens_runs_inline_and_its_objections_wait(tmp_p
 
 async def test_fallback_rate_one_runs_one_lens_at_each_point(tmp_path):
     """Item 11: with no appraisal plugin and critique.fallback_rate 1.0, the
-    gate runs one before-send lens (the draft in the instruction, objections
-    queued, gate returns None) and the finished exchange runs one idle lens.
-    The drawn lens is proactivity, which wakes after the exchange: before
-    the send its finding still only waits (#1192)."""
+    gate runs one before-send lens (the draft in the instruction) and, the
+    lens objecting, refuses the draft (#1149 R9: a Refusal, not the interim
+    queued objection); the finished exchange runs one idle lens."""
     env = await build_critique(
         tmp_path, None, chat_text=VERDICT, with_held=True,
         config={"critique": {"fallback_rate": 1.0}})
@@ -206,11 +208,12 @@ async def test_fallback_rate_one_runs_one_lens_at_each_point(tmp_path):
         env.held.hold = AsyncMock(wraps=env.held.hold)
         env.held.hold_and_wake = AsyncMock()
         await _begin(env, "kf1")
-        assert await _gate(env, trace_id="kf1") is None
+        assert isinstance(await _gate(env, trace_id="kf1"), Refusal)
         [call] = env.fork_agent.calls
         assert ABOUT_TO_SEND in call["instruction"]
         assert "[Self-critique: proactivity]" in call["instruction"]
-        env.held.hold.assert_called_once()
+        # The objection travels in the refusal; the interim held.hold is gone.
+        env.held.hold.assert_not_called()
         env.held.hold_and_wake.assert_not_awaited()
         # A fallback run is not a sample below threshold, at either point.
         outcomes = await _read_outcomes(env.recorder, "kf1")

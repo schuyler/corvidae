@@ -341,13 +341,15 @@ async def test_decline_non_final_or_untraced_draft_forks_and_fires_nothing(
         await _teardown(env)
 
 
-@pytest.mark.parametrize("reason", ["unusable reply", "forks off"])
+@pytest.mark.parametrize("reason", ["unusable reply"])
 async def test_fork_miss_fires_the_hook_with_no_vector_and_warns(
     tmp_path, caplog, reason,
 ):
-    """Item 7: a before-send miss (a reply that is not JSON; forks off for
-    the stage) still fires the hook, once, with lenses=None, and logs a
-    warning naming the trace and the point."""
+    """Item 7: a before-send miss (a reply that is not JSON) still fires the
+    hook, once, with lenses=None, and logs a warning naming the trace and the
+    point. The "forks off" case is gone (#1149 R10): forks off for the stage
+    is stated once at startup and logs no WARNING per final
+    (tests/cognition/test_presend_hooks.py)."""
     env, spy = await _before_send_env(tmp_path, chat_text="not json at all")
     try:
         if reason == "forks off":
