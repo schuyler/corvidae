@@ -169,21 +169,86 @@ async def test_a_logged_out_link_names_the_fix(tmp_path, caplog):
         await sidecar.stop()
 
 
-async def test_a_media_only_message_is_logged_not_silently_dropped(tmp_path, caplog):
-    """v1 carries text only; a caption-less photo must leave a trace."""
+async def test_a_media_only_message_names_the_fetched_file(tmp_path):
+    """get_media's path is named in the text, so a caption-less photo still arrives."""
+    media_dir = tmp_path / "state" / "whatsapp-media"
+    media_dir.mkdir(parents=True)
+    photo = media_dir / "wamid.M1.jpg"
+    photo.write_bytes(b"jpegbytes")
     sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["get_media"] = {
+        "path": str(photo), "kind": "image", "name": "IMG_1.jpg",
+        "size": 9, "mime": "image/jpeg",
+    }
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "media_dir": str(media_dir)}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        await sidecar.notify("message", {
+            "id": "M1", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+            "text": "", "ts": 2,
+            "media": [{"kind": "image", "name": "IMG_1.jpg", "mime": "image/jpeg", "size": 9}],
+        })
+        await _wait_for(lambda: bool(recorder.messages))
+        assert recorder.messages[0][2] == f"[image: {photo}]"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_media_path_outside_the_root_is_refused(tmp_path, caplog):
+    """The sidecar's path is untrusted: anything outside media_dir never reaches the text."""
+    media_dir = tmp_path / "state" / "whatsapp-media"
+    media_dir.mkdir(parents=True)
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["get_media"] = {
+        "path": "/etc/passwd", "kind": "image", "name": "x", "size": 1, "mime": "image/png",
+    }
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(
+        tmp_path, config={"whatsapp": {"socket": str(tmp_path / "whatsapp.sock"),
+                                       "media_dir": str(media_dir)}},
+    )
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.WARNING, logger="corvidae.whatsapp"):
+            await sidecar.notify("message", {
+                "id": "M3", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+                "text": "look", "ts": 3,
+                "media": [{"kind": "image", "name": "x", "mime": "image/png", "size": 1}],
+            })
+            await _wait_for(lambda: bool(recorder.messages))
+        text = recorder.messages[0][2]
+        assert "/etc/passwd" not in text
+        assert "refused" in text
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_media_unavailable_is_named_by_state(tmp_path):
+    """-32003 means bytes are unavailable, not pair/wait: the note says which state."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["get_media"] = (
+        "error",
+        {"code": -32003, "message": "too large", "data": {
+            "state": "too_large", "fix": "none"}},
+    )
     await sidecar.start()
     plugin, recorder, _pm = await _plugin(tmp_path)
     try:
         await _wait_for(lambda: plugin._client is not None)
-        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
-            await sidecar.notify("message", {
-                "id": "M1", "chat_jid": CHAT, "sender_jid": CHAT,
-                "from_me": False, "text": "", "ts": 2, "media": {"type": "image"},
-            })
-            await asyncio.sleep(0.1)
-        assert recorder.messages == []
-        assert any("no text" in r.getMessage() for r in caplog.records)
+        await sidecar.notify("message", {
+            "id": "M4", "chat_jid": CHAT, "sender_jid": CHAT, "from_me": False,
+            "text": "big one", "ts": 4,
+            "media": [{"kind": "document", "name": "a.zip", "mime": None, "size": 99999999}],
+        })
+        await _wait_for(lambda: bool(recorder.messages))
+        assert "[document: unavailable (too_large)]" in recorder.messages[0][2]
+        assert recorder.messages[0][2].endswith("big one")
     finally:
         await plugin.on_stop()
         await sidecar.stop()

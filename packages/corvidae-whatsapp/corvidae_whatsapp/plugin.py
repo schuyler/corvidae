@@ -16,6 +16,8 @@ import collections
 import logging
 import time
 
+from pathlib import Path
+
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage
@@ -39,6 +41,13 @@ SEEN_LIMIT = 512
 #: failure warns at once and the rest drop to DEBUG until this elapses.
 RECONNECT_WARN_INTERVAL = 300.0
 
+#: "Session is fine, no bytes" -- not_found / no_media / too_large / unsafe_path.
+MEDIA_UNAVAILABLE = -32003
+
+#: Default directory the sidecar writes inbound media into. The plugin refuses
+#: any path outside it, so a sidecar bug cannot turn into an arbitrary read.
+DEFAULT_MEDIA_DIR = "state/whatsapp-media"
+
 
 class WhatsAppPlugin(TransportPlugin):
     """The WhatsApp transport.
@@ -54,6 +63,7 @@ class WhatsAppPlugin(TransportPlugin):
 
     def __init__(self) -> None:
         self._socket_path: str | None = None
+        self._media_root: Path = Path(DEFAULT_MEDIA_DIR)
         self._client: SidecarClient | None = None
         self._connect_task: asyncio.Task | None = None
         self._session_state: str = "unknown"
@@ -79,7 +89,14 @@ class WhatsAppPlugin(TransportPlugin):
                 "whatsapp: config field 'socket' must be a non-empty path, "
                 f"got {socket_path!r}"
             )
+        media_dir = block.get("media_dir", DEFAULT_MEDIA_DIR)
+        if not isinstance(media_dir, str) or not media_dir:
+            raise ValueError(
+                "whatsapp: config field 'media_dir' must be a non-empty path, "
+                f"got {media_dir!r}"
+            )
         self._socket_path = socket_path
+        self._media_root = Path(media_dir)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -210,11 +227,14 @@ class WhatsAppPlugin(TransportPlugin):
         if not chat_jid:
             logger.warning("whatsapp: message without a chat_jid; dropping")
             return
+        # Media is fetched on demand and named in the text, the way the Signal
+        # transport does it: the agent gets a path it can open with its own tools.
+        note = await self._describe_media(message, chat_jid)
+        if note:
+            text = f"{note}\n{text}" if text.strip() else note
         if not text.strip():
-            # v1 carries text only; media-only messages are named rather than
-            # silently dropped, so the gap is visible in the log.
             logger.info(
-                "whatsapp: message in %s carries no text (media is not carried yet);"
+                "whatsapp: message in %s carries neither text nor media;"
                 " nothing was sent to the agent", chat_jid,
             )
             return
@@ -232,11 +252,62 @@ class WhatsAppPlugin(TransportPlugin):
         # (hooks.py#guarded) swallows a raising implementation, so this line runs
         # even when the hand-over failed and a replay is then suppressed. That is
         # the deliberate direction -- a duplicate turn is worse than a lost one,
-        # and an implementation that raised has usually seen the message.
+        # and an implementation that raised has usually seen the message. Each
+        # notification runs in its own task (sidecar.py), so two in flight can
+        # reach here out of order; the id set is per-wamid and order-free.
         if wamid:
             self._seen[wamid] = None
             while len(self._seen) > SEEN_LIMIT:
                 self._seen.popitem(last=False)
+
+    async def _describe_media(self, message: dict, chat_jid: str) -> str:
+        """Fetch this message's media and render it as a text prefix.
+
+        One line per outcome, always naming the kind, so the agent can tell a
+        missing file from a refused one. The sidecar's ``path`` is untrusted
+        input one hop later: anything outside the media root is refused here,
+        before it can reach a tool that opens files.
+        """
+        items = message.get("media") or []
+        if not items or self._client is None:
+            return ""
+        wamid = message.get("id")
+        kind = items[0].get("kind") or "file"
+        extra = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+        try:
+            reply = await self._client.call(
+                "get_media", {"chat_jid": chat_jid, "id": wamid},
+            )
+        except SidecarError as exc:
+            if exc.code == MEDIA_UNAVAILABLE:
+                logger.info(
+                    "whatsapp: media in %s unavailable (%s); %s",
+                    chat_jid, exc.state, exc.fix,
+                )
+                return f"[{kind}{extra}: unavailable ({exc.state})]"
+            self._log_sidecar_error(f"get_media on {chat_jid}", exc)
+            return f"[{kind}{extra}: fetch failed]"
+        path = (reply or {}).get("path")
+        if not path:
+            logger.warning(
+                "whatsapp: get_media for %s answered without a path; treating it as a miss",
+                wamid,
+            )
+            return f"[{kind}{extra}: fetch failed]"
+        if not self._within_media_root(path):
+            logger.warning(
+                "whatsapp: sidecar returned a media path outside %s; refusing it",
+                self._media_root,
+            )
+            return f"[{kind}{extra}: refused, path outside the media root]"
+        return f"[{kind}{extra}: {path}]"
+
+    def _within_media_root(self, path: str) -> bool:
+        """True only for a path that resolves inside the configured media root."""
+        try:
+            return Path(path).resolve().is_relative_to(self._media_root.resolve())
+        except OSError:
+            return False
 
     # Outbound ---------------------------------------------------------------
 

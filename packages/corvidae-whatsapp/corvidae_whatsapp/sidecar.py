@@ -80,6 +80,8 @@ class SidecarClient:
         self._pending: dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._read_task: asyncio.Task | None = None
+        #: In-flight notification handlers, kept referenced until they finish.
+        self._tasks: set[asyncio.Task] = set()
 
     async def connect(self) -> None:
         """Open the socket and start the read loop."""
@@ -125,17 +127,25 @@ class SidecarClient:
             if "id" in payload and ("result" in payload or "error" in payload):
                 self._settle(payload)
             elif "method" in payload:
-                try:
-                    await self._on_notification(payload["method"], payload.get("params") or {})
-                except Exception:
-                    # A plugin failure must not stop the read loop: the next
-                    # reply would otherwise hang behind it.
-                    logger.warning(
-                        "whatsapp: notification %s was not handled", payload.get("method"),
-                        exc_info=True,
-                    )
+                # Handled in its own task: a notification handler that calls
+                # `call()` would otherwise deadlock, because the reply it waits
+                # for is read by this same loop.
+                task = asyncio.create_task(
+                    self._guarded_notification(payload["method"], payload.get("params") or {})
+                )
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             else:
                 logger.warning("whatsapp: sidecar sent an object that is neither reply nor notification")
+
+    async def _guarded_notification(self, method: str, params: dict) -> None:
+        """Run one handler, logging its failure instead of losing the loop."""
+        try:
+            await self._on_notification(method, params)
+        except Exception:
+            # A plugin failure must not stop the read loop: the next reply
+            # would otherwise hang behind it.
+            logger.warning("whatsapp: notification %s was not handled", method, exc_info=True)
 
     def _settle(self, payload: dict) -> None:
         """Resolve or reject the request waiting on this reply."""
