@@ -597,14 +597,16 @@ class TestMaxToolCallsPerTurn:
         with pytest.raises(TypeError) as exc:
             await plugin._handle_response(
                 result=result, channel=channel, max_turns_limit=10,
-                request_text="go", item=None, max_tool_calls=3,
+                request_text="go", max_tool_calls=3,
             )
-        # A bare pytest.raises(TypeError) would also pass if the call were
-        # malformed for an unrelated reason (a missing or misspelled argument).
-        # item has a default and the method takes no **kwargs, so the only
-        # remaining source is the retired keyword — pin that.
+        # Pin the source of the TypeError, not just its type: name the callee so
+        # a TypeError raised inside the body (or by a nested call) cannot count
+        # as this one. item is left out on purpose — it has a default, so
+        # passing it explicitly proved nothing.
         msg = str(exc.value)
-        assert "unexpected keyword argument" in msg and "max_tool_calls" in msg
+        assert "unexpected keyword argument" in msg, msg
+        assert "max_tool_calls" in msg, msg
+        assert "_handle_response" in msg, msg
 
     async def test_no_limit_dispatches_all(self, plugin_and_channel):
         """limit=None (the default) -> every call is dispatched."""
