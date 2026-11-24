@@ -606,7 +606,11 @@ class TestMaxToolCallsPerTurn:
         msg = str(exc.value)
         assert "unexpected keyword argument" in msg, msg
         assert "max_tool_calls" in msg, msg
-        assert "_handle_response" in msg, msg
+        # Qualified with the class and the call parens: a bare "_handle_response"
+        # would also match a TypeError raised by a nested function whose name
+        # merely contains it. Not pinned to `Agent.` alone being enough — the
+        # unique-kwarg assert above is what really excludes other call sites.
+        assert "Agent._handle_response() got" in msg, msg
 
     async def test_no_limit_dispatches_all(self, plugin_and_channel):
         """limit=None (the default) -> every call is dispatched."""
