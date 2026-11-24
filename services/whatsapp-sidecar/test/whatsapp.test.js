@@ -46,6 +46,10 @@ function fakeSocket() {
 function makeAdapter(sock) {
   const logs = { warnings: [], infos: [] };
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     logger: {
       info: (m) => logs.infos.push(m),
@@ -311,6 +315,10 @@ test("a network drop tells the transport to wait, not to re-pair", async () => {
 test("a session that never had credentials is reported as needing pairing", async () => {
   const sock = fakeSocket();
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     fetchVersion: async () => ({ version: [2, 3000, 102] }),
@@ -320,13 +328,18 @@ test("a session that never had credentials is reported as needing pairing", asyn
   await adapter.start();
   sock.handlers["connection.update"]({
     connection: "close",
-    lastDisconnect: { error: { output: { statusCode: 515 } } },
+    lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
   });
   await assert.rejects(
     () => adapter.sendText({ chat_jid: "5554444@s.whatsapp.net", text: "y" }),
     (error) => {
       assert.equal(error.code, NOT_LINKED);
-      assert.deepEqual(error.data, { state: "unpaired", fix: "pair" });
+      // `loggedOut`, not `unpaired`: this fixture synthesizes a real logout, and the
+      // assertion used to read `unpaired` only because the close carried 515
+      // (restartRequired) instead of DisconnectReason.loggedOut (401), so the code took
+      // the restart path with hadCreds=false. Same operator advice either way
+      // (fix:"pair"), but the state is a contract the transport reads, so it is pinned
+      // to what actually happened.      assert.deepEqual(error.data, { state: "loggedOut", fix: "pair" });
       return true;
     },
   );
@@ -403,6 +416,10 @@ test("an unpaired state reconnects for pair(), and keeps the re-pair advice for 
 // branches on, fix 'wait', and wording that names the socket.
 test("pairSocketError names the socket, answers -32002, and says wait", () => {
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     fetchVersion: async () => ({ version: [2, 3000, 102] }),
@@ -417,6 +434,10 @@ test("pairSocketError names the socket, answers -32002, and says wait", () => {
 
 test("pair() on a stopped adapter rejects with that error, not a connect attempt", async () => {
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     fetchVersion: async () => ({ version: [2, 3000, 102] }),
@@ -457,6 +478,10 @@ test("the first reconnect after a fresh pairing says reconnecting, not unpaired"
   // session is fine and already retrying.
   const sock = fakeSocket();
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     fetchVersion: async () => ({ version: [2, 3000, 102] }),
@@ -469,7 +494,10 @@ test("the first reconnect after a fresh pairing says reconnecting, not unpaired"
   assert.equal(adapter.status().linked, true);
   sock.handlers["connection.update"]({
     connection: "close",
-    lastDisconnect: { error: { output: { statusCode: 515 } } },
+    // restartRequired (515), not loggedOut: this fixture is about a drop that KEEPS
+    // the session. A logout here would correctly report loggedOut and send the
+    // operator to pair, which is the other test's subject.
+    lastDisconnect: { error: { output: { statusCode: DisconnectReason.restartRequired } } },
   });
   assert.equal(adapter.status().state, "reconnecting");
   await adapter.close();
@@ -483,6 +511,10 @@ test("an attachment the account itself sent is served from the upsert cache", as
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-fromme-"));
   const sock = fakeSocket();
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "/tmp/unused",
     mediaDir: dir,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -520,6 +552,10 @@ test("a locally generated registrationId is not a linked session", async () => {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-nocreds-"));
   const sock = fakeSocket();
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: dir,
     mediaDir: dir,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -552,3 +588,72 @@ test("a locally generated registrationId is not a linked session", async () => {
   await adapter.close();
   await fs.promises.rm(dir, { recursive: true, force: true });
 });
+
+test("the session marker, not creds, is what survives a restart", async () => {
+  // requestPairingCode writes creds.me locally (socket.js:596-612), so an abandoned
+  // pairing used to look like a session after a restart: linked, hadCreds, and a
+  // failed connect reported reconnecting/fix:"wait" instead of unpaired/fix:"pair".
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-marker-"));
+  const marker = path.join(dir, "whatsapp-session.json");
+  const authDir = path.join(dir, "auth");
+  await fs.promises.mkdir(authDir, { recursive: true });
+  // A directory holding a completed pairing's creds -- including the `me` that a
+  // mere pairing REQUEST also creates, which is the whole trap.
+  const creds = { registrationId: 7, me: { id: "5550000@s.whatsapp.net", name: "~" } };
+  const injected = async () => ({ state: { creds }, saveCreds: async () => {} });
+
+  let live;
+  const build = () =>
+    new WhatsAppAdapter({
+      authDir,
+      mediaDir: dir,
+      sessionMarker: marker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      fetchVersion: async () => ({ version: [2, 3000, 102] }),
+      socketFactory: () => { live = fakeSocket(); return live; },
+      authState: creds,
+      mediaDownloader: async () => Buffer.from("x"),
+    });
+
+  // 1. No marker: creds alone must not be believed.
+  const fresh = build();
+  await fresh.start();
+  assert.equal(fresh.status().linked, false, "creds with an me are not a session");
+  const sock = (await new Promise(r=>setTimeout(r,0)), live);
+  sock.handlers["connection.update"]({ connection: "close", lastDisconnect: { error: new Error("stream end") } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(fresh.status().state, "unpaired");
+  await fresh.close();
+  assert.ok(!(await fs.promises.stat(marker).then(() => true, () => false)), "never opened, no marker");
+
+  // 2. An open writes the marker, mode 0600.
+  const second = build();
+  await second.start();
+  live.handlers["connection.update"]({ connection: "open", self: { jid: "5550000@s.whatsapp.net" } });
+  await new Promise((r) => setTimeout(r, 30));
+  const info = await fs.promises.stat(marker);
+  assert.equal(info.mode & 0o777, 0o600, `marker mode ${(info.mode & 0o777).toString(8)}`);
+  assert.equal(second.status().linked, true);
+  // 3. A later drop now says reconnecting/wait, correctly, because the marker is there.
+  live.handlers["connection.update"]({ connection: "close", lastDisconnect: { error: new Error("stream end") } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(second.status().state, "reconnecting");
+  // 4. Logout deletes it, so the next start asks for a pairing code again.
+  live.handlers["connection.update"]({
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(second.status().state, "loggedOut");
+  assert.ok(!(await fs.promises.stat(marker).then(() => true, () => false)), "logout must not leave the marker");
+  await second.close();
+
+  const after = build();
+  await after.start();
+  live.handlers["connection.update"]({ connection: "close", lastDisconnect: { error: new Error("stream end") } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(after.status().state, "unpaired", "after logout, a restart asks to pair again");
+  await after.close();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});
+

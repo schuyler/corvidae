@@ -188,6 +188,7 @@ export class WhatsAppAdapter {
     fetchVersion = null,
     socketFactory = makeWASocket,
     authState = null,
+    sessionMarker = null,
     mediaDir = DEFAULT_MEDIA_DIR,
     maxMediaBytes = DEFAULT_MAX_MEDIA_BYTES,
     mediaDownloader = null,
@@ -210,6 +211,10 @@ export class WhatsAppAdapter {
     // | 'loggedOut' | 'stopped' — surfaced to the transport as error.data.state.
     this.state = "not_started";
     this.hadCreds = false;
+    // Where "this account has opened a session at least once" is recorded. Defaults
+    // beside the auth dir so the installer's 0700 state directory covers it.
+    this.sessionMarker =
+      sessionMarker ?? path.join(path.resolve(authDir), "session.json");
     this.attempt = 0;
     this.timer = null;
     this.creds = null;
@@ -245,8 +250,19 @@ export class WhatsAppAdapter {
     // "unpaired"/fix:"pair" -- the daemon retried forever and never told the
     // operator to pair. Measured live: an empty auth dir gave
     // {"linked":true,"state":"connecting"} at 02:40:38Z.
-    this.linked = Boolean(state.creds?.me?.id);
-    this.hadCreds = this.linked;
+    // Neither stored field proves a session. `registrationId` is minted locally for
+    // an empty directory, and `creds.me` is written by requestPairingCode itself,
+    // BEFORE the network confirms anything -- lib/Socket/socket.js:596-612 in
+    // 7.0.0-rc14 sets {id: jidEncode(phone,...), name: '~'} and emits creds.update.
+    // So an abandoned pairing leaves an `me` behind and would claim a link with no
+    // session behind it. `linked` is therefore a runtime fact (only
+    // connection.update{open} sets it), and "we had a session before this process"
+    // comes from a marker this file writes on first open and deletes on logout.
+    // No migration shim for older installs: nothing has ever been paired with this
+    // sidecar (the auth dir was empty when measured), so there is no legacy marker
+    // to guess about.
+    this.linked = false;
+    this.hadCreds = fs.existsSync(this.sessionMarker);
     this.state = "connecting";
     if (state.creds?.me?.id) this.selfJid = jidNormalizedUser(state.creds.me.id);
 
@@ -283,6 +299,10 @@ export class WhatsAppAdapter {
         // transport tells the operator to pair again -- while the link is fine.
         this.hadCreds = true;
         this.state = "linked";
+        // Persist the fact, not a hint. Written here and nowhere else, so a restart
+        // can tell "paired before" from "pairing abandoned" without reading a
+        // Baileys-internal sentinel.
+        this.#writeSessionMarker();
         this.attempt = 0;
         this.log.info?.("whatsapp: linked");
         this.notify({
@@ -300,6 +320,10 @@ export class WhatsAppAdapter {
           this.stopped = true;
           this.linked = false;
           this.state = "loggedOut";
+          // Alfred's bound on the marker: a logout that leaves it behind says
+          // "session before" on the next start and lands the operator on
+          // reconnecting/wait instead of pair.
+          fs.promises.unlink(this.sessionMarker).catch(() => {});
           this.log.warn?.("whatsapp: logged out — re-pair with `npm run pair`");
           this.notify({
             jsonrpc: "2.0",
@@ -422,6 +446,16 @@ export class WhatsAppAdapter {
   // wire, so this is the only way to reach a message we did not see live.
   // UNVERIFIED: the getMessage key shape and whether a linked-but-idle socket
   // answers it at all. A throw here is a miss, not a failure.
+  // Lives next to the auth dir, not inside it: useMultiFileAuthState treats every
+  // file in the auth directory as a creds key, so a marker in there would be read
+  // back into the credential object and could be pruned by its writer.
+  #writeSessionMarker() {
+    const payload = JSON.stringify({ paired_at: new Date().toISOString(), self_jid: this.selfJid }) + "\n";
+    return fs.promises
+      .writeFile(this.sessionMarker, payload, { mode: 0o600 })
+      .catch((error) => this.log.warn?.(`whatsapp: could not write the session marker: ${error.message}`));
+  }
+
   async #lookupRaw(chatJid, id) {
     // There is no Baileys call that fetches one message by id. `getMessage` is a
     // makeWASocket CONFIG callback (Types/Socket.d.ts), not a socket method -- the

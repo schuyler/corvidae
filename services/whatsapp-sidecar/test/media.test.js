@@ -40,6 +40,10 @@ function protoWith(field, extra = {}) {
 function adapterWith({ mediaDir, downloader, sock = {}, state = "linked", socketFactory }) {
   const quiet = { info() {}, warn() {}, error() {} };
   const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"),
     authDir: "unused",
     mediaDir,
     logger: quiet,
@@ -438,7 +442,11 @@ test("get_media refuses a missing or empty param with the framing code, not -320
 function senderWith({ maxBytes = null, sent = [] }) {
   const quiet = { info() {}, warn() {}, error() {} };
   const sock = { sendMessage: async (jid, payload) => { sent.push({ jid, payload }); return { key: { id: "SENT1" } }; } };
-  const adapter = new WhatsAppAdapter({ authDir: "unused", mediaDir: tmpDirless(), logger: quiet, socketFactory: () => sock });
+  const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"), authDir: "unused", mediaDir: tmpDirless(), logger: quiet, socketFactory: () => sock });
   adapter.state = "linked";
   adapter.sock = sock;
   if (maxBytes !== null) adapter.maxMediaBytes = maxBytes;
@@ -488,7 +496,11 @@ test("send_media reads a directory as not_found rather than throwing EISDIR", as
 test("send_media gates on the session before touching the disk", async (t) => {
   const dir = tmpDir(t);
   const quiet = { info() {}, warn() {}, error() {} };
-  const adapter = new WhatsAppAdapter({ authDir: "unused", mediaDir: dir, logger: quiet, socketFactory: () => ({}) });
+  const adapter = new WhatsAppAdapter({
+      // Each adapter gets its own marker: a shared default path would let one
+      // test's successful open decide the NEXT test's hadCreds, which is the
+      // contamination that made a green suite mean nothing here.
+      sessionMarker: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-mk-")), "session.json"), authDir: "unused", mediaDir: dir, logger: quiet, socketFactory: () => ({}) });
   adapter.state = "unpaired";
   adapter.sock = null;
   let touched = 0;
