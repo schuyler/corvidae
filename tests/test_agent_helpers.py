@@ -582,10 +582,23 @@ class TestMaxToolCallsPerTurn:
             channel=channel,
             max_turns_limit=10,
             request_text="go",
-            max_tool_calls=3,
+            max_tool_calls_per_turn=3,
         )
 
         assert channel.pending_tool_call_ids == {"call-1", "call-2", "call-3"}
+
+    async def test_the_colliding_kwarg_name_is_gone(self, plugin_and_channel):
+        # main already owns a `max_tool_calls` parameter for a different feature
+        # (the fork-dispatch limit). This branch's cap must not be reachable
+        # under that name, or a call site can silently configure the wrong one.
+        plugin, channel, _db = plugin_and_channel
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+        with pytest.raises(TypeError):
+            await plugin._handle_response(
+                result=result, channel=channel, max_turns_limit=10,
+                request_text="go", max_tool_calls=3,
+            )
 
     async def test_no_limit_dispatches_all(self, plugin_and_channel):
         """limit=None (the default) -> every call is dispatched."""
@@ -615,7 +628,7 @@ class TestMaxToolCallsPerTurn:
             channel=channel,
             max_turns_limit=10,
             request_text="go",
-            max_tool_calls=5,
+            max_tool_calls_per_turn=5,
         )
 
         assert len(channel.pending_tool_call_ids) == 5
@@ -639,7 +652,7 @@ class TestMaxToolCallsPerTurn:
                 channel=channel,
                 max_turns_limit=10,
                 request_text="go",
-                max_tool_calls=3,
+                max_tool_calls_per_turn=3,
             )
 
         marker = next(
