@@ -40,6 +40,11 @@ cross-channel-send = [
 vision = [
     "corvidae-vision",
 ]
+# The WhatsApp transport lives in packages/corvidae-whatsapp: the sidecar is a
+# separate process, so the plugin is an extra rather than a kernel transport.
+whatsapp = [
+    "corvidae-whatsapp",
+]
 # A live, read-only view of loaded context windows in the web console
 # (packages/context-panel).
 context-panel = [
@@ -212,4 +217,5 @@ corvidae-core-periphery = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }
 corvidae-planning = { workspace = true }
+corvidae-whatsapp = { workspace = true }
 corvidae-alignment = { workspace = true }
