@@ -96,28 +96,39 @@ def parse_cache_ram(args: list[str]) -> int:
             "positive MiB limit in the model preset (the server default is "
             "not reported, and residency arithmetic needs a finite limit)"
         )
-    if dangling:
-        raise ValueError(
-            f"--cache-ram requires a value (a positive MiB limit) at argument "
-            f"position {dangling[0]} of {len(args)}; it was given without one"
-        )
 
+    # Report every problem at once: separate branches meant
+    # `--cache-ram=abc --cache-ram` named only the dangling flag, so fixing it
+    # and rerunning landed on `abc`.
+    problems: list[str] = []
+    if dangling:
+        positions = ", ".join(str(i) for i in dangling)
+        plural = "" if len(dangling) == 1 else "s"
+        # "requires a value" is kept verbatim: earlier tests pin that phrase, and
+        # dropping it to satisfy a new wording would be silently weakening a
+        # contract the operator already reads.
+        problems.append(
+            f"dangling at argument position{plural} {positions}, which requires "
+            "a value (a positive MiB limit)"
+        )
     bad = [v for v in values if not _is_int(v)]
     if bad:
-        named = ", ".join(repr(v) for v in bad)
-        raise ValueError(
-            f"--cache-ram is {named}, not an integer; set a positive MiB limit "
-            "in the model preset"
+        problems.append(f"{', '.join(repr(v) for v in bad)} not an integer")
+    if problems:
+        # The preset remedy applies to a wrong value, not to a flag that was
+        # given without one; tests pin that a dangling message never points at
+        # the preset, because that sends the operator to the wrong file.
+        remedy = (
+            "; set a positive MiB limit in the model preset" if bad else ""
         )
-    numbers = [int(v) for v in values]
-    non_positive = [v for v in numbers if v <= 0]
+        raise ValueError("--cache-ram: " + "; and ".join(problems) + remedy)
+    non_positive = [v for v in values if int(v) <= 0]
     if non_positive:
         raise ValueError(
-            f"--cache-ram is {', '.join(str(v) for v in non_positive)}; set a "
-            "positive MiB limit in the model preset (the residency arithmetic "
-            "needs a finite limit)"
+            f"--cache-ram is {', '.join(non_positive)}; set a positive MiB limit "
+            "in the model preset (the residency arithmetic needs a finite limit)"
         )
-    value = numbers[0]
+    value = int(values[0])
     if value <= 0:
         raise ValueError(
             f"--cache-ram is {value}; set a positive MiB limit in the model "

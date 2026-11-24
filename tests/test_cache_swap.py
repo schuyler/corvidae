@@ -611,3 +611,33 @@ def test_parse_cache_ram_reports_every_offending_occurrence():
     with pytest.raises(ValueError) as exc:
         parse_cache_ram(["--cache-ram=abc", "--cache-ram=def"])
     assert "abc" in str(exc.value) and "def" in str(exc.value)
+
+
+def test_parse_cache_ram_names_both_a_bad_value_and_a_dangling_flag():
+    # Round 4: bad values and dangling flags were reported in separate branches,
+    # so `--cache-ram=abc --cache-ram` named only the dangling one and an
+    # operator fixing it would rerun straight into `abc`.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram=abc", "--cache-ram"])
+    msg = str(exc.value)
+    # Parenthesised deliberately: `A and B or C` made this pass on a message
+    # that named neither offender (the old text matched "without" in
+    # "it was given without one" and short-circuited the rest).
+    assert "abc" in msg, f"bad value not named: {msg}"
+    assert "dangling" in msg.lower(), f"dangling flag not named: {msg}"
+
+
+@pytest.mark.parametrize(
+    "argv,offender",
+    [
+        (["--cache-ram", "--foo", "--cache-ram=8192"], "--foo"),
+        (["--cache-ram=4096", "--cache-ram="], "''"),
+        (["--cache-ram=4096", "--cache-ram=abc"], "abc"),
+    ],
+)
+def test_parse_cache_ram_message_names_the_offending_token(argv, offender):
+    # A message that only says "--cache-ram" is wrong does not say WHICH one;
+    # with several occurrences the operator has to find it by hand.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(argv)
+    assert offender in str(exc.value)
