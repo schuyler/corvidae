@@ -77,6 +77,11 @@ if [ ! -x "$HOME/.local/bin/npm" ] && command -v npm >/dev/null 2>&1; then
     ln -sfn "$(command -v npm)" "$HOME/.local/bin/npm"
 fi
 
+if [ "${SIDECAR_SKIP_INSTALL:-0}" != "1" ] && [ ! -x "$HOME/.local/bin/npm" ]; then
+    echo "npm is not available at $HOME/.local/bin/npm or on PATH; the install needs it." >&2
+    exit 1
+fi
+
 # npm's shebang is #!/usr/bin/env node, so invoking npm by absolute path with a
 # node that is not on PATH resolves some other node -- or none. Reproduced:
 # with a bare PATH the install died with "env: 'node': No such file or directory"
@@ -95,27 +100,36 @@ echo "node $("$HOME/.local/bin/node" -v) at $HOME/.local/bin/node"
 # npm ci, never npm install: package.json declares a caret range
 # (^7.0.0-rc14), so npm install is free to resolve a newer RC and the session
 # format may not survive it. npm ci refuses to deviate from the lock.
+#
+# SIDECAR_SKIP_INSTALL=1 skips the network install and the suite, and nothing
+# else. It exists for test/installer.test.js, which drives unit generation with
+# stubbed systemd commands and would otherwise rebuild node_modules once per
+# mutant. Do not use it to install for real.
 cd "$SIDEAR_DIR"
-echo "Installing dependencies from package-lock.json (npm ci)..."
-"$HOME/.local/bin/npm" ci --no-audit --no-fund
+if [ "${SIDECAR_SKIP_INSTALL:-0}" = "1" ]; then
+    echo "SIDECAR_SKIP_INSTALL=1: skipping npm ci and the suite (test mode)"
+else
+    echo "Installing dependencies from package-lock.json (npm ci)..."
+    "$HOME/.local/bin/npm" ci --no-audit --no-fund
 
-RESOLVED="$("$HOME/.local/bin/node" -p \
-  "require('./node_modules/@whiskeysockets/baileys/package.json').version" 2>/dev/null || echo unknown)"
-echo "@whiskeysockets/baileys resolved to $RESOLVED (transport tested against $EXPECTED_BAILEYS)"
-if [ "$RESOLVED" != "$EXPECTED_BAILEYS" ]; then
-    echo "WARNING: resolved version differs from the tested one." >&2
-    echo "  Re-run the suite before pairing, and expect the auth dir to be" >&2
-    echo "  rebuilt if the session format changed." >&2
-fi
+    RESOLVED="$("$HOME/.local/bin/node" -p \
+      "require('./node_modules/@whiskeysockets/baileys/package.json').version" 2>/dev/null || echo unknown)"
+    echo "@whiskeysockets/baileys resolved to $RESOLVED (transport tested against $EXPECTED_BAILEYS)"
+    if [ "$RESOLVED" != "$EXPECTED_BAILEYS" ]; then
+        echo "WARNING: resolved version differs from the tested one." >&2
+        echo "  Re-run the suite before pairing, and expect the auth dir to be" >&2
+        echo "  rebuilt if the session format changed." >&2
+    fi
 
-# --- The suite has to pass before anything is installed ------------------
-# These tests need no network: a scripted adapter stands in for WhatsApp, so a
-# failure here is a broken install, not a connectivity problem. Installing a
-# unit around a failing suite would move the debugging into the journal.
-echo "Running the offline suite (npm test)..."
-if ! "$HOME/.local/bin/npm" test --silent; then
-    echo "suite failed -- nothing installed. Fix the tree before pairing." >&2
-    exit 1
+    # --- The suite has to pass before anything is installed --------------
+    # These tests need no network: a scripted adapter stands in for WhatsApp, so a
+    # failure here is a broken install, not a connectivity problem. Installing a
+    # unit around a failing suite would move the debugging into the journal.
+    echo "Running the offline suite (npm test)..."
+    if ! "$HOME/.local/bin/npm" test --silent; then
+        echo "suite failed -- nothing installed. Fix the tree before pairing." >&2
+        exit 1
+    fi
 fi
 
 # --- Credential and media directories ------------------------------------
