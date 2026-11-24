@@ -446,9 +446,6 @@ export class WhatsAppAdapter {
   // wire, so this is the only way to reach a message we did not see live.
   // UNVERIFIED: the getMessage key shape and whether a linked-but-idle socket
   // answers it at all. A throw here is a miss, not a failure.
-  // Lives next to the auth dir, not inside it: useMultiFileAuthState treats every
-  // file in the auth directory as a creds key, so a marker in there would be read
-  // back into the credential object and could be pruned by its writer.
   #writeSessionMarker() {
     const payload = JSON.stringify({ paired_at: new Date().toISOString(), self_jid: this.selfJid }) + "\n";
     return fs.promises
