@@ -605,7 +605,11 @@ class TestMaxToolCallsPerTurn:
         # passing it explicitly proved nothing.
         msg = str(exc.value)
         assert "unexpected keyword argument" in msg, msg
-        assert "max_tool_calls" in msg, msg
+        # Quoted, deliberately: `max_tool_calls` is a substring of
+        # `max_tool_calls_per_turn`, so an unquoted check also passes when the
+        # NEW name is the one that leaked into the retired parameter. Python
+        # reprs the keyword in the message, so the quotes are free to match.
+        assert "'max_tool_calls'" in msg, msg
         # Qualified with the class and the call parens: a bare "_handle_response"
         # would also match a TypeError raised by a nested function whose name
         # merely contains it. Not pinned to `Agent.` alone being enough — the
