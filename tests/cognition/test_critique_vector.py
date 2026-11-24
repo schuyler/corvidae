@@ -233,6 +233,36 @@ class TestSelection:
         finally:
             await _teardown(env)
 
+    async def test_the_selection_is_logged_not_only_recorded(self, tmp_path, caplog):
+        """#377: an operator asking "why no lens" can answer it from the log."""
+        env = await _env(tmp_path, _lens("mine"))
+        try:
+            with caplog.at_level("INFO", logger="corvidae.critique"):
+                await _judged_turn(env, "kt2log", {"mine": 0.2, "none": 0.8})
+            lines = [r.getMessage() for r in caplog.records
+                     if "critique lens selection" in r.getMessage()]
+            assert len(lines) == 1, lines
+            assert "none" in lines[0]
+            assert "kt2log" in lines[0]
+            assert "mine" in lines[0], "the offer is named, so the reader sees what lost"
+        finally:
+            await _teardown(env)
+
+    async def test_a_stage2_without_past_claims_says_provenance_skipped(
+        self, tmp_path, caplog
+    ):
+        """#377: silence read as a bug; one debug line says why provenance did not run."""
+        env = await _env(tmp_path, _lens("mine"))
+        try:
+            with caplog.at_level("DEBUG", logger="corvidae.critique"):
+                await _judged_turn(env, "kt2prov", {"mine": 0.2, "none": 0.8})
+            lines = [r.getMessage() for r in caplog.records
+                     if "provenance skipped" in r.getMessage()]
+            assert lines, caplog.text
+            assert any("no past claims" in m or "no vector" in m for m in lines), lines
+        finally:
+            await _teardown(env)
+
     async def test_lenses_share_one_fork_in_offer_order(self, tmp_path):
         """T1 (was: the earliest lens wins a tie between lenses): two lenses
         tied above "none" are both selected, in one fork, in offer order: the

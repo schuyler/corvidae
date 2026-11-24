@@ -192,6 +192,9 @@ class TestStartupReport:
         assert "planning" in message
         assert "goals" in message
         assert "goal list" in message
+        # The name an operator puts under plugins.disabled is the entry-point
+        # name (#1110), not the long module name.
+        assert "list planning under plugins.disabled" in message
 
     async def test_goals_loaded_logs_nothing(self, goals, caplog):
         planning = _planning(goals)
@@ -214,3 +217,18 @@ class TestGoalsImplementsTheHook:
             report_orphan_hookimpls(goals.pm)
         about_hook = [r for r in caplog.records if HOOK in r.getMessage()]
         assert [r.levelno for r in about_hook] == [logging.DEBUG]
+
+
+def test_entry_point_exists():
+    """The lens registers by its short role name, like every other plugin (#1110)."""
+    from importlib.metadata import entry_points
+
+    eps = entry_points(group="corvidae")
+    names = [ep.name for ep in eps]
+    assert "planning" in names, f"planning entry point missing; found: {names}"
+    assert "corvidae_planning" not in names, (
+        "the long name is what #1110 replaced; an operator's disable list matches "
+        f"the entry-point name; found: {names}"
+    )
+    ep = next(ep for ep in eps if ep.name == "planning")
+    assert ep.value == "corvidae_planning:PlanningLensPlugin"

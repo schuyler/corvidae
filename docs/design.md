@@ -5259,7 +5259,7 @@ are reported at `DEBUG` and nothing runs; without goals the fork runs
 without the list, and planning's `on_start` logs one INFO line saying so.
 Goals lists `corvidae_planning` in its own `optional_depends_on`, so with
 planning absent its implementation of the hook is reported at `DEBUG`. Install the
-planning extra to load it, list `corvidae_planning` under
+planning extra to load it, list `planning` under
 `plugins.disabled` to switch it off, and override the brief with
 `critique.lens.planning.fork_prompt`.
 

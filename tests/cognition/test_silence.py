@@ -114,13 +114,14 @@ async def _prompt_pm(config: dict | None = None):
     """A manager with the real SilencePlugin and every real transport; the
     web plugin is enabled so it owns its channel. ``config`` reaches the
     plugin's on_init."""
+    from corvidae_cognition.silence import SilencePlugin
+
     from corvidae.channels.acp import AcpPlugin
     from corvidae.channels.cli import CLIPlugin
     from corvidae.channels.discord import DiscordPlugin
     from corvidae.channels.irc import IRCPlugin
     from corvidae.channels.signal import SignalPlugin
     from corvidae.channels.web import WebPlugin
-    from corvidae_cognition.silence import SilencePlugin
 
     pm = create_plugin_manager()
     silence = SilencePlugin()
@@ -271,6 +272,25 @@ def _channel_ending_in(final_type: MessageType) -> Channel:
     return channel
 
 
+async def _respond_for(
+    silence, channel, trace_id: str, final_type: MessageType, response_text: str
+) -> None:
+    """Fire on_agent_response for one trace on an already-built plugin.
+
+    The channel's newest assistant row decides whether the final was withheld,
+    so it is set here rather than assumed from the channel's transport.
+    """
+    channel.conversation = _channel_ending_in(final_type).conversation
+    await silence.on_agent_response(
+        channel=channel,
+        request_text="thanks, night!",
+        response_text=response_text,
+        trace_id=trace_id,
+        annotations={},
+        logprobs=None,
+    )
+
+
 async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
     """Fire on_agent_response for a final and return the recorded writes."""
     from corvidae_cognition.silence import SilencePlugin
@@ -363,10 +383,11 @@ async def _tool_pm(mode: str | None = "tool", outcome_log=None, instruction=None
     """A plugin manager with SilencePlugin in ``mode`` and real transports
     (IRC is conversational; the enabled web plugin and the CLI are not),
     plus the plugin and the tools it registered, keyed by name."""
+    from corvidae_cognition.silence import SilencePlugin
+
     from corvidae.channels.cli import CLIPlugin
     from corvidae.channels.irc import IRCPlugin
     from corvidae.channels.web import WebPlugin
-    from corvidae_cognition.silence import SilencePlugin
 
     pm = create_plugin_manager()
     silence = SilencePlugin()
@@ -478,7 +499,9 @@ class TestEndTurnTool:
         log = _StubOutcomeLog()
         _pm, silence, tools = await _tool_pm(outcome_log=log)
 
-        await _call(tools, IRC, trace_id="t-tool", reason=reason)
+        resp = await _call(tools, IRC, trace_id="t-tool", reason=reason)
+        # The row lands when the turn ends, not when the tool runs (#901).
+        await _respond_for(silence, IRC, "t-tool", MessageType.UNSENT, resp)
         await silence.on_stop()
 
         assert len(log.writes) == 1
@@ -509,17 +532,18 @@ class TestEndTurnTool:
         assert log.writes == []
 
     @pytest.mark.parametrize(
-        "reason, final_type, final_text",
+        "reason, final_type, final_text, expected",
         [
             # The guard is membership, not the reason's value: a null reason
             # must not let the echo overwrite the record.
-            (None, MessageType.UNSENT, "NO_REPLY"),
-            # A model that answers anyway still leaves no stale entry.
-            ("done", MessageType.MESSAGE, "Goodnight!"),
+            (None, MessageType.UNSENT, "NO_REPLY", ["tool"]),
+            # A model that answers anyway sends text, so the exchange is not a
+            # decline and records nothing (#901, PRD §3.7 item 5).
+            ("done", MessageType.MESSAGE, "Goodnight!", []),
         ],
     )
-    async def test_the_turns_final_never_overwrites_the_tool_record(
-        self, reason, final_type, final_text
+    async def test_the_turns_final_decides_the_record(
+        self, reason, final_type, final_text, expected
     ):
         log = _StubOutcomeLog()
         pm, silence, tools = await _tool_pm(outcome_log=log)
@@ -535,8 +559,9 @@ class TestEndTurnTool:
         )
         await silence.on_stop()
 
-        assert [w["outcomes"]["silence"] for w in log.writes] == ["tool"]
-        assert silence._ended == set()
+        assert [w["outcomes"]["silence"] for w in log.writes] == expected
+        # Either way the trace is spent: no stale entry leaks to the next final.
+        assert silence._ended == {}
 
 
 class TestEndTurnAtAgentLevel:
@@ -546,10 +571,11 @@ class TestEndTurnAtAgentLevel:
     async def test_end_turn_then_echo_sends_nothing_and_records_the_call(self):
         import asyncio
 
-        from corvidae.hooks import TransportPlugin
         from corvidae_cognition.silence import SilencePlugin
         from helpers import drain_task_queue
         from llm_response_fixtures import _make_tool_call, _make_tool_call_response
+
+        from corvidae.hooks import TransportPlugin
 
         class Chat(TransportPlugin):
             transport = "chat"

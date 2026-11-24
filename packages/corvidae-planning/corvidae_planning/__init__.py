@@ -22,6 +22,7 @@ from corvidae.fork import quote
 from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
 from corvidae_cognition.critique import Lens
 
+
 logger = logging.getLogger(__name__)
 
 # The lens's name: it keys the fork prompt override, the tunables and the
@@ -86,7 +87,7 @@ class PlanningLensPlugin(CorvidaePlugin):
             logger.info(
                 "planning lens: no goals plugin loaded, so planning forks "
                 "run without the goal list; enable goals to list them, or "
-                "list corvidae_planning under plugins.disabled",
+                "list planning under plugins.disabled",
             )
 
     @hookimpl
