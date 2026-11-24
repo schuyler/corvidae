@@ -22,8 +22,6 @@ from corvidae.fork import quote
 from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
 from corvidae_cognition.critique import Lens
 
-from corvidae.fork import quote
-from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger(__name__)
 

@@ -84,7 +84,6 @@ import math
 import re
 import logging
 import random
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
@@ -99,7 +98,6 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.persistence import decode_message_row
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
-from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.fts import keyword_query, keyword_where
 from corvidae_cognition.presend import PreSendHold

@@ -1618,10 +1618,10 @@ line is plain text in the result, with no kernel header at all.
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
   a second route to the same effect: an injected "don't reply" can get the
   tool called. The tool is in the tool list of every channel and refuses on
-  any that isn't conversational. The record is `outcomes.silence = "tool"`,
+  any that isn't conversational. The record is `silence = "tool"`,
   written when the turn ends and only if its final was withheld, so it shows a
   call that stayed silent; a follow-up that was sent records nothing.
-  `outcomes.silence_reason` is the model's own words,
+  `silence_reason` is the model's own words,
   steerable by an injection, cut at 200 characters and stored in
   the outcome log, which is for offline analysis; check before routing
   it into a prompt. It adds no capability: the agent could already stay quiet by sending an empty final,
