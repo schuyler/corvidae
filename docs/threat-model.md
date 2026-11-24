@@ -439,7 +439,10 @@ confirmation (`tools/shell.py`). `task_pipeline` is `shell` with a
 120-second timeout per step (and the default 600 s per-call bound,
 `tools.call_timeout`), and it calls the shell implementation directly, so
 `tools.disabled` couples the two: naming either removes both, globally
-and per channel (#149). `write_file` writes anywhere
+and per channel (#149). `edit_file` is `write_file` with a passage argument
+— the same reach, reached by replacing text instead of the whole file — so it
+is coupled the same way: naming `write_file` or `edit_file` removes both
+(#1160). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over
 `agent.yaml`, which `ConfigWatcherPlugin` reloads within two seconds. That
 lets the model clear `immutable_settings` immediately. It can also repoint
@@ -466,7 +469,7 @@ it: no subagent, no MCP, `shell` disabled. It is not a closed profile,
 though: it leaves `write_file` on, which is the `agent.yaml` path
 (`task_pipeline`, the shell by another name, now goes with `shell`). A
 genuinely narrowed profile needs `tools.disabled: [shell, write_file]` at
-least. The same list under `channels.<id>.tools.disabled` narrows a single
+least, which takes `edit_file` with it. The same list under `channels.<id>.tools.disabled` narrows a single
 channel. The rest of the daemon keeps its tools, the channel's schemas
 never show the disabled ones, dispatch refuses them even when the model
 names one anyway, and a `subagent` launched from that channel inherits

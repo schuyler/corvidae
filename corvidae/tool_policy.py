@@ -37,9 +37,13 @@ if TYPE_CHECKING:
     from corvidae.channel import Channel
 
 #: Tools that are the same capability under different names: task_pipeline
-#: shells out on its own, so it is shell by another name (PRD §3.5.3).
-#: Naming any member of a group disables the whole group.
-COUPLED_TOOLS: tuple[frozenset[str], ...] = (frozenset({"shell", "task_pipeline"}),)
+#: shells out on its own, so it is shell by another name, and edit_file writes
+#: a file just as write_file does (PRD §3.5.3). Naming any member of a group
+#: disables the whole group.
+COUPLED_TOOLS: tuple[frozenset[str], ...] = (
+    frozenset({"shell", "task_pipeline"}),
+    frozenset({"write_file", "edit_file"}),
+)
 
 #: Keys accepted under ``channels.<id>.tools``.
 CHANNEL_TOOLS_KEYS = ("disabled",)
