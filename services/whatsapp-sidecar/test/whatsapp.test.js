@@ -509,3 +509,46 @@ test("an attachment the account itself sent is served from the upsert cache", as
   assert.equal(await fs.promises.readFile(got.path, "utf8"), "jpeg-bytes");
   await fs.promises.rm(dir, { recursive: true, force: true });
 });
+
+test("a locally generated registrationId is not a linked session", async () => {
+  // useMultiFileAuthState hands back creds with a fresh registrationId for an EMPTY
+  // directory -- generated locally, no WhatsApp involved. Read as "linked", a first
+  // run claims a session it never had, and the failure path says
+  // state:"reconnecting", fix:"wait": retry forever, never tell the operator to
+  // pair. That is exactly what a fresh install does in the field (measured live at
+  // 02:40:38Z), so the fix advice is the thing being tested here, not the boolean.
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-nocreds-"));
+  const sock = fakeSocket();
+  const adapter = new WhatsAppAdapter({
+    authDir: dir,
+    mediaDir: dir,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    fetchVersion: async () => ({ version: [2, 3000, 102] }),
+    socketFactory: () => sock,
+    // No authState injected on purpose: the claim under test is about what Baileys
+    // hands back for an empty directory, so Baileys itself answers it. The next
+    // assertion pins that it really did generate a registrationId -- if that ever
+    // stops being true, this test should say so instead of passing vacuously.
+    mediaDownloader: async () => Buffer.from("x"),
+  });
+  await adapter.start();
+  assert.equal(adapter.status().linked, false, "no identity means no session");
+  // The premise, checked rather than assumed: Baileys minted a registrationId with
+  // no own identity attached. That combination is the whole bug.
+  assert.ok(adapter.creds?.creds?.registrationId, "premise: Baileys generated a registrationId");
+  assert.equal(adapter.creds?.creds?.me, undefined, "premise: no own identity in a fresh dir");
+
+  // And the failure must point at pairing, not at waiting.
+  sock.handlers["connection.update"]({ connection: "close", lastDisconnect: { error: new Error("stream end") } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(adapter.status().state, "unpaired", `expected unpaired, got ${adapter.status().state}`);
+
+  await assert.rejects(() => adapter.sendText({ chat_jid: "15551234567@s.whatsapp.net", text: "hi" }), (err) => {
+    assert.equal(err.code, -32001, "an unpaired session is NOT_LINKED, not NOT_CONNECTED");
+    assert.equal(err.data.fix, "pair", "the operator has to be told to pair");
+    return true;
+  });
+
+  await adapter.close();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});

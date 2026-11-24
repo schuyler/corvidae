@@ -238,7 +238,14 @@ export class WhatsAppAdapter {
     if (this.stopped) return;
     const { state, saveCreds } = await this.authStateFactory(this.authDir);
     this.creds = state;
-    this.linked = Boolean(state.creds?.registrationId) || Boolean(state.creds?.me?.id);
+    // A paired device is one that has an own identity. `registrationId` is NOT that:
+    // useMultiFileAuthState generates one on the spot for an empty directory, so
+    // treating it as a session made a never-paired install report linked=true, and
+    // then a failed connect resolved to "reconnecting"/fix:"wait" instead of
+    // "unpaired"/fix:"pair" -- the daemon retried forever and never told the
+    // operator to pair. Measured live: an empty auth dir gave
+    // {"linked":true,"state":"connecting"} at 02:40:38Z.
+    this.linked = Boolean(state.creds?.me?.id);
     this.hadCreds = this.linked;
     this.state = "connecting";
     if (state.creds?.me?.id) this.selfJid = jidNormalizedUser(state.creds.me.id);
