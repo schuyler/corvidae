@@ -14,6 +14,7 @@ from harness.cache_swap import (
     derive_row,
     extend_messages,
     fit_messages,
+    _r2_section,
     parse_cache_ram,
     parse_units,
     render_report,
@@ -521,3 +522,31 @@ def test_two_window_line_from_r2_alone_no_when_one_resident():
     assert len(lines) == 1
     assert "160000" in lines[0]
     assert _yes_no(lines[0]) == ["no"]
+
+
+# --cache-ram argument shapes (review round 1, 2026-11-23)
+
+
+def test_parse_cache_ram_refuses_a_dangling_flag_naming_the_missing_value():
+    # `--cache-ram` last in argv: an IndexError here tells the operator nothing.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--model", "/m/swift.gguf", "--cache-ram"])
+    assert "--cache-ram" in str(exc.value)
+    assert "requires a value" in str(exc.value)
+
+
+def test_parse_cache_ram_handles_the_equals_form():
+    # `--cache-ram=8192` is a normal way to write the flag; it must not be
+    # reported as "missing from the preset", which sends the operator to the
+    # wrong file.
+    assert parse_cache_ram(["--model", "/m/swift.gguf", "--cache-ram=8192"]) == 8192
+
+
+def test_r2_section_survives_a_size_with_no_fill_rows():
+    # The division by len(fills) is reached whenever a size group has a probe
+    # but no fill row (an interrupted or partially-skipped run). Crashing there
+    # throws away a whole measurement run at print time.
+    row = _row("r2-8192", "probe_1", prompt_tokens=1000, expected_cached=0,
+               cached_tokens=0, prompt_ms=100.0, wall_ms=110.0)
+    lines = _r2_section({"cache_ram_mib": 8192}, [row])
+    assert any("8192" in l or "n/a" in l.lower() for l in lines)

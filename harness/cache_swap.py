@@ -65,14 +65,28 @@ WORDS = (
 
 def parse_cache_ram(args: list[str]) -> int:
     """Return the --cache-ram limit in MiB from the model's launch args."""
-    # Find the flag; the value is the next element.
-    if "--cache-ram" not in args:
+    # Both spellings mean the same thing, so neither may be reported as
+    # "missing from the preset" — that sends the operator to the wrong file.
+    raw: str | None = None
+    for a in args:
+        if a == "--cache-ram":
+            i = args.index(a)
+            if i + 1 >= len(args):
+                raise ValueError(
+                    "--cache-ram requires a value (a positive MiB limit), but it "
+                    "is the last argument"
+                )
+            raw = args[i + 1]
+            break
+        if a.startswith("--cache-ram="):
+            raw = a.split("=", 1)[1]
+            break
+    if raw is None:
         raise ValueError(
             "--cache-ram is missing from the model's status.args; set it to a "
             "positive MiB limit in the model preset (the server default is "
             "not reported, and residency arithmetic needs a finite limit)"
         )
-    raw = args[args.index("--cache-ram") + 1]
     try:
         value = int(raw)
     except ValueError:
@@ -297,7 +311,9 @@ def _r2_section(run: dict, rows: list[dict]) -> list[str]:
         miss = next((r for r in probes if r["hit"] is False), None)
         b = residency_bounds(cache_ram, hits, miss is not None)
         m = len(fills)
-        cold_mean = sum(r["prompt_ms"] for r in fills) / m
+        # A group can hold a probe and no fill row (interrupted or partially
+        # skipped run); dividing here would discard the whole run at print time.
+        cold_mean_cell = _num(sum(r["prompt_ms"] for r in fills) / m) if m else "-"
         if miss is None:
             bounds = f"<= {_num(b['upper_mib'])}"
             notes.append(
@@ -310,7 +326,7 @@ def _r2_section(run: dict, rows: list[dict]) -> list[str]:
             str(size), str(m), str(b["C"]), bounds, _num(b["k2_mib"]),
             _num(miss["prompt_ms"]) if miss else "-",
             _num(miss["wall_ms"]) if miss else "-",
-            _num(cold_mean),
+            cold_mean_cell,
         ])
     headers = ["size", "m", "C", "entry MiB", "cache-ram MiB for k = 2",
                "evicted prompt_ms", "evicted wall ms", "cold prompt_ms (mean)"]
