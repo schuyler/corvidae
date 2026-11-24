@@ -249,10 +249,22 @@ class WhatsAppPlugin(TransportPlugin):
         if method == "message":
             await self._on_incoming(params)
         elif method == "session":
-            state = params.get("state", "unknown")
-            if state != self._session_state:
-                logger.info("whatsapp: link state changed to %s", state)
-            self._session_state = state
+            # The seam on #1220 carries {linked, reason}, not a state string:
+            # `reason` is `open` or `loggedOut`. Reading a `state` key here
+            # silently turned every notification into "unknown", so a
+            # logged-out link never produced the WARNING R5 asks for.
+            linked = bool(params.get("linked", False))
+            reason = params.get("reason") or ("open" if linked else "unknown")
+            if reason != self._session_state:
+                if not linked and reason == "loggedOut":
+                    logger.warning(
+                        "whatsapp: the link was logged out and the sidecar has "
+                        "stopped retrying; re-pair it — until then nothing is "
+                        "sent or received"
+                    )
+                else:
+                    logger.info("whatsapp: link state changed to %s", reason)
+            self._session_state = reason
         else:
             logger.debug("whatsapp: ignoring notification %s", method)
 

@@ -592,3 +592,43 @@ async def test_the_allowlist_matches_digits_not_jid_spelling(tmp_path):
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+async def test_a_session_logged_out_notification_warns_and_names_repairing(tmp_path, caplog):
+    """The `session` notification is {linked, reason}; loggedOut must warn (#1220 R5).
+
+    Reading a `state` key instead made every notification "unknown", so the one
+    event that needs the operator saw an INFO line and nothing else.
+    """
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await plugin._on_notification("session", {"linked": False, "reason": "loggedOut"})
+        [line] = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "logged out" in r.getMessage()
+        ]
+        assert "re-pair" in line
+        assert plugin._session_state == "loggedOut"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_session_open_notification_is_quiet(tmp_path, caplog):
+    """A healthy link says nothing at WARNING; the state is still recorded."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await plugin._on_notification("session", {"linked": True, "reason": "open"})
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert plugin._session_state == "open"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
