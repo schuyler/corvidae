@@ -646,7 +646,11 @@ async def test_a_string_error_code_is_not_fatal(tmp_path, caplog):
         await _wait_for(lambda: plugin._client is not None)
         channel = plugin._registry.get_or_create("whatsapp", CHAT)
         with caplog.at_level(logging.WARNING, logger="corvidae.whatsapp"):
-            await plugin.send_message(channel, OutboundMessage(text="hello"))
+            # Bounded, so a guard that stops settling replies fails red here
+            # rather than hanging until pytest-timeout calls the test.
+            await asyncio.wait_for(
+                plugin.send_message(channel, OutboundMessage(text="hello")), 5,
+            )
         assert any("non-integer error code" in r.getMessage() for r in caplog.records)
         # The loop is still alive: the very next request gets its reply.
         sidecar.replies["status"] = {"state": "connected", "linked": True}
