@@ -1716,7 +1716,7 @@ it sends each change to the goal's `origin_channel` through
 origin made the change itself (so a goal the heartbeat created stays silent
 while the heartbeat is the one changing it).
 
-Goals also answers the planning lens's `resolve_corvidae_planning_goals`
+Goals also answers the planning lens's `resolve_planning_goals`
 (#1181), a hook planning owns, by returning `open_goals()`: every goal not
 retired, in queue order, as `{"id", "age_seconds", "summary", "status"}`.
 Goals imports nothing from planning; it lists `corvidae_planning` under

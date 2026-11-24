@@ -5,7 +5,7 @@ Verifies that the PlanningLensPlugin:
 - asks for its findings in critique's objection format, not one of its own
 - appends the real goal list to its own lens's fork instruction through
   transform_critique_prompt, and only its own, reading it through the
-  hook it owns (resolve_corvidae_planning_goals), which goals implements
+  hook it owns (resolve_planning_goals), which goals implements
   (#1181)
 - reports an absent goals plugin once at startup, not on every fork
 """
@@ -25,8 +25,8 @@ from corvidae_cognition.goals import GOALS_DDL, GoalsPlugin
 from corvidae_planning import PlanningLensPlugin
 
 # The name planning's entry point registers it under; its hooks carry it.
-PLANNING_NAME = "corvidae_planning"
-HOOK = "resolve_corvidae_planning_goals"
+PLANNING_NAME = "planning"
+HOOK = "resolve_planning_goals"
 
 
 async def _contributed(plugin):

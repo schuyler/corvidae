@@ -1175,7 +1175,7 @@ two peers points is a design choice that a string lookup hides.
 list does not cover, and on an entry that covers more calls than remain.
 The list held the calls that predate the rule, each with the issue that
 removed it. It is empty now: the last, planning's read of `goals`, went in
-#1181, where planning owns `resolve_corvidae_planning_goals` and goals
+#1181, where planning owns `resolve_planning_goals` and goals
 implements it. New work never adds an entry. A missing kernel plugin is not
 something a plugin works around:
 `get_dependency` raises naming it, and a test that builds a plugin manager
