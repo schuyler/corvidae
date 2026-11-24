@@ -114,26 +114,22 @@ def parse_cache_ram(args: list[str]) -> int:
     bad = [v for v in values if not _is_int(v)]
     if bad:
         problems.append(f"{', '.join(repr(v) for v in bad)} not an integer")
-    if problems:
-        # The preset remedy applies to a wrong value, not to a flag that was
-        # given without one; tests pin that a dangling message never points at
-        # the preset, because that sends the operator to the wrong file.
-        remedy = (
-            "; set a positive MiB limit in the model preset" if bad else ""
-        )
-        raise ValueError("--cache-ram: " + "; and ".join(problems) + remedy)
-    non_positive = [v for v in values if int(v) <= 0]
+    # Non-positive values join the same list: they were checked in a later
+    # branch, so `--cache-ram=0 --cache-ram` named only the dangling flag.
+    non_positive = [v for v in values if _is_int(v) and int(v) <= 0]
     if non_positive:
-        raise ValueError(
-            f"--cache-ram is {', '.join(non_positive)}; set a positive MiB limit "
-            "in the model preset (the residency arithmetic needs a finite limit)"
+        problems.append(
+            f"{', '.join(non_positive)} not positive (the residency arithmetic "
+            "needs a finite limit)"
         )
+    if problems:
+        # The preset remedy belongs to a wrong VALUE, not to a flag given
+        # without one; a dangling-only message must never send the operator to
+        # the preset. A combined message may, because a bad value is present.
+        wrong_value = bool(bad or non_positive)
+        remedy = "; set a positive MiB limit in the model preset" if wrong_value else ""
+        raise ValueError("--cache-ram: " + "; and ".join(problems) + remedy)
     value = int(values[0])
-    if value <= 0:
-        raise ValueError(
-            f"--cache-ram is {value}; set a positive MiB limit in the model "
-            "preset (the residency arithmetic needs a finite limit)"
-        )
     return value
 
 

@@ -641,3 +641,34 @@ def test_parse_cache_ram_message_names_the_offending_token(argv, offender):
     with pytest.raises(ValueError) as exc:
         parse_cache_ram(argv)
     assert offender in str(exc.value)
+
+
+# every problem class in one message (review round 5)
+
+
+def test_parse_cache_ram_names_a_zero_alongside_a_dangling_flag():
+    # Round 5: the non-positive check ran AFTER the combined-problems branch,
+    # so `--cache-ram=0 --cache-ram` reported only the dangling flag and an
+    # operator fixing it landed on a rejected 0.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram=0", "--cache-ram"])
+    msg = str(exc.value)
+    assert "position" in msg, msg
+    assert "0" in msg, f"the zero is never named: {msg}"
+
+
+def test_parse_cache_ram_names_position_and_value_for_a_non_integer_plus_dangling():
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram=abc", "--cache-ram"])
+    msg = str(exc.value)
+    assert "abc" in msg and "position" in msg, msg
+
+
+def test_dangling_only_message_still_never_offers_the_preset_remedy():
+    # The contract that matters, stated exactly: a message must not send the
+    # operator to the preset unless some VALUE is actually wrong. A
+    # dangling-plus-bad-value message may name the preset, because a bad value
+    # is present; a dangling-only message may not.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram"])
+    assert "preset" not in str(exc.value)
