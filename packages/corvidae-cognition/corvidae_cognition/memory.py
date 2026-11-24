@@ -2237,6 +2237,16 @@ class MemoryPlugin(CorvidaePlugin):
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._tasks.clear()
+        # Close the fork-log connection: ForkLog opens it lazily on the first
+        # record, so any consolidation this process ran leaves an aiosqlite
+        # worker thread that keeps the interpreter alive after the daemon is
+        # asked to exit (the same hazard _write_db below is closed for).
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            try:
+                await log.close()
+            except Exception:
+                logger.warning("memory fork-log connection failed to close cleanly", exc_info=True)
         # No task is writing any more: close the dedicated write connection.
         if self._write_db is not None:
             write_db, self._write_db = self._write_db, None
