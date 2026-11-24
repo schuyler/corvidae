@@ -657,3 +657,82 @@ test("the session marker, not creds, is what survives a restart", async () => {
   await fs.promises.rm(dir, { recursive: true, force: true });
 });
 
+test("a pairing that was started and then abandoned still asks to pair after a restart", async () => {
+  // The scope note on the reviewer's SOUND verdict: nothing drove requestPairingCode
+  // and then restarted, so the abandoned-pairing hole was argued from the marker's
+  // design instead of run. This runs it. The fake reproduces the MEASURED write --
+  // rc14 lib/Socket/socket.js:596-612 sets authState.creds.me to
+  // {id: jidEncode(phone, "s.whatsapp.net"), name: "~"} before the network confirms
+  // anything -- rather than my idea of what that write looks like.
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-abort-"));
+  const marker = path.join(dir, "whatsapp-session.json");
+  const authDir = path.join(dir, "auth");
+  await fs.promises.mkdir(authDir, { recursive: true });
+  // The store's real shape: the adapter reads state.creds.me, so the residue belongs
+  // under `creds`. A fixture that parks it beside creds passes for BOTH the old and the
+  // new predicate -- which is how a green test ends up meaning nothing (this happened
+  // to the first version of this test: M3 stayed green at 07:41:44Z).
+  const authState = { creds: { registrationId: 9 } }; // fresh install: no `me` yet
+  let live;
+  const build = () =>
+    new WhatsAppAdapter({
+      authDir,
+      mediaDir: dir,
+      sessionMarker: marker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      fetchVersion: async () => ({ version: [2, 3000, 102] }),
+      authState,
+      socketFactory: () => {
+        const sock = fakeSocket();
+        sock.requestPairingCode = async (phone) => {
+          authState.creds.me = { id: `${phone}@s.whatsapp.net`, name: "~" };
+          return "ABCD1234";
+        };
+        live = sock;
+        return sock;
+      },
+      mediaDownloader: async () => Buffer.from("x"),
+    });
+
+  const first = build();
+  await first.start();
+  const pairing = await first.pair({ phone: "5551212" });
+  assert.match(JSON.stringify(pairing), /ABCD1234/, "the code the operator needs");
+  assert.ok(authState.creds.me, "the request leaves a local `me` behind -- that is the trap");
+  assert.equal(first.status().linked, false, "a pairing request is not a session");
+  assert.ok(
+    !(await fs.promises.stat(marker).then(() => true, () => false)),
+    "no marker without an open",
+  );
+
+  // Nobody finishes typing. WhatsApp drops the incomplete pairing.
+  live.handlers["connection.update"]({
+    connection: "close",
+    lastDisconnect: { error: new Error("stream end") },
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  await first.close();
+
+  // The operator comes back later and the daemon restarts. Pre-marker, `creds.me`
+  // made this read linked, and the drop resolved to reconnecting / fix:"wait":
+  // retry forever, never told to pair.
+  const second = build();
+  await second.start();
+  assert.equal(second.status().linked, false, "an abandoned pairing must not look linked");
+  live.handlers["connection.update"]({
+    connection: "close",
+    lastDisconnect: { error: new Error("stream end") },
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(second.status().state, "unpaired", "restart after an abandoned pairing asks to pair");
+  await assert.rejects(
+    () => second.sendText({ chat_jid: "5554444@s.whatsapp.net", text: "y" }),
+    (error) => {
+      assert.equal(error.code, NOT_LINKED);
+      assert.deepEqual(error.data, { state: "unpaired", fix: "pair" });
+      return true;
+    },
+  );
+  await second.close();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});
