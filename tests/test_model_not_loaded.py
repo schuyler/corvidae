@@ -10,6 +10,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
+import pytest
 
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import hookimpl
@@ -53,13 +54,17 @@ class TestLLMPluginResolveLlmError:
 
 
 class TestCreateClient:
-    def test_model_not_loaded_wait_from_config(self):
-        cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": 15}
-        assert LLMPlugin()._create_client(cfg).model_not_loaded_wait == 15
-
-    def test_model_not_loaded_wait_default(self):
+    def test_model_not_loaded_wait_is_fixed(self):
         cfg = {"base_url": "http://x", "model": "m"}
         assert LLMPlugin()._create_client(cfg).model_not_loaded_wait == 60.0
+
+    def test_the_removed_key_fails_startup_naming_it(self):
+        """#956: the wait is fixed, and a config that still sets it is told so."""
+        cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": 15}
+        with pytest.raises(ValueError) as exc:
+            LLMPlugin()._create_client(cfg)
+        assert "model_not_loaded_wait" in str(exc.value)
+        assert "removed" in str(exc.value)
 
 
 class TestEndToEnd:

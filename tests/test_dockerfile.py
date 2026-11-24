@@ -163,3 +163,38 @@ def test_tiktoken_encoding_is_baked_into_the_image(dockerfile, runtime):
     assert any(c.startswith("--from=builder") and c.split()[-1] == cache_dir for c in copies), (
         f"nothing is copied from the builder to {cache_dir}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1186 D3/D5: an operator-settable locale at build time
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_installs_and_compiles_the_named_locale(runtime):
+    """The locale definitions come from the `locales` package (installed
+    without recommends, as the file's other apt steps do), and a non-default
+    LOCALE is compiled with localedef while the default C.UTF-8 skips it."""
+    runs = _instructions(runtime, "RUN")
+    assert re.search(
+        r"apt-get[^&;]*--no-install-recommends[^&;]*\blocales\b", " ".join(runs)
+    ), runs
+    compiled = [r for r in runs if "localedef" in r]
+    assert compiled, "no localedef step: a --build-arg LOCALE would not install anything"
+    assert "LOCALE" in compiled[0] and "C.UTF-8" in compiled[0], compiled[0]
+
+
+def test_lang_is_set_from_locale_after_the_arg(runtime):
+    """The build argument is LOCALE (not LANG: the base image's ENV LANG
+    would shadow an ARG LANG) defaulting to C.UTF-8, and ENV LANG=$LOCALE
+    comes after it, so the running container sees the built locale without
+    `-e LANG=...`."""
+    assert "LOCALE=C.UTF-8" in _instructions(runtime, "ARG")
+    arg_at = next((i for i, ln in enumerate(runtime) if ln.startswith("ARG LOCALE")), None)
+    assert arg_at is not None, "no ARG LOCALE in the runtime stage"
+    env_at = next(
+        (i for i, ln in enumerate(runtime)
+         if ln.startswith("ENV") and re.search(r"\bLANG=\$\{?LOCALE\}?", ln)),
+        None,
+    )
+    assert env_at is not None, "no ENV LANG=$LOCALE in the runtime stage"
+    assert env_at > arg_at

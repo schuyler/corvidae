@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-whatsapp"
+version = "0.1.0"
+description = "WhatsApp transport for corvidae, over a Baileys sidecar's JSON-RPC socket"
+requires-python = ">=3.13"
+dependencies = [
+    "corvidae",
+]
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+[project.entry-points.corvidae]
+whatsapp = "corvidae_whatsapp:WhatsAppPlugin"

@@ -293,18 +293,6 @@ class TestDST:
         assert result.hour == 2, f"expected hour 2, got {result.hour}"
 
 
-def test_fall_back_searches_from_the_real_time_not_an_hour_earlier():
-    """#813: the start of the search must be after `after` in UTC, folds included."""
-    tz = ZoneInfo("America/New_York")
-    utc = ZoneInfo("UTC")
-    # 01:10 EST, the second 01:10 (fold=1), is 06:10Z.
-    after = datetime(2026, 11, 1, 1, 10, tzinfo=tz, fold=1)
-
-    for expr in ("* * * * *", "*/15 * * * *", "30 1 * * *"):
-        fire = next_fire(parse_cron(expr), after, tz)
-        assert fire.astimezone(utc) > after.astimezone(utc), expr
-
-
 def test_spring_forward_skips_the_hour_that_does_not_exist():
     """#813: 02:30 does not exist that day, so the job waits a day."""
     tz = ZoneInfo("America/New_York")

@@ -118,6 +118,11 @@ def validate_agent_config(agent: dict) -> None:
     _check_reasoning_keys(agent, "agent")
     _check_register_prompt(agent.get("register_prompt"), "agent.register_prompt")
     _check_seconds(agent.get("check_allowance_min"), "agent.check_allowance_min")
+    # Agent-level defaults reach every channel that sets no value of its own
+    # (#850), so the same positivity rule applies here.
+    for int_key in ("max_turns", "max_context_tokens"):
+        _check_int_key(agent.get(int_key), f"agent.{int_key}")
+    _check_positive_int(agent.get("held_entry_max_chars"), "agent.held_entry_max_chars")
     parse_forks_config(agent)
 
 
@@ -157,6 +162,21 @@ def _check_seconds(value: object, where: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(
             f"{where} must be a positive number of seconds (e.g. 10 or 2.5), got "
+            f"{_short_repr(value)} ({type(value).__name__})"
+        )
+
+
+def _check_positive_int(value: object, where: str) -> None:
+    """Raise ValueError unless value is None or a positive whole number.
+
+    For ``agent.held_entry_max_chars`` (#1176): a character count, so a float,
+    a bool, zero or a negative is rejected naming the key and the value.
+    """
+    if value is None:
+        return
+    if type(value) is not int or value < 1:
+        raise ValueError(
+            f"{where} must be a positive whole number of characters (e.g. 8000), got "
             f"{_short_repr(value)} ({type(value).__name__})"
         )
 
@@ -520,11 +540,23 @@ def parse_positive_int(value: object, key: str) -> int:
 
 
 def _check_int_key(value: object, where: str) -> None:
-    """Raise ValueError unless value is None or an integer (bool excluded)."""
-    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+    """Raise ValueError unless value is None or a positive integer (bool excluded).
+
+    Zero and negative values are refused for the same reason set_settings refuses
+    them (#850): a channel with no turns or no context cannot answer, so the
+    limit would fail at turn time with nothing naming the key.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
             f"{where} must be an integer, got {_short_repr(value)} "
             f"({type(value).__name__}); use a whole number or remove the key"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"{where} must be a positive integer, got {value}; use a whole "
+            f"number of at least 1 or remove the key"
         )
 
 

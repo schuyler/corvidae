@@ -57,10 +57,36 @@ def test_memory_depends_on_kernel_clock_and_idle() -> None:
     memory resolves the objects leniently.
     """
     memory = _load("corvidae_cognition.memory.MemoryPlugin")
-    assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle"})
+    assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle", "trace", "registry"})
 
 
-def test_goals_depends_on_persistence_memory_funnel_clock() -> None:
-    """GoalsPlugin needs memory (G3), the funnel (G2) and the clock."""
+def test_goals_no_longer_depends_on_the_funnel() -> None:
+    """GoalsPlugin keeps memory and the clock but drops the funnel (#1176, R5.2b).
+
+    Goals must load with the funnel switched off, so "funnel" cannot be a
+    hard dependency; the held-text store is the kernel's.
+    """
     goals = _load("corvidae_cognition.goals.GoalsPlugin")
-    assert goals.depends_on == frozenset({"persistence", "memory", "funnel", "clock"})
+    assert "funnel" not in goals.depends_on
+    assert {"persistence", "memory", "clock"} <= goals.depends_on
+
+
+@pytest.mark.parametrize(
+    "dotted_name",
+    [
+        "corvidae_cognition.recall.RecallSourceMixin",
+        "corvidae_cognition.markdown_recall.MarkdownRecallPlugin",
+    ],
+)
+def test_recall_sources_no_longer_list_the_funnel_as_optional(dotted_name: str) -> None:
+    """Recall sources contribute through before_compose, not the funnel (#1176)."""
+    cls = _load(dotted_name)
+    assert "funnel" not in getattr(cls, "optional_depends_on", frozenset())
+    assert "funnel" not in getattr(cls, "depends_on", frozenset())
+
+
+def test_critique_depends_on_held() -> None:
+    """CritiquePlugin hands verdicts to the kernel's held store, so it declares it (#1176)."""
+    critique = _load("corvidae_cognition.critique.CritiquePlugin")
+    assert "held" in critique.depends_on
+    assert "funnel" not in critique.depends_on

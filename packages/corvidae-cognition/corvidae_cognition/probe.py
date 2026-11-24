@@ -1,7 +1,8 @@
 """Lazily opened, rate-limited read-only SQLite probe (#159, #237).
 
-CritiquePlugin (message_fts) and AppraisalPlugin (memory_fts) each read a
-table that another plugin creates. Opening the connection once at on_start
+CritiquePlugin's provenance check reads message_fts, a table another plugin
+creates. (AppraisalPlugin read memory_fts the same way until stage-1
+appraisal was removed, #1185.) Opening the connection once at on_start
 meant a table that appeared later (created by another plugin's own startup,
 or after the first run) stayed invisible until a restart. ReadOnlyProbe
 opens on first use instead and retries at a bounded rate until the table

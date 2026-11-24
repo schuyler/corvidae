@@ -36,6 +36,7 @@ plugins:
     - appraisal
     - critique
     - outcome_log
+    - trace
     - gates
     - silence
     - skills

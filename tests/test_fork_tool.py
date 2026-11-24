@@ -211,6 +211,28 @@ class TestToolExclusion:
             "non-excluded tools (e.g. 'shell') must appear in the registry"
         )
 
+    async def test_work_hands_run_agent_loop_the_agents_tool_check(self):
+        """Every call the fork tool's loop dispatches is offered to
+        should_execute_tool (#148, PRD §3.5.12): work() passes the Agent's
+        check_tool_call."""
+        plugin = await _make_started_plugin()
+        agent = plugin.pm.get_plugin("agent")
+        task_queue = MagicMock(spec=TaskQueue)
+        task_queue.enqueue = AsyncMock()
+        ctx = ToolContext(channel=_make_channel(), tool_call_id="call-check", task_queue=task_queue)
+        captured_kwargs = {}
+
+        async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
+            captured_kwargs.update(kwargs)
+            return "done"
+
+        with patch("corvidae.tools.fork_tool.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.fork_tool.strip_thinking", side_effect=lambda x: x):
+            await plugin._launch("task", ctx)
+            await task_queue.enqueue.call_args[0][0].work()
+
+        assert captured_kwargs.get("check") == agent.check_tool_call
+
 
 class TestLaunch:
     async def test_launch_no_task_queue_returns_error(self):

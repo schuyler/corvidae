@@ -25,8 +25,9 @@ from tests.cognition.test_critique import _fire, _read_outcomes, _teardown
 from tests.cognition.test_critique_vector import (
     _drain,
     _env,
+    _offer,
     _warnings,
-    _watch_funnel,
+    _watch_held,
 )
 
 # The marker every proactivity fork instruction opens with.
@@ -64,7 +65,8 @@ async def _turn(env, trace_id, vector, *, origin="user", response_text=ASKS):
 
 class TestChosenByTheVector:
     async def test_proactivity_runs_when_it_tops_the_vector(self, tmp_path):
-        """R1: proactivity on top of the vector runs, alone."""
+        """R1: proactivity above "none" in the vector runs (with the other
+        selected lens, in the one fork, #1190)."""
         env = await _env(tmp_path, chat_text=VERDICT)
         try:
             await _turn(env, "kp1", {"proactivity": 0.6, "predictive": 0.3, "none": 0.1},
@@ -74,7 +76,8 @@ class TestChosenByTheVector:
             await _teardown(env)
 
     @pytest.mark.parametrize("vector", [
-        {"predictive": 0.7, "proactivity": 0.2, "none": 0.1},
+        # Proactivity's share is below "none"'s (any lens above it would run, #1190 S1).
+        {"predictive": 0.7, "proactivity": 0.05, "none": 0.25},
         {"proactivity": 0.1, "none": 0.9},
     ], ids=["another-lens-wins", "none-wins"])
     async def test_a_permission_question_alone_runs_no_proactivity_fork(
@@ -94,7 +97,7 @@ class TestChosenByTheVector:
         TestOffers' in test_critique_vector.py)."""
         env = await _env(tmp_path)
         try:
-            assert dict(env.appraisal.offer())["proactivity"] == (
+            assert dict(await _offer(env))["proactivity"] == (
                 BUILTIN_LENSES["proactivity"][0])
         finally:
             await _teardown(env)
@@ -104,7 +107,7 @@ class TestChosenByTheVector:
         env = await _env(tmp_path, config={"critique": {"lens": {"proactivity": {
             "appraisal_question": "OPERATOR-PROACTIVITY-Q"}}}})
         try:
-            assert dict(env.appraisal.offer())["proactivity"] == "OPERATOR-PROACTIVITY-Q"
+            assert dict(await _offer(env))["proactivity"] == "OPERATOR-PROACTIVITY-Q"
         finally:
             await _teardown(env)
 
@@ -113,12 +116,12 @@ class TestWakes:
     async def test_a_finding_wakes_with_the_proactivity_sentence(self, tmp_path):
         """R2/R6: a proactivity finding fires one wake on the critique
         origin, and the stub carries the proactivity sentence."""
-        env = await _env(tmp_path, chat_text=VERDICT, with_funnel=True)
+        env = await _env(tmp_path, chat_text=VERDICT, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp3", {"proactivity": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+            env.held.hold_and_wake.assert_awaited_once()
+            kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert OBJECTION in "\n".join(kwargs["entries"])
             assert SENTENCE in kwargs["stub_text"]
@@ -127,13 +130,13 @@ class TestWakes:
 
     async def test_a_finding_on_a_correction_waits(self, tmp_path):
         """R2: on a critique-origin turn the finding waits for the next turn."""
-        env = await _env(tmp_path, chat_text=VERDICT, with_funnel=True)
+        env = await _env(tmp_path, chat_text=VERDICT, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp4", {"proactivity": 1.0}, origin="critique",
                         response_text=PLAIN)
-            env.funnel.ingest_and_wake.assert_not_awaited()
-            entries = [e for c in env.funnel.ingest.call_args_list
+            env.held.hold_and_wake.assert_not_awaited()
+            entries = [e for c in env.held.hold.call_args_list
                        for e in c.kwargs["entries"]]
             assert any(OBJECTION in e for e in entries), entries
         finally:
@@ -143,11 +146,11 @@ class TestWakes:
         """R9: no severity filter, like every other lens."""
         low = json.dumps({"objections": [
             {"claim": "restart the indexer", "objection": OBJECTION, "severity": 0.2}]})
-        env = await _env(tmp_path, chat_text=low, with_funnel=True)
+        env = await _env(tmp_path, chat_text=low, with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _turn(env, "kp5", {"proactivity": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
+            env.held.hold_and_wake.assert_awaited_once()
         finally:
             await _teardown(env)
 
@@ -159,7 +162,7 @@ class TestRecorded:
         env = await _env(tmp_path, chat_text=VERDICT)
         try:
             await _turn(env, "kp7", {"proactivity": 1.0})
-            outcomes = await _read_outcomes(env.db, "kp7")
+            outcomes = await _read_outcomes(env.recorder, "kp7")
             assert "proactivity" not in outcomes
             assert outcomes["critique"]["lenses"] == ["proactivity"]
             scrubbed = json.loads(_scrub_outcomes_detail(json.dumps(outcomes), "[X]"))
@@ -184,7 +187,7 @@ class TestEnabled:
         that still names it runs nothing."""
         env = await _env(tmp_path, chat_text=VERDICT, config={"critique": OFF})
         try:
-            assert "proactivity" not in [n for n, _ in env.appraisal.offer()]
+            assert "proactivity" not in [n for n, _ in await _offer(env)]
             await _turn(env, "kp9", {"proactivity": 1.0})
             assert _proactivity_runs(env) == 0
         finally:
@@ -211,7 +214,7 @@ class TestEnabled:
                 "enabled": "no"}}}}
             await env.plugin.on_config_reload(config)
             assert _warnings(caplog, "critique.lens.proactivity.enabled"), caplog.text
-            assert "proactivity" in [n for n, _ in env.appraisal.offer()]
+            assert "proactivity" in [n for n, _ in await _offer(env)]
         finally:
             await _teardown(env)
 
@@ -224,7 +227,7 @@ class TestKeys:
         try:
             await _turn(env, "kp10", {"proactivity": 1.0})
             [call] = env.fork_agent.calls
-            assert call["instruction"].startswith("OPERATOR-PROACTIVITY-3v")
+            assert "## Lens: proactivity\nOPERATOR-PROACTIVITY-3v" in call["instruction"]
         finally:
             await _teardown(env)
 

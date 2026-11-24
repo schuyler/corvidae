@@ -35,7 +35,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
 from functools import partial
@@ -67,12 +67,15 @@ from corvidae.context import (
     ContextWindow,
     count_tokens,
     late_check_text,
+    late_tool_check_text,
     message_tokens,
     MessageType,
+    NO_REASON_GIVEN,
+    tool_refusal_text,
     unsent_marker_text,
     well_formed_calls,
 )
-from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, load_fence_key
+from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, frame, load_fence_key
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
 from corvidae.trace import mint_trace_id  # noqa: F401
@@ -90,7 +93,8 @@ from corvidae.fork import (
 )
 from corvidae.idle import IdleTracker
 from corvidae.thinking import apply_reasoning_history
-from corvidae.checks import resolve_check_allowance, run_checks
+from corvidae.checks import gather, resolve_check_allowance
+from corvidae.held import LATE_CHECK_SOURCE, STUB_ANNOTATION, Contribution, HeldContext
 from corvidae.hooks import (
     CorvidaePlugin,
     Refusal,
@@ -111,6 +115,7 @@ from corvidae.task import Task
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     ToolTimeouts,
+    declares_read_only,
     declares_spill_reader,
     declares_untrusted_output,
     dispatch_tool_call,
@@ -191,6 +196,11 @@ def _llm_error_message(exc: Exception, retry_armed: bool = False) -> str:
     """
     template = _LLM_RETRY_TEMPLATE if retry_armed else _LLM_ERROR_TEMPLATE
     return template.format(cause=_describe_llm_failure(exc))
+
+
+def _is_refusal(answer: object) -> bool:
+    """The before-effect ``stop_on``: a bare False or a ``Refusal`` ends the gather."""
+    return answer is False or isinstance(answer, Refusal)
 
 
 class QueueItemRole(Enum):
@@ -302,7 +312,7 @@ class Agent(CorvidaePlugin):
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
-    depends_on = frozenset({"registry", "task", "llm", "tools"})
+    depends_on = frozenset({"registry", "task", "llm", "tools", "held"})
 
     # Class-level default so an Agent built without __init__ (as some tests do)
     # still reads as having no tracker.
@@ -330,9 +340,6 @@ class Agent(CorvidaePlugin):
         # (channel id, call id) -> (tool name, declared untrusted), recorded at
         # dispatch so a registry change before the result cannot unfence it.
         self._dispatched_calls: dict[tuple[str, str], tuple[str, bool]] = {}
-        # Channel id -> late-check rows waiting for the channel's next turn
-        # with no call outstanding (#1162). In memory only; see _drain_late_checks.
-        self._late_checks: dict[str, list[str]] = {}
         # Set once the no-clock fallback in _check_clock has logged.
         self._warned_no_clock = False
         self._registry: ChannelRegistry | None = None
@@ -1189,19 +1196,23 @@ class Agent(CorvidaePlugin):
         """The final firing of should_send_response, under the check allowance.
 
         Returns True when ``text`` may be sent. Verdicts that arrive in time
-        resolve reject-wins; a Refusal that arrives later is held for the
-        channel's next turn (_drain_late_checks).
+        resolve reject-wins, and an in-time refusal ends the wait at once; a
+        refusal (``Refusal`` or bare ``False``) that
+        arrives later is held for the channel's next turn (the held store).
         """
         assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
 
         async def on_late(plugin_name: str, verdict: object) -> None:
-            # Only a refusal has anything to say; the miss is already counted.
-            if isinstance(verdict, Refusal):
-                self._late_checks.setdefault(channel.id, []).append(
-                    late_check_text(text, plugin_name, verdict.reason)
+            # A late refusal still reaches the channel, a bare False included
+            # (it refuses with no reason, #1201); the miss is already counted.
+            if verdict is False or isinstance(verdict, Refusal):
+                reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
+                await held.hold_late(
+                    channel, LATE_CHECK_SOURCE, late_check_text(text, plugin_name, reason)
                 )
 
-        results = await run_checks(
+        gathered = await gather(
             self.pm, "should_send_response",
             channel=channel,
             kwargs={
@@ -1211,29 +1222,145 @@ class Agent(CorvidaePlugin):
             allowance=resolve_check_allowance(self.pm, self._registry, channel),
             clock=self._check_clock(),
             on_late=on_late,
+            phase="before_effect",
+            stop_on=_is_refusal,
         )
-        return resolve_reject_wins(results) is not False
+        return resolve_reject_wins(gathered.results) is not False
 
-    def _drain_late_checks(self, channel: Channel, conv: ContextWindow) -> None:
-        """Append the channel's held late-check rows to its window.
+    async def check_tool_call(
+        self, channel: Channel, tool_name: str, arguments: dict, trace_id: str | None
+    ) -> str | None:
+        """Offer one validated tool call to should_execute_tool (#148).
 
-        Runs at step 6, before before_agent_turn, so the rows persist with
-        that hook's injections. Only when no call on the channel is waiting
-        for its result: then nothing appended now can fall between a tool
-        call and its result. Otherwise the rows wait for a later turn. The
+        PRD §3.5.12. Every implementation runs under the channel's check
+        allowance (``gather``). Returns the refusal text the call's result
+        carries when any in-time verdict refuses, else None and the call
+        runs. A refusal (``Refusal`` or bare ``False``) that arrives after the
+        allowance refuses nothing;
+        it is held for the channel's next turn (the held store). Every
+        dispatch path passes this as dispatch_tool_call's ``check``.
+        """
+        assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
+
+        async def on_late(plugin_name: str, verdict: object) -> None:
+            # A late refusal still reaches the channel, a bare False included
+            # (it refuses with no reason); the miss is already counted.
+            if verdict is False or isinstance(verdict, Refusal):
+                reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
+                await held.hold_late(
+                    channel, LATE_CHECK_SOURCE,
+                    late_tool_check_text(tool_name, arguments, plugin_name, reason),
+                )
+
+        gathered = await gather(
+            self.pm, "should_execute_tool",
+            channel=channel,
+            kwargs={
+                "channel": channel, "tool_name": tool_name,
+                "arguments": arguments, "trace_id": trace_id,
+            },
+            allowance=resolve_check_allowance(self.pm, self._registry, channel),
+            clock=self._check_clock(),
+            on_late=on_late,
+            phase="before_effect",
+            stop_on=_is_refusal,
+        )
+        results = gathered.results
+        if resolve_reject_wins(results) is not False:
+            return None
+        # Any refusal wins; name every reason, a bare False as having none.
+        reasons = [
+            r.reason if isinstance(r, Refusal) else NO_REASON_GIVEN
+            for r in results
+            if r is False or isinstance(r, Refusal)
+        ]
+        logger.info(
+            "refused tool %s on %s by a should_execute_tool check: %s",
+            tool_name, channel.id, "; ".join(reasons),
+            extra={"channel": channel.id, "tool": tool_name, "trace_id": trace_id},
+        )
+        return tool_refusal_text(tool_name, reasons)
+
+    def _can_append(self, channel: Channel) -> bool:
+        """Whether text appended to ``channel``'s window now is safe (R3.3).
+
+        True when no call on the channel is waiting for its result: then
+        nothing appended can fall between a tool call and its result. The
         dispatched-call record is what is checked, not the pending set: every
         pending call is in it until its result is processed, and ACP's
         cancel_prompt clears the pending set while tools keep running.
-
-        shortcut: held in memory, so a restart before delivery loses them;
-        persist them if that loss shows up in practice.
         """
-        if channel.id not in self._late_checks:
+        return not any(cid == channel.id for cid, _ in self._dispatched_calls)
+
+    async def _compose_held(
+        self, channel: Channel, conv: ContextWindow, item: QueueItem
+    ) -> None:
+        """Step 6, before compose: gather contributions and admit held text (#1176).
+
+        Every implementation of ``before_compose`` is called under the
+        channel's check allowance. On a turn that can append, the held store
+        admits what is due plus the in-time contributions. On one that cannot
+        (a call is outstanding), the contributions are held for the next turn
+        that can, and a held-text stub that arrived mid-call is deferred.
+        """
+        assert self._registry is not None
+        held = get_dependency(self.pm, "held", HeldContext)
+        annotations = item.annotations or {}
+
+        async def on_late(plugin_name: str, answer: object) -> None:
+            # A late contribution is held for the next turn; it wakes nothing.
+            if isinstance(answer, Contribution):
+                await held.hold_contribution(channel, answer, trace_id=item.trace_id)
+            elif answer is not None:
+                logger.warning(
+                    "before_compose implementation %s returned %s on channel %s; "
+                    "dropped. Return a corvidae.held.Contribution or None",
+                    plugin_name, type(answer).__name__, channel.id,
+                    extra={"channel": channel.id},
+                )
+
+        gathered = await gather(
+            self.pm, "before_compose",
+            channel=channel,
+            kwargs={
+                "channel": channel, "trace_id": item.trace_id, "annotations": annotations,
+            },
+            allowance=resolve_check_allowance(self.pm, self._registry, channel),
+            clock=self._check_clock(),
+            on_late=on_late,
+            phase="before_compose",
+        )
+        held.hold_stragglers(channel.id, gathered.stragglers)
+        # Only a Contribution counts; anything else non-None is a plugin bug.
+        contributions = [r for r in gathered.results if isinstance(r, Contribution)]
+        stray = [r for r in gathered.results if r is not None and not isinstance(r, Contribution)]
+        for answer in stray:
+            logger.warning(
+                "a before_compose implementation returned %s on channel %s; dropped. "
+                "Return a corvidae.held.Contribution or None",
+                type(answer).__name__, channel.id, extra={"channel": channel.id},
+            )
+        origin = annotations.get("origin")
+        # A turn that can append admits now (R3.3).
+        if self._can_append(channel):
+            await held.admit_for_turn(
+                channel, conv, trace_id=item.trace_id, origin=origin,
+                contributions=contributions,
+            )
             return
-        if any(cid == channel.id for cid, _ in self._dispatched_calls):
-            return
-        for content in self._late_checks.pop(channel.id):
-            conv.append({"role": "system", "content": content}, MessageType.CONTEXT)
+        # A call is outstanding: nothing may land between it and its result.
+        for contribution in contributions:
+            await held.hold_contribution(channel, contribution, trace_id=item.trace_id)
+        # A held-text stub, recognised by the kernel's key and never by its
+        # origin, has spent its wake: have the store re-fire it later.
+        if (
+            item.role == QueueItemRole.NOTIFICATION
+            and not item.tool_call_id
+            and STUB_ANNOTATION in annotations
+            and origin is not None
+        ):
+            held.stub_deferred(channel, origin)
 
     async def _append_unsent_marker(
         self, channel: Channel, emission: str, text: str
@@ -1608,6 +1735,10 @@ class Agent(CorvidaePlugin):
         # return (which sets its own outcome) or an exception (#469 review).
         _outcome = "failed"
         _closed = False
+        # A held stub whose turn ends before _compose_held (an exception) has
+        # not been spent; the finally hands it back to the store (#1237). A
+        # retry's first attempt already composed.
+        _stub_settled = item.retry
         # Bound before the try: the close in the finally reads it, and an early
         # return (no conversation message) leaves before step 1 assigns it.
         conv: ContextWindow | None = None
@@ -1618,6 +1749,21 @@ class Agent(CorvidaePlugin):
                 _outcome = "no_message"
                 return
             conversation_message, request_text = msg_result
+            # A held stub's row carries the text the store now holds for its
+            # pair, which a later batch may have replaced (#1222).
+            _origin = item.annotations.get("origin")
+            if (
+                item.role == QueueItemRole.NOTIFICATION
+                and not item.tool_call_id
+                and STUB_ANNOTATION in item.annotations
+                and _origin is not None
+            ):
+                _held_text = get_dependency(self.pm, "held", HeldContext).stub_text(
+                    item.channel.id, _origin
+                )
+                if _held_text is not None:
+                    conversation_message["content"] = _held_text
+                    request_text = _held_text
 
             # Pick up registry changes (e.g. a reconnected MCP server) before
             # any conversation is initialised or the turn's tools are read.
@@ -1735,9 +1881,6 @@ class Agent(CorvidaePlugin):
                 # 6. Let plugins inject context before the LLM call
                 _t_before_turn_start = time.monotonic()
                 msg_count_before = len(conv.messages)
-                # Late-check rows held for this turn (#1162); the loop below
-                # persists them with the hook's injections.
-                self._drain_late_checks(channel, conv)
                 # Observe hook, as above (#1094, #1097).
                 await self.pm.ahook.before_agent_turn(
                     channel=channel, trace_id=item.trace_id, annotations=item.annotations,
@@ -1745,7 +1888,8 @@ class Agent(CorvidaePlugin):
                 # Fire persist_message for any messages injected by
                 # before_agent_turn. Messages already carrying a _db_id were
                 # persisted by their producer — firing again would double-store
-                # them.
+                # them. Runs before the held store appends, so message_log
+                # order matches window order.
                 for msg in conv.messages[msg_count_before:]:
                     if isinstance(msg.get("_db_id"), int):
                         continue
@@ -1760,6 +1904,11 @@ class Agent(CorvidaePlugin):
                             msg["_db_id"] = rowid
                     except Exception:
                         logger.warning("persist_message hook failed", exc_info=True)
+                # Before compose: gather contributions under the check
+                # allowance, then admit held text and the in-time answers.
+                await self._compose_held(channel, conv, item)
+                # The held store has spent or deferred this item's stub (#1237).
+                _stub_settled = True
                 _phases["before_turn"] = time.monotonic() - _t_before_turn_start
 
             # 7. Build prompt and call run_agent_turn (single LLM invocation)
@@ -1889,6 +2038,30 @@ class Agent(CorvidaePlugin):
                 },
             )
         finally:
+            # The end of a tool cycle: let the held store re-fire a stub whose
+            # turn could not append. Before _note_settled, so the channel is
+            # not reported settled just before the stub is queued.
+            if _started and self._can_append(channel):
+                try:
+                    await get_dependency(self.pm, "held", HeldContext).turn_ended(channel)
+                except Exception:
+                    logger.warning(
+                        "held store turn_ended failed on channel %s; a deferred stub "
+                        "is retried at the end of the next tool cycle",
+                        channel.id, exc_info=True, extra={"channel": channel.id},
+                    )
+            # A stub this turn never admitted goes back for a re-fire. After
+            # turn_ended, so a stub that raises every time re-fires once per
+            # later turn rather than in a loop of its own (#1237).
+            _stub_origin = item.annotations.get("origin")
+            if (
+                not _stub_settled
+                and item.role == QueueItemRole.NOTIFICATION
+                and not item.tool_call_id
+                and STUB_ANNOTATION in item.annotations
+                and _stub_origin is not None
+            ):
+                get_dependency(self.pm, "held", HeldContext).stub_dropped(channel, _stub_origin)
             # Every item that starts closes: an early return (an absorbed
             # tool result, a turn that produced no result, no conversation
             # message) or an exception would otherwise leave the start
@@ -2021,6 +2194,8 @@ class Agent(CorvidaePlugin):
         cut: int | None = None,
         extra_body: dict | None = None,
         snapshot: WindowSnapshot | None = None,
+        max_tool_calls: int = 0,
+        yield_to_caller: Callable[[], Awaitable[None]] | None = None,
     ) -> ForkResult:
         """Run one fork of the channel's window (GitHub issue #51).
 
@@ -2037,18 +2212,39 @@ class Agent(CorvidaePlugin):
         default chat profile): its endpoint, model and ``extra_body``. A
         runtime override of a key that ``extra_body`` also sets is not sent,
         so the profile wins (see :func:`corvidae.fork.fork_body`). A fork
-        also sends ``tool_choice: "none"`` and ``extra_body`` (a stage's
-        ``response_format``), applied last so ``set_settings`` can't
-        re-enable tool calls.
+        also sends ``extra_body`` (a stage's ``response_format``) and a
+        ``tool_choice`` applied last so ``set_settings`` can't re-enable tool
+        calls: ``"auto"`` while ``max_tool_calls`` calls remain, else
+        ``"none"``.
 
-        Mutates nothing, persists nothing, fires no hooks, dispatches no
-        tools. Attribution gains ``mode="fork"`` for the call; the caller
-        sets ``stage``.
+        Mutates nothing, persists nothing, fires no hooks, and dispatches
+        only tools declared read-only (``reads_only = True``), and only when
+        ``max_tool_calls`` > 0 (the default 0 dispatches none and refuses any
+        tool-call reply). Every call counts against the cap, refused or not.
+        A call to a tool that is missing, disabled on the channel, or not
+        declared read-only gets a refusal result instead of a dispatch. Each
+        result reaches the model framed as untrusted data, whatever the tool
+        declares, and runs with no hooks (``pm=None``). Attribution gains
+        ``mode="fork"`` for the whole loop; the caller sets ``stage``.
+
+        ``yield_to_caller`` is a cooperative yield for a caller that must keep
+        the fork off the model while something else needs it (a stage waits
+        for a user message on the channel, #1190). It is awaited at each round
+        boundary of the tool loop, after the round's tool results and before
+        the next model request, outside ``lease_scope``; never before the
+        first request (the render and that request have no await between) and
+        never after the final reply. The fork continues when it returns; an
+        exception it raises propagates out of ``fork`` (``stage done`` then
+        logs ``ok=False``). It is a callback, not a hook: the fork still fires
+        no hooks.
+        ``ForkResult.usage`` is the last request's only; every request is
+        metered at the client regardless.
 
         Raises:
             ForkUnavailable: no live window or no client for ``stage``.
-            ForkRefused: the model answered with tool calls, structured or
-                written out as text.
+            ForkRefused: the model answered with a tool call it may not make
+                (cap reached or 0), a malformed or repeated-id call, or tool
+                calls written out as text.
         """
         # The window to render: a snapshot's copy, else the live window.
         conv = snapshot.conv if snapshot is not None else channel.conversation
@@ -2076,9 +2272,6 @@ class Agent(CorvidaePlugin):
             pending,
             self._mid_conversation_system_role,
         )
-        # The profile beats the overrides; the stage's body and tool_choice
-        # none come last.
-        body = fork_body(self._llm_overrides(channel), profile_body, extra_body)
 
         # The client was bound above, so a plugin stop that clears LLMPlugin's
         # clients during the await can't change the model this stamp names.
@@ -2104,21 +2297,122 @@ class Agent(CorvidaePlugin):
         # cost its time without producing one, so it is not ok either.
         ok = False
         try:
-            # A fork extends this channel's prefix, so it takes the channel's
-            # key whatever key the caller holds (#363).
-            with lease_scope(channel.id):
-                # The channel's own schemas: a fork must share the turn's prefix.
-                response = await client.chat(
-                    messages,
-                    tools=self._tool_view(channel).schemas or None,
-                    extra_body=body,
+            # Calls dispatched or refused so far, whether the cap warning has
+            # fired, and every call id seen in this fork (ids must be unique).
+            used = 0
+            warned = False
+            seen_ids: set[str] = set()
+            while True:
+                # Offer calls while any remain; the request after the cap
+                # sends "none" so the fork must give its verdict.
+                body = fork_body(
+                    self._llm_overrides(channel), profile_body, extra_body,
+                    tool_choice="auto" if used < max_tool_calls else "none",
                 )
-            message = response["choices"][0]["message"]
-            if message.get("tool_calls"):
-                raise ForkRefused(
-                    f"fork on {channel.id} answered with "
-                    f"{len(message['tool_calls'])} tool call(s)"
-                )
+                # A fork extends this channel's prefix, so it takes the
+                # channel's key whatever key the caller holds (#363). The
+                # lease covers the request only, not tool dispatch.
+                with lease_scope(channel.id):
+                    # The channel's own schemas: a fork must share the turn's prefix.
+                    response = await client.chat(
+                        messages,
+                        tools=self._tool_view(channel).schemas or None,
+                        extra_body=body,
+                    )
+                message = response["choices"][0]["message"]
+                tool_calls = message.get("tool_calls")
+                if not tool_calls:
+                    break
+                # A call while none remain (cap 0, or after the cap) is refused.
+                if used >= max_tool_calls:
+                    raise ForkRefused(
+                        f"fork on {channel.id} answered with "
+                        f"{len(tool_calls)} tool call(s)"
+                    )
+                # The whole reply is checked before any call runs: a malformed
+                # call, or an id seen before in this fork, voids the reply.
+                for call in tool_calls:
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    call_id = call.get("id") if isinstance(call, dict) else None
+                    if (
+                        not isinstance(call, dict)
+                        or not isinstance(call_id, str) or not call_id
+                        or call_id in seen_ids
+                        or not isinstance(fn, dict)
+                        or not isinstance(fn.get("name"), str)
+                        or not isinstance(fn.get("arguments"), str)
+                    ):
+                        raise ForkRefused(
+                            f"fork on {channel.id} answered with a malformed or "
+                            f"repeated tool call (stage {stage})"
+                        )
+                    seen_ids.add(call_id)
+                # The assistant turn goes into the fork's private list only.
+                messages.append(message)
+                for call in tool_calls:
+                    name = call["function"]["name"]
+                    view = self._tool_view(channel)
+                    if used >= max_tool_calls:
+                        # Over the cap: not dispatched.
+                        result = "Error: tool-call limit reached in this fork"
+                        dispatched = False
+                    elif (
+                        name in disabled_on(channel)
+                        or name not in view.tools
+                        or not declares_read_only(view.tools[name])
+                    ):
+                        # Missing, disabled live, or not declared read-only.
+                        result = (
+                            f"Error: {name} is not available in a fork; only "
+                            "tools declared read-only can be called"
+                        )
+                        dispatched = False
+                    else:
+                        # No pm and no task queue: no hooks fire.
+                        result = (await dispatch_tool_call(
+                            call, view.tools,
+                            schemas=self._tool_arg_schemas(),
+                            channel=channel,
+                            task_queue=None,
+                            pm=None,
+                            call_timeouts=self._tool_call_timeouts,
+                        )).content
+                        dispatched = True
+                    used += 1
+                    logger.info(
+                        "fork tool call",
+                        extra={
+                            "channel": channel.id, "stage": stage,
+                            "trace_id": trace_id, "tool": name,
+                            "dispatched": dispatched,
+                        },
+                    )
+                    # Frame every result as untrusted data with the main
+                    # loop's own renderer, whatever the tool declares.
+                    row = {
+                        "role": "tool", "tool_call_id": call["id"],
+                        "content": result,
+                        PROVENANCE_KEY: encode(
+                            ItemMetadata(tool=name, untrusted=True), {}
+                        ),
+                    }
+                    messages.append(
+                        frame(row, row, channel.id, conv.fence_key)[1]
+                    )
+                # Say once that the cap was reached.
+                if used >= max_tool_calls and not warned:
+                    warned = True
+                    logger.warning(
+                        "fork tool-call limit reached",
+                        extra={
+                            "channel": channel.id, "stage": stage,
+                            "trace_id": trace_id, "max_tool_calls": max_tool_calls,
+                        },
+                    )
+                # Round boundary: hand control to the caller before the next
+                # request (it may pause the fork or raise to end it).
+                if yield_to_caller is not None:
+                    await yield_to_caller()
             if looks_like_tool_call(message.get("content") or ""):
                 raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
             ok = True
@@ -2374,6 +2668,8 @@ class Agent(CorvidaePlugin):
                     task_queue=task_queue,
                     pm=self.pm,
                     call_timeouts=self._tool_call_timeouts,
+                    check=self.check_tool_call,
+                    trace_id=trace_id,
                 )
                 return result.content
 

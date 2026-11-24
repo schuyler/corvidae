@@ -6,7 +6,7 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
   corvidae_cognition.silence.NO_REPLY == "NO_REPLY"
   corvidae_cognition.silence.REGISTER_FRAGMENT: str
   corvidae_cognition.silence.SilencePlugin (entry point "silence",
-      optional_depends_on = {"outcome_log"}):
+      depends_on = {"trace"}):
       transform_system_prompt (wrapper) — on a channel owned by a
           conversational transport (IRC, Discord, Signal, Zulip) appends a
           blank line and the instruction for the mode (REGISTER_FRAGMENT in
@@ -27,7 +27,7 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
           response carrying the NO_REPLY token records outcomes
           {"silence": "no_reply"}, an empty one {"silence": "empty"}, any
           other unsent final nothing; a sent final records nothing. Writes
-          go through outcome_log.upsert_exchange from tracked tasks that
+          go through the trace plugin's on_trace_record from tracked tasks that
           on_stop awaits.
 """
 
@@ -43,6 +43,7 @@ from corvidae.context import ContextWindow, MessageType, unsent_marker_emission
 from corvidae.hooks import create_plugin_manager, resolve_reject_wins
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
+from tests.cognition.trace_helpers import TraceRecorder, add_trace
 
 # ---------------------------------------------------------------------------
 # The veto (S1)
@@ -242,20 +243,23 @@ class TestDeclineAtAgentLevel:
 
 
 # ---------------------------------------------------------------------------
-# S5: every decline is recorded in exchange_log
+# S5: every decline is reported on the trace
 # ---------------------------------------------------------------------------
 
 
-class _StubOutcomeLog:
-    """Records the writes SilencePlugin makes through upsert_exchange."""
+class _StubOutcomeLog(TraceRecorder):
+    """A trace listener that exposes SilencePlugin's reports as ``writes``."""
 
-    def __init__(self):
-        self.writes: list[dict] = []
-
-    async def upsert_exchange(self, trace_id, channel_id, origin=None, **columns):
-        self.writes.append(
-            {"trace_id": trace_id, "channel_id": channel_id, "origin": origin, **columns}
-        )
+    @property
+    def writes(self) -> list[dict]:
+        # Each "silence" record, flattened the way the old stub kept them.
+        return [
+            {
+                "trace_id": r["trace_id"], "channel_id": r["channel_id"],
+                "origin": r["origin"], "outcomes": r["record"],
+            }
+            for r in self.by_source("silence")
+        ]
 
 
 def _channel_ending_in(final_type: MessageType) -> Channel:
@@ -293,7 +297,8 @@ async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
 
     pm = create_plugin_manager()
     outcome_log = _StubOutcomeLog()
-    pm.register(outcome_log, name="outcome_log")
+    # The trace plugin and the listener, before the reporter is initialised.
+    add_trace(pm, outcome_log)
     silence = SilencePlugin()
     pm.register(silence, name="silence")
     await silence.on_init(pm=pm, config={})
@@ -391,8 +396,8 @@ async def _tool_pm(mode: str | None = "tool", outcome_log=None, instruction=None
     web._enabled = True
     for name, plugin in (("irc", IRCPlugin()), ("web", web), ("cli", CLIPlugin())):
         pm.register(plugin, name=name)
-    if outcome_log is not None:
-        pm.register(outcome_log, name="outcome_log")
+    # The reporter fires on_trace_record, so the spec is always installed.
+    add_trace(pm, outcome_log)
     block = {"mode": mode} if mode else {}
     if instruction:
         block["instruction"] = instruction
@@ -579,7 +584,7 @@ class TestEndTurnAtAgentLevel:
         plugin, _channel, db = await build_plugin_and_channel(mock_on_agent_response=False)
         pm = plugin.pm
         log = _StubOutcomeLog()
-        pm.register(log, name="outcome_log")
+        add_trace(pm, log)
         silence = SilencePlugin()
         pm.register(silence, name="silence")
         pm.register(Chat(), name="chat")

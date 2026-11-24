@@ -28,7 +28,7 @@ from corvidae.channel import (
     validate_agent_config,
 )
 from corvidae.checks import CHECK_MISSED_METRIC, resolve_check_allowance
-from corvidae.context import LATE_CHECK_LABEL, MessageType
+from corvidae.context import LATE_CHECK_LABEL, NO_REASON_GIVEN, MessageType
 from corvidae.hooks import Refusal, TransportPlugin, create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
@@ -144,7 +144,7 @@ def _late_rows(messages):
         m for m in messages
         if m.get("_message_type") == MessageType.CONTEXT
         and isinstance(m.get("content"), str)
-        and m["content"].startswith(f"[{LATE_CHECK_LABEL}")
+        and m["content"].startswith(f"[CONTEXT from {LATE_CHECK_LABEL}")
     ]
 
 
@@ -215,6 +215,7 @@ class TestFinalUnderAllowance:
                 "channel": channel.id,
                 "hook": "should_send_response",
                 "plugin": "clock_gate",
+                "phase": "before_effect",
             }),
         ]
 
@@ -265,11 +266,11 @@ class TestDeadlineInstant:
         """Regression: a check that finishes in the same loop step as the
         deadline, after the deadline fires, decides nothing and is still
         counted as a miss. The fake clock separates two releases with a
-        settle, so this drives run_checks on the real clock with a releaser
+        settle, so this drives gather on the real clock with a releaser
         timer due at the deadline's own instant (50 ms)."""
         from types import SimpleNamespace
 
-        from corvidae.checks import run_checks
+        from corvidae.checks import gather
         from corvidae.clock import Clock
 
         release = asyncio.Event()
@@ -304,12 +305,13 @@ class TestDeadlineInstant:
         clock.call_later = call_later
         channel = SimpleNamespace(id="x:y")
         try:
-            results = await run_checks(
+            gathered = await gather(
                 pm, "should_send_response", channel=channel,
                 kwargs={"channel": channel, "text": "hi", "emission": "final",
                         "trace_id": None, "annotations": {}},
-                allowance=0.05, clock=clock, on_late=on_late,
+                allowance=0.05, clock=clock, on_late=on_late, phase="before_effect",
             )
+            results = gathered.results
             await asyncio.sleep(0.05)
         finally:
             await clock.close()
@@ -367,8 +369,10 @@ class TestLateRefusal:
             for m, t in rows
         )
 
-    async def test_late_bare_false_delivers_nothing(self, env):
-        """A late veto with no text has nothing to say; only the miss counts."""
+    async def test_late_bare_false_reaches_the_next_turn(self, env):
+        """A late veto with no text still reaches the channel (#1201): one
+        late row naming the plugin and saying no reason was given, as a late
+        tool veto's does (PRD §3.1.21)."""
         plugin, channel, db, clock, metrics = env
         gate = ClockGate(clock, [(60, False)])
         plugin.pm.register(gate, name="clock_gate")
@@ -382,7 +386,10 @@ class TestLateRefusal:
         drained = await _start_turn(plugin, channel, text="next message")
         await asyncio.wait_for(drained, 1)
 
-        assert _late_rows(channel.conversation.messages) == []
+        late = _late_rows(channel.conversation.messages)
+        assert len(late) == 1
+        assert "clock_gate" in late[0]["content"]
+        assert NO_REASON_GIVEN in late[0]["content"]
         assert len(metrics.named(CHECK_MISSED_METRIC)) == 1
 
     @pytest.mark.parametrize("cancelled", [False, True], ids=["pending", "pending-cleared"])

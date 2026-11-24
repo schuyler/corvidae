@@ -1,6 +1,6 @@
 """Retention prunes old retrieval_log / retrieval_candidate rows (issue #654),
 and two logging fixes that ride along: no candidate row for a memory already
-redacted, and outcome ``not_admitted`` when no funnel is registered."""
+redacted."""
 
 import time
 
@@ -111,20 +111,6 @@ async def test_no_candidate_row_for_a_memory_redacted_after_scoring():
 
     _rid, rows = await only_retrieval(db)
     assert mem not in rows
-    await db.close()
-
-
-async def test_selected_candidates_read_not_admitted_without_a_funnel():
-    """Funnel not registered: a selected candidate logs not_admitted, not
-    dropped_budget."""
-    memory, _e, channel, conv, db = await build_retrieval_env()
-    memory.pm.unregister(name="funnel")
-    mem = await seed(db, channel.id, QUERY, 1, 2)
-
-    await ask_plain(memory, channel, conv, QUERY)
-
-    _rid, rows = await only_retrieval(db)
-    assert rows[mem]["outcome"] == "not_admitted"
     await db.close()
 
 

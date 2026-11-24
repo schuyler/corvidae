@@ -15,8 +15,7 @@ from corvidae.fork import ForkRefused
 from helpers import FakeForkAgent, window_of
 from .test_appraisal_stage2 import VALID_STAGE2_JSON, _read_appraisal, _teardown, build_env
 
-FORK_JSON = json.dumps({"valence": 0.1, "stakes": 0.2, "ambiguity": 0.3,
-                        "commitment_density": 0.4, "novelty": 0.6, "correction": False})
+FORK_JSON = json.dumps({"past_claims": [{"claim": "the heater failed before", "queries": ["heater"]}]})
 
 
 async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, overrides=None):
@@ -33,11 +32,10 @@ async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, o
         env.appraisal.config = new_config
         await env.appraisal.on_config_reload(new_config)
     env.channel.runtime_overrides.update(overrides or {})
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text="is the heater the culprit?", annotations={})
     await env.appraisal._run_stage2(env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
-    stored = ((await _read_appraisal(env.db, "k")) or {}).get("stage2")
+    stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown(env)
     return env, stored
 
@@ -50,11 +48,10 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
     assert call["stage"] == "appraisal"
     assert (call["cut"], call["extra_body"]) == (None, STAGE2_EXTRA_BODY)
     assert call["instruction"].startswith(DEFAULT_STAGE2_FORK_PROMPT)
-    for part in ("«is the heater the culprit?»", "«yes, brownout»", "no retrieval recorded"):
+    for part in ("«is the heater the culprit?»", "«yes, brownout»"):
         assert part in call["instruction"]
     assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("appraisal", "k")
-    assert stored["valence"] == 0.1
-    assert env.appraisal.get_last_stage2(env.channel.id)["novelty"] == 0.6
+    assert stored == json.loads(FORK_JSON)
 
 
 @pytest.mark.parametrize("agent,window_rowids,rowid,reason", [
@@ -69,7 +66,6 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
      (41, 42), 41, "RuntimeError"),
     (FakeForkAgent({"appraisal"}, text=""), (41, 42), 41, "ValueError"),  # empty reply
     (FakeForkAgent({"appraisal"}, text="no json here"), (41, 42), 41, "ValueError"),
-    (FakeForkAgent({"appraisal"}, text=json.dumps({"valence": 0.5})), (41, 42), 41, "KeyError"),
 ])
 async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, reason):
     """#320: a miss makes no background-role call, stores no stage 2, and
@@ -79,7 +75,6 @@ async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, re
     # No standalone call on any role, nothing persisted, nothing readable.
     assert env.stub.chat_calls == []
     assert stored is None
-    assert env.appraisal.get_last_stage2(env.channel.id) is None
     # Exactly one skip warning, with identifier and reason.
     skips = [r for r in caplog.records
              if r.levelno == logging.WARNING and "stage-2 appraisal skipped" in r.getMessage()]

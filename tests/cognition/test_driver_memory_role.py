@@ -16,6 +16,8 @@ from corvidae.channel import Channel
 from corvidae.context import ContextWindow
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_held, add_kernel_registry
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin
@@ -41,7 +43,7 @@ def _render(name: str) -> dict:
 
 
 async def _start_daemon_plugins(state_dir: Path):
-    """persistence + llm + funnel + memory, started through pm.ahook.on_start
+    """persistence + llm + held store + funnel + memory, started through pm.ahook.on_start
     with the rendered buster-memrole config, as the daemon starts them.
 
     on_start hooks run concurrently, so MemoryPlugin may find no database yet
@@ -51,6 +53,11 @@ async def _start_daemon_plugins(state_dir: Path):
     config = _render("buster-memrole")
     config["_base_dir"] = state_dir
     pm = create_plugin_manager()
+    # Kernel clock and idle tracker MemoryPlugin.on_start resolves, and the
+    # kernel's held-text store that admits what memory contributes (#1176).
+    install_kernel_clock(pm)
+    add_kernel_registry(pm)
+    await add_kernel_held(pm)
     persistence = PersistencePlugin()
     pm.register(persistence, name="persistence")
     llm = LLMPlugin()
@@ -65,10 +72,15 @@ async def _start_daemon_plugins(state_dir: Path):
     return pm, memory, persistence
 
 
-async def _turn(memory: MemoryPlugin, channel: Channel, text: str) -> None:
-    """The turn-loop entry: append the user message, fire retrieval."""
+async def _turn(pm, memory: MemoryPlugin, channel: Channel, text: str) -> None:
+    """The turn-loop entry: append the user message, gather memory's
+    contribution, and let the held store admit it through the funnel's policy."""
     channel.conversation.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+    contribution = await memory.before_compose(channel=channel, trace_id=None, annotations={})
+    await pm.get_plugin("held").admit_for_turn(
+        channel, channel.conversation, trace_id=None, origin=None,
+        contributions=[contribution] if contribution is not None else [],
+    )
 
 
 class TestProbeSequence:
@@ -83,11 +95,11 @@ class TestProbeSequence:
         channel.conversation = ContextWindow(channel.id)
         channel.conversation.system_prompt = "You are Buster."
         try:
-            await _turn(memory, channel, MEMROLE_WARMUP)
+            await _turn(pm, memory, channel, MEMROLE_WARMUP)
             assert memory_schema_ready(db_path)
 
             seed_memory_row(db_path, channel.id, MEMROLE_FACT)
-            await _turn(memory, channel, MEMROLE_QUERY)
+            await _turn(pm, memory, channel, MEMROLE_QUERY)
             prompt = channel.conversation.build_prompt(mid_conversation_system_role="user")
         finally:
             # Closes the DB and the LLM client sessions on_start opened.

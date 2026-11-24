@@ -1,8 +1,10 @@
 # Critique prompt — constrained lens
 
 System prompt for `CritiquePlugin`'s constrained lens (bootstrap-mapping
-§3.3; phase-2 WP2.7), selected when the exchange's appraisal shows high
-commitment density: the exchange contains concrete commitments, facts,
+§3.3; phase-2 WP2.7), selected when the appraisal fork's critique vector picks
+its question
+(`critique.lens.<name>.appraisal_question`): the
+exchange contains concrete commitments, facts,
 numbers, or promises, so the risk is a violated constraint. Schema-
 constrained JSON objections — structured, not free text. Runs as a fork on
 the `critique` stage's profile as a silent background task.

@@ -15,9 +15,10 @@ from typing import Iterator
 import aiosqlite
 from aiohttp import web
 
+from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.web import Panel
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.outbound import (
     Outbound,
@@ -47,12 +48,14 @@ def _visible(row: dict) -> dict:
 
 
 def _wire_row(row: object) -> dict:
-    """A window row as the client sees it: its type tag and visible fields."""
+    """A window row as the client sees it: type tag, visible fields, token count."""
     # A non-dict row (PRD 3.1.18.1) is shown as its repr.
     if not isinstance(row, dict):
-        return {"type": None, "msg": {"role": None, "content": repr(row)}}
+        return {"type": None, "msg": {"role": None, "content": repr(row)},
+                "tokens": message_tokens(row)}
     kind = row.get("_message_type", MessageType.MESSAGE)
-    return {"type": MessageType(kind).value, "msg": _visible(row)}
+    return {"type": MessageType(kind).value, "msg": _visible(row),
+            "tokens": message_tokens(row)}
 
 
 def _row_bytes(row: object) -> bytes:
@@ -121,7 +124,7 @@ def _json(data: dict) -> web.Response:
 class ContextPanelPlugin(CorvidaePlugin):
     """Web console sidebar section with one tab per loaded channel, each showing that channel's context window."""
 
-    depends_on = frozenset({"registry", "persistence"})
+    depends_on = frozenset({"registry", "persistence", "agent"})
     optional_depends_on = frozenset({"web"})
 
     def __init__(self, pm=None) -> None:
@@ -238,10 +241,17 @@ class ContextPanelPlugin(CorvidaePlugin):
         rows = conv.messages
         shown = rows if request.query.get("all") == "1" else rows[-WINDOW_ROWS:]
         wire = [_wire_row(r) for r in shown]
+        tools = _tools(conv)
         body = {
             "loaded": True,
             "system_prompt": conv.system_prompt,
-            "tools": _tools(conv),
+            "system_prompt_tokens": count_tokens(conv.system_prompt),
+            "tools": tools,
+            # None while the tool view is unresolved, like tools itself. The
+            # count is of the compact wire serialization (what the model pays
+            # for); the panel pretty-prints tools for display, so shown text
+            # and counted text differ by whitespace by design.
+            "tools_tokens": None if tools is None else count_tokens(json.dumps(tools, default=str)),
             "total": len(rows),
             "first": len(rows) - len(shown),
             "rows": wire,
@@ -255,24 +265,10 @@ class ContextPanelPlugin(CorvidaePlugin):
         """``agent.mid_conversation_system_role`` as the agent resolved it.
 
         Read from the live agent so a config reload is honoured without this
-        plugin parsing the key a second time; "system" is the agent's own
-        default when the key is absent (agent.py's
-        ``_resolve_mid_conversation_system_role``).
+        plugin parsing the key a second time; the agent resolves an absent key
+        to its own default (agent.py's ``_resolve_mid_conversation_system_role``).
         """
-        agent = self.pm.get_plugin("agent") if self.pm is not None else None
-        role = getattr(agent, "mid_conversation_system_role", None)
-        if role is None:
-            # The agent's own default, used knowingly: with no agent (a panel on
-            # a hand-built plugin manager) there is no resolved key to read, and
-            # a rename would otherwise silently show a different role than the
-            # model receives (#695 review).
-            logger.warning(
-                "context panel: no agent.mid_conversation_system_role to read; "
-                "rendering mid-conversation system rows as 'system', which may "
-                "not be the role the agent uses",
-            )
-            return "system"
-        return role
+        return get_dependency(self.pm, "agent", Agent).mid_conversation_system_role
 
     async def rendered(self, request: web.Request) -> web.Response:
         """A channel's window as the request body the agent would send (#695).
@@ -293,7 +289,8 @@ class ContextPanelPlugin(CorvidaePlugin):
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role=self._mid_system_role(),
         )
-        return _json({"loaded": True, "messages": messages, "total": len(messages)})
+        return _json({"loaded": True, "messages": messages, "total": len(messages),
+                      "total_tokens": sum(message_tokens(m) for m in messages)})
 
     async def poll(self, request: web.Request) -> web.Response:
         """Tail a channel from the client's cursor, plus its live events."""

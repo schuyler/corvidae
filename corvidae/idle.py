@@ -55,8 +55,20 @@ def _effective_repeat(name: str, period: float, repeat: float | None) -> float:
     return effective
 
 
-def validate_daemon_config(daemon: dict) -> None:
-    """Raise ValueError if ``daemon`` carries a removed idle key."""
+def validate_daemon_config(daemon: object) -> None:
+    """Raise ValueError if ``daemon`` is not a mapping or carries a removed key.
+
+    A scalar ``daemon: 5`` used to reach the ``in`` below and raise TypeError,
+    which the reload path logs as a generic watcher failure naming neither the
+    key nor a fix (#850).
+    """
+    if daemon is None:
+        return
+    if not isinstance(daemon, dict):
+        raise ValueError(
+            f"daemon must be a mapping of daemon settings (e.g. "
+            f"{{shutdown_timeout: 3}}); got {daemon!r} ({type(daemon).__name__})"
+        )
     for key in _REMOVED_DAEMON_KEYS:
         if key in daemon:
             raise ValueError(

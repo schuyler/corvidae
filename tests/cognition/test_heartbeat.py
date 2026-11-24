@@ -119,6 +119,10 @@ async def make_env():
         if with_memory:
             # Memory declares llm; the heartbeat path never calls it.
             pm.register(LLMPlugin(), name="llm")
+            # Memory reports on the trace protocol plugin's hook; Runtime's
+            # install_plugin_hookspecs below installs its specs.
+            from corvidae_cognition.trace import TracePlugin
+            pm.register(TracePlugin(pm), name="trace")
             memory = MemoryPlugin()
             pm.register(memory, name="memory")
             await memory.on_init(pm=pm, config=config)

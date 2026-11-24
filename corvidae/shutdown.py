@@ -100,8 +100,11 @@ def parse_shutdown_timeouts(daemon: object) -> ShutdownTimeouts:
     return ShutdownTimeouts(graceful=graceful, exit=exit_timeout)
 
 
-def arm_exit_watchdog(timeout: float | None) -> None:
+def arm_exit_watchdog(timeout: float | None, *, phase: str = "graceful shutdown") -> None:
     """Start a daemon thread that forces exit 1 after ``timeout`` seconds.
+
+    ``phase`` names what finished before the wait began, so the WARNING is true
+    on the failed-start path too: shutdown never ran there (#854).
 
     None disables the watchdog. CPython joins non-daemon threads before
     atexit, but a daemon thread keeps running during that join, so it can
@@ -125,11 +128,12 @@ def arm_exit_watchdog(timeout: float | None) -> None:
             if t is not me and t is not main and not t.daemon
         ]
         logger.warning(
-            "process did not exit within %ss after graceful shutdown finished "
+            "process did not exit within %ss after %s finished "
             "(daemon.exit_timeout); forcing exit 1. Non-daemon threads still "
             "running: %s. Something left a thread running or blocked, often a "
             "connection a plugin's on_stop did not close.",
             timeout,
+            phase,
             ", ".join(names) if names else "none",
         )
         # Flush (not close) the root handlers so the line survives os._exit.

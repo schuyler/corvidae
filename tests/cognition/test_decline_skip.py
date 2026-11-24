@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from corvidae.task import TaskPlugin
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
 
@@ -59,10 +60,14 @@ def _window_ending_in(channel: Channel, text: str, final_type: MessageType) -> C
     return conv
 
 
-class _QueueSpy:
-    """Stands in for TaskPlugin: records each enqueued task's description."""
+class _QueueSpy(TaskPlugin):
+    """Stands in for TaskPlugin: records each enqueued task's description.
+
+    Subclasses TaskPlugin so get_dependency's isinstance check (#1180) passes.
+    """
 
     def __init__(self):
+        super().__init__()
         self.descriptions: list[str] = []
         self.task_queue = SimpleNamespace(enqueue=self._enqueue)
 
@@ -129,35 +134,21 @@ class TestAppraisalSkipsDeclines:
 # ---------------------------------------------------------------------------
 
 
-class _LensAppraisal(CorvidaePlugin):
-    """An appraisal store whose stage 2 always selects the predictive lens."""
-
-    depends_on = frozenset()
-
-    async def get_appraisal(self, trace_id):
-        return None
-
-    def get_last_stage2(self, channel_id):
-        return {"ambiguity": 0.9}
-
-    def get_originating_text(self, trace_id):
-        return "q"
-
-    def add_stage2_listener(self, callback):
-        pass
-
-
 async def _critique_env(tmp_path):
-    """CritiquePlugin with a lens-selecting appraisal and a queue spy."""
+    """CritiquePlugin with no appraisal plugin (the fallback samples every
+    exchange at critique.fallback_rate 1.0, so a judged turn gets one random
+    lens) and a queue spy."""
     from corvidae_cognition.critique import CritiquePlugin
 
     pm = create_plugin_manager()
     spy = _QueueSpy()
     pm.register(spy, name="task")
-    pm.register(_LensAppraisal(), name="appraisal")
     critique = CritiquePlugin()
     pm.register(critique, name="critique")
-    cfg = {"daemon": {"session_db": str(tmp_path / "sessions.db")}}
+    cfg = {
+        "daemon": {"session_db": str(tmp_path / "sessions.db")},
+        "critique": {"fallback_rate": 1.0},
+    }
     await critique.on_init(pm=pm, config=cfg)
     return SimpleNamespace(pm=pm, spy=spy, critique=critique)
 
@@ -177,7 +168,7 @@ class TestCritiqueSkipsDeclines:
             trace_id="t-decline", annotations={}, logprobs=None,
         )
 
-        # With no stage-2 listener a judged turn gets one random lens task;
+        # With no appraisal a judged turn gets one random lens task (rate 1.0);
         # proactivity is a lens (#1126), so a permission question adds nothing.
         expected = ["critique"] if judged else []
         assert env.spy.descriptions == expected
@@ -211,7 +202,7 @@ class TestCritiqueSkipsDeclines:
 
 
 class _WithholdAll(CorvidaePlugin):
-    """Another gate: vetoes every final, as an enforcing engagement gate would."""
+    """Another gate: vetoes every final, as a quiet-origin veto would."""
 
     depends_on = frozenset()
 
@@ -237,8 +228,7 @@ async def turn_env(tmp_path):
     for name, p in (("silence", silence), ("appraisal", appraisal), ("critique", critique)):
         plugin.pm.register(p, name=name)
         await p.on_init(pm=plugin.pm, config=cfg)
-    for p in (appraisal, critique):
-        await p.on_start(config=cfg)
+    await critique.on_start(config=cfg)
     # Record what the turn hands the task queue; running it would need models.
     task_plugin = plugin.pm.get_plugin("task")
     enqueued: list[str] = []
@@ -248,7 +238,7 @@ async def turn_env(tmp_path):
 
     task_plugin.task_queue.enqueue = _record
     yield SimpleNamespace(plugin=plugin, channel=channel, enqueued=enqueued)
-    for p in (critique, appraisal, silence):
+    for p in (critique, silence):
         await p.on_stop()
     await task_plugin.on_stop()
     await db.close()

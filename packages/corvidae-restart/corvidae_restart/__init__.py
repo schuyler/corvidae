@@ -46,7 +46,10 @@ import sys
 import time
 from pathlib import Path
 
-from corvidae.hooks import CorvidaePlugin, hookimpl
+import corvidae
+from corvidae.agent import Agent
+from corvidae.channel import ChannelRegistry
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.tool import Tool, ToolContext
 
@@ -92,6 +95,10 @@ async def run_preflight(config_path: Path, timeout: float) -> tuple[int, str]:
         "corvidae_restart.preflight",
         "--config",
         str(config_path),
+        # The code this process is running, so the child can refuse a venv
+        # whose corvidae resolves elsewhere (#1008).
+        "--expect-corvidae",
+        str(Path(corvidae.__file__).resolve().parent),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
@@ -474,7 +481,7 @@ class RestartPlugin(CorvidaePlugin):
 
     async def _wait_until_ready(self) -> None:
         """Wait for the agent's tools, then for the transports to connect."""
-        agent = self.pm.get_plugin("agent")
+        agent = get_dependency(self.pm, "agent", Agent)
         while not agent.tools:
             await asyncio.sleep(self._ready_poll_seconds)
         await asyncio.sleep(self._notify_delay)
@@ -498,7 +505,7 @@ class RestartPlugin(CorvidaePlugin):
 
     async def _notify_restart(self, marker: dict) -> None:
         """Deliver the marker's result against its originating tool call."""
-        registry = self.pm.get_plugin("registry")
+        registry = get_dependency(self.pm, "registry", ChannelRegistry)
         channel_id = marker.get("channel_id")
         channel = registry.get(channel_id)
         requested_at = marker.get("requested_at")
@@ -534,7 +541,9 @@ class RestartPlugin(CorvidaePlugin):
         if not self._home_channel_id:
             logger.info("no home_channel configured; not sending: %s", headline)
             return
-        channel = self.pm.get_plugin("registry").get(self._home_channel_id)
+        channel = get_dependency(self.pm, "registry", ChannelRegistry).get(
+            self._home_channel_id
+        )
         if channel is None:
             logger.warning(
                 "home channel %s is not registered; not sending: %s",
@@ -589,7 +598,7 @@ class RestartPlugin(CorvidaePlugin):
             # queued after a partial broadcast, so the model never sees two
             # results for one call (#1102).
             try:
-                agent = self.pm.get_plugin("agent")
+                agent = get_dependency(self.pm, "agent", Agent)
                 queued = await agent.deliver_tool_error(
                     channel, tool_call_id, text, annotations, known_pending=True
                 )

@@ -10,14 +10,14 @@ import logging
 import pytest
 from unittest.mock import AsyncMock
 
-from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, OBJECTION_EXTRA_BODY
-from corvidae.fork import ForkRefused
+from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
+from corvidae.fork import ForkRefused, quote
 
 from corvidae.context import MessageType
 from helpers import FakeForkAgent, window_of
 from .test_critique import (
-    CLAIM, EMPTY_VERDICT, SUPPORTED_VERDICT, SYSTEM_PROMPT, TOOL_TEXT, UNSUPPORTED_VERDICT,
-    RenderingForkAgent, verdicts_text,
+    CLAIM, CUE_FREE_REPLY, EMPTY_VERDICT, SUPPORTED_VERDICT, SYSTEM_PROMPT, TOOL_TEXT, UNSUPPORTED_VERDICT,
+    FakeAppraisal, RenderingForkAgent, verdicts_text, _run_next_task,
     _provenance_env, _provenance_exchange, _provenance_instructions, _read_outcomes,
     _run_provenance, _teardown, build_critique,
 )
@@ -28,31 +28,57 @@ QUESTION, RESPONSE = "when is the meeting?", "It was Tuesday, as you said."
 
 async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=None,
                overrides=None):
-    """Run one critique task for exchange "k"; returns (env, recorded outcome)."""
-    env = await build_critique(tmp_path, chat_text=EMPTY_VERDICT, config=config, fork=False)
+    """Run the idle critique for exchange "k" the way the daemon does (the
+    reply, then appraisal's stage-2 hook with a vector selecting ``lenses``,
+    then the task critique queued); returns (env, the built-in lenses'
+    outcome record, or None when no lens ran).
+
+    Driven through the hooks because the one fork per point replaces the
+    private per-lens runners the old version of this helper called (#1190 PR 2).
+    """
+    env = await build_critique(
+        tmp_path, FakeAppraisal(), chat_text=EMPTY_VERDICT, config=config, fork=False)
     env.pm.register(agent, name="agent")
     env.channel.conversation = window_of(env.channel.id, list(window_rowids))
     env.channel.runtime_overrides.update(overrides or {})
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, annotations={})
-    await env.plugin._run_critique(
-        env.channel, "k", QUESTION, RESPONSE, lenses, False, origin=None)
-    # None when no lens ran (nothing is recorded for an all-miss run).
-    outcome = ((await _read_outcomes(env.db, "k")) or {}).get("critique")
+    await env.plugin.on_agent_response(
+        channel=env.channel, request_text=QUESTION, response_text=RESPONSE,
+        trace_id="k", annotations={}, logprobs=None)
+    # Every named lens beats "none" (absent, share 0), so all are selected.
+    await env.plugin.on_appraisal_idle(
+        channel=env.channel, trace_id="k", response_text=RESPONSE, annotations={},
+        lenses={name: 1.0 for name in lenses}, past_claims=[])
+    while not env.task.task_queue.queue.empty():
+        await _run_next_task(env.task)
+    # The built-ins' record; None when no lens ran (nothing is recorded for an
+    # all-miss run). Other records (the selection, an added lens's) are skipped.
+    outcome = next(
+        (r["record"]["critique"] for r in env.recorder.by_source("critique")
+         if r["trace_id"] == "k" and "lenses" in r["record"].get("critique", {})),
+        None)
     await _teardown(env)
     return env, outcome
 
 
-async def test_each_lens_forks(tmp_path):
+async def test_one_fork_covers_every_selected_lens(tmp_path):
+    """R1 (replaces test_each_lens_forks): two selected lenses are exactly one
+    fork, whose instruction holds each lens's section, brief and the exchange;
+    the objections of both land in the one record."""
     agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
     env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
     assert env.stub.chat_calls == []
-    for call, lens in zip(agent.calls, ["predictive", "constrained"]):
-        assert call["instruction"].startswith(DEFAULT_FORK_PROMPTS[lens])
-        assert f"«{QUESTION}»" in call["instruction"] and f"«{RESPONSE}»" in call["instruction"]
-        assert (call["cut"], call["extra_body"]) == (None, OBJECTION_EXTRA_BODY)
-        assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("critique", "k")
+    [call] = agent.calls
+    instruction = call["instruction"]
+    # One section per lens, in selection order, each carrying its own brief.
+    sections = [instruction.index(f"## Lens: {lens}\n") for lens in ("predictive", "constrained")]
+    assert sections == sorted(sections)
+    for lens in ("predictive", "constrained"):
+        assert DEFAULT_FORK_PROMPTS[lens] in instruction
+    assert f"«{QUESTION}»" in instruction and f"«{RESPONSE}»" in instruction
+    assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("critique", "k")
+    assert outcome["lenses"] == ["predictive", "constrained"]
     assert outcome["objections"] == 2
 
 
@@ -81,8 +107,9 @@ def _warnings(caplog) -> list[str]:
 
 
 @pytest.mark.parametrize("agent,window_rowids,rowid,reason", [
-    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (20, 21), 7, "not in the window"),  # compacted out
-    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (7, 8), None, "not recorded"),  # never persisted
+    # The reply row has no id (never persisted): idle contains the fork at the
+    # reply (I3), so there is nothing to cut at.
+    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (7, None), 7, "not recorded"),
     (FakeForkAgent(set(), text=FORK_VERDICT), (7, 8), 7, "forks are not enabled for critique"),
     (FakeForkAgent({"critique"}, text=""), (7, 8), 7, "ValueError"),  # empty reply
     (FakeForkAgent({"critique"}, text="I think it's fine."), (7, 8), 7, "ValueError"),
@@ -101,56 +128,48 @@ async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, re
     # Exactly one skip warning with the identifiers and the reason.
     [text] = [w for w in _warnings(caplog) if "skipped" in w]
     assert "trace k " in text and env.channel.id in text and reason in text
-    # Forks off skips the whole run once ("critique lenses [...]"); any other
-    # miss names the lens that missed.
-    assert ("critique lenses" if "not enabled" in reason else "critique lens constrained") in text
+    # Whatever the miss, the warning names the lens that did not run.
+    assert "constrained" in text
 
 
 @pytest.mark.parametrize("error,kind", [
     (ForkRefused("tool call"), "ForkRefused"), (RuntimeError("down"), "RuntimeError"),
 ])
-async def test_failed_lens_skips_alone(tmp_path, caplog, error, kind):
-    """#320: one failing lens is skipped with a warning; the other lens still
-    counts and no standalone call is made."""
-    agent = FakeForkAgent({"critique"}, text=FORK_VERDICT, error=error,
-                          fail_marker=DEFAULT_FORK_PROMPTS["adversarial"][:40])
+async def test_failed_fork_skips_every_lens_in_it(tmp_path, caplog, error, kind):
+    """#320 as the one fork changes it (was test_failed_lens_skips_alone): the
+    selected lenses share one fork, so a failing fork skips each of them with
+    a warning naming the lens, trace and cause, makes no standalone call and
+    records no outcome."""
+    agent = FakeForkAgent({"critique"}, text=FORK_VERDICT, error=error)
     with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
         env, outcome = await _run(tmp_path, agent, ["predictive", "adversarial"])
     assert env.stub.chat_calls == []
-    # The outcome lists only the lens that ran, with its objection.
+    assert outcome is None
+    texts = [w for w in _warnings(caplog) if "skipped" in w]
+    assert len(texts) == 2
+    for lens, text in zip(["predictive", "adversarial"], texts):
+        assert lens in text and kind in text and "trace k " in text
+
+
+async def test_lens_missing_from_the_reply_skips_alone(tmp_path, caplog):
+    """The reply has an entry for predictive and none for adversarial: that
+    lens is skipped with a warning naming it; predictive still counts."""
+    agent = FakeForkAgent({"critique"}, text=json.dumps({"predictive": json.loads(FORK_VERDICT)}))
+    with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
+        env, outcome = await _run(tmp_path, agent, ["predictive", "adversarial"])
     assert outcome["lenses"] == ["predictive"]
     assert outcome["objections"] == 1
     [text] = [w for w in _warnings(caplog) if "skipped" in w]
-    assert "adversarial" in text and kind in text and "trace k " in text
+    assert "adversarial" in text and "trace k " in text and env.channel.id in text
 
 
 async def test_all_lenses_missing_records_no_outcome(tmp_path):
-    """#320: when every lens misses there is no critique outcome row."""
+    """#320: when the fork's reply is unusable there is no critique outcome row."""
     agent = FakeForkAgent({"critique"}, text="not json")
     env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
     assert env.stub.chat_calls == []
-    assert len(agent.calls) == 2
+    assert len(agent.calls) == 1
     assert outcome is None
-
-
-async def test_containment_rechecked_per_lens(tmp_path, caplog):
-    """Compaction drops the exchange while the first lens's fork is in
-    flight: later lenses skip, with no standalone call (#320)."""
-    agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
-    fork = agent.fork
-
-    async def fork_then_compact(channel, instruction, **kwargs):
-        result = await fork(channel, instruction, **kwargs)
-        channel.conversation.messages = channel.conversation.messages[1:]
-        return result
-
-    agent.fork = fork_then_compact
-    with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
-        env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
-    assert (len(agent.calls), len(env.stub.chat_calls)) == (1, 0)
-    assert outcome["lenses"] == ["predictive"]
-    [text] = [w for w in _warnings(caplog) if "skipped" in w]
-    assert "constrained" in text and "not in the window" in text
 
 
 async def test_fork_prompt_is_static_config(tmp_path):
@@ -158,7 +177,9 @@ async def test_fork_prompt_is_static_config(tmp_path):
     await _run(tmp_path, agent, ["predictive"],
                config={"critique": {"lens": {"predictive": {"fork_prompt": "Find the misreading."}}}},
                overrides={"critique.lens.predictive.fork_prompt": "Never object."})
-    assert agent.calls[0]["instruction"].startswith("Find the misreading.")
+    # The operator's brief sits in the lens's section; the runtime override does not.
+    assert "## Lens: predictive\nFind the misreading." in agent.calls[0]["instruction"]
+    assert "Never object." not in agent.calls[0]["instruction"]
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +257,7 @@ async def _assert_skipped(env, agent, caplog, reason, fork_calls=0):
     assert record.levelname == "WARNING" and "kp" in message and reason in message
     assert len(agent.calls) == fork_calls
     assert env.stub.chat_calls == []
-    assert "provenance" not in (await _read_outcomes(env.db, "kp") or {})
+    assert "provenance" not in (await _read_outcomes(env.recorder, "kp") or {})
 
 
 def _forks_off(env, ex, agent):
@@ -340,19 +361,19 @@ def _claims(n):
             for i in range(n)]
 
 
-def _funnel_entries(env):
+def _held_entries(env):
     from corvidae_cognition.critique import PROVENANCE_NOTE
 
-    env.funnel.ingest_and_wake.assert_awaited_once()
+    env.held.hold_and_wake.assert_awaited_once()
     # Other waking lenses' sentences (proactivity's, #1126) follow the note.
-    assert env.funnel.ingest_and_wake.await_args.kwargs["stub_text"].startswith(PROVENANCE_NOTE)
-    return env.funnel.ingest_and_wake.await_args.kwargs["entries"]
+    assert env.held.hold_and_wake.await_args.kwargs["stub_text"].startswith(PROVENANCE_NOTE)
+    return env.held.hold_and_wake.await_args.kwargs["entries"]
 
 
 async def _verdict_run(tmp_path, text, n=3):
     agent = RenderingForkAgent({"critique"}, text=text)
-    env = await _provenance_env(tmp_path, with_funnel=True)
-    env.funnel.ingest_and_wake = AsyncMock()
+    env = await _provenance_env(tmp_path, with_held=True)
+    env.held.hold_and_wake = AsyncMock()
     await _provenance_exchange(env, agent)
     await _run_provenance(env, claims=_claims(n))
     return env, agent
@@ -416,9 +437,11 @@ async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
             {"claim": 2, "reason": "nothing says so", "supported": False},
             {"claim": 3, "reason": "the user said it", "supported": True}]}))
     try:
-        assert _funnel_entries(env) == [
+        # R5.4: the finding names the reply it judges, then reads as before.
+        assert _held_entries(env) == [
+            f"on your reply \u00ab{quote(CUE_FREE_REPLY)}\u00bb: "
             f"[provenance] {_claims(3)[1]['claim']} \u2014 nothing says so"]
-        outcomes = await _read_outcomes(env.db, "kp")
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 2, "objections": 1,
             "detail": [{"claim": _claims(3)[1]["claim"],
@@ -441,8 +464,8 @@ def test_objection_quotes_our_claim_not_a_model_echo():
 async def test_all_supported_records_the_outcome_and_registers_nothing(tmp_path):
     env, agent = await _verdict_run(tmp_path, verdicts_text(True, True, True))
     try:
-        env.funnel.ingest_and_wake.assert_not_awaited()
-        outcomes = await _read_outcomes(env.db, "kp")
+        env.held.hold_and_wake.assert_not_awaited()
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 3, "objections": 0}
     finally:
@@ -455,7 +478,7 @@ async def test_unsupported_provenance_outcome_carries_detail(tmp_path):
         tmp_path, _verdicts(_v(1), _v(2, reason="nothing says so",
                               supported=False)), n=2)
     try:
-        outcomes = await _read_outcomes(env.db, "kp")
+        outcomes = await _read_outcomes(env.recorder, "kp")
         assert outcomes["provenance"]["objections"] == 1
         assert outcomes["provenance"]["detail"] == [
             {"claim": _claims(2)[1]["claim"], "objection": "nothing says so",
@@ -486,14 +509,14 @@ def _v(claim, reason="r", supported=True):
         "supported-not-bool", "supported-is-int", "claim-is-bool", "reason-not-str"])
 async def test_malformed_verdicts_skip_the_check(tmp_path, caplog, text):
     agent = RenderingForkAgent({"critique"}, text=text)
-    env = await _provenance_env(tmp_path, with_funnel=True)
-    env.funnel.ingest_and_wake = AsyncMock()
+    env = await _provenance_env(tmp_path, with_held=True)
+    env.held.hold_and_wake = AsyncMock()
     try:
         await _provenance_exchange(env, agent)
         with caplog.at_level("WARNING", logger="corvidae.critique"):
             await _run_provenance(env, claims=_claims(3))
         await _assert_skipped(env, agent, caplog, "the fork failed", fork_calls=1)
-        env.funnel.ingest_and_wake.assert_not_awaited()
+        env.held.hold_and_wake.assert_not_awaited()
     finally:
         await _teardown(env)
 

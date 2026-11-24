@@ -23,6 +23,8 @@ import pytest
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae_cognition.retention import run_retention_job
@@ -110,6 +112,10 @@ async def build_env():
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
+    install_kernel_clock(pm)
+    # Kernel registry consolidation resolves when it commits a range.
+    add_kernel_registry(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")

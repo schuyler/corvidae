@@ -31,11 +31,12 @@ import pytest
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.tools.memory_tools'
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_held, add_kernel_registry
 from corvidae_cognition.memory_tools import MemoryToolsPlugin
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -81,12 +82,15 @@ class StubEmbedClient:
 
 
 async def build_tools_env(config=None):
-    """Full pm: persistence + llm(stub) + funnel + memory + memory_tools."""
+    """Full pm: persistence + llm(stub) + held store + memory + memory_tools."""
     config = with_chat_llm(config or EMBED_CONFIG)
     db = await aiosqlite.connect(":memory:")
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
@@ -99,9 +103,8 @@ async def build_tools_env(config=None):
     llm._clients["embedding"] = embedder
     stub_llm_config(llm, config.get("llm"))
 
-    funnel = FunnelPlugin()
-    pm.register(funnel, name="funnel")
-    await funnel.on_init(pm=pm, config=config)
+    # The held-text store admits what memory contributes (#1176).
+    await add_kernel_held(pm)
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
@@ -715,6 +718,9 @@ class TestMessageFtsBackfill:
 
         # Now initialize the memory stack (schema + backfill)
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
@@ -765,6 +771,9 @@ class TestMessageFtsBackfill:
 
         # Initialize memory to create schema (including message_fts)
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")

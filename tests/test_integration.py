@@ -39,7 +39,7 @@ from corvidae.thinking import ThinkingPlugin
 from corvidae.tools import FileToolsPlugin, ShellToolPlugin, WebToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
 
-from helpers import stub_llm_config
+from helpers import add_kernel_held, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -241,6 +241,7 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     tool_collection_plugin = ToolCollectionPlugin(pm)
     pm.register(tool_collection_plugin, name="tools")
 
+    await add_kernel_held(pm)
     agent_loop = Agent(pm)
     pm.register(agent_loop, name="agent")
 
@@ -327,6 +328,7 @@ class TestGroupALifecycle:
         tool_collection_plugin = ToolCollectionPlugin(pm)
         pm.register(tool_collection_plugin, name="tools")
 
+        await add_kernel_held(pm)
         agent_loop = Agent(pm)
         pm.register(agent_loop, name="agent")
 
@@ -1385,6 +1387,7 @@ class TestGroupEErrorHandling:
         tool_collection_plugin = ToolCollectionPlugin(pm)
         pm.register(tool_collection_plugin, name="tools")
 
+        await add_kernel_held(pm)
         agent_loop = Agent(pm)
         pm.register(agent_loop, name="agent")
 

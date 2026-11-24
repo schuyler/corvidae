@@ -18,6 +18,7 @@ members = [
     "corvidae-restart",
     "corvidae-timepiece",
     "corvidae-vision",
+    "corvidae-whatsapp",
     "cross-channel-send",
     "github-webhook",
     "goals-notify",
@@ -602,6 +603,9 @@ vision = [
 webhook-notify = [
     { name = "webhook-notify" },
 ]
+whatsapp = [
+    { name = "corvidae-whatsapp" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -627,6 +631,7 @@ requires-dist = [
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
     { name = "corvidae-vision", marker = "extra == 'vision'", editable = "packages/corvidae-vision" },
+    { name = "corvidae-whatsapp", marker = "extra == 'whatsapp'", editable = "packages/corvidae-whatsapp" },
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
@@ -646,7 +651,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning", "alignment"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "whatsapp", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning", "alignment"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -758,6 +763,17 @@ requires-dist = [
 name = "corvidae-vision"
 version = "0.1.0"
 source = { editable = "packages/corvidae-vision" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "corvidae-whatsapp"
+version = "0.1.0"
+source = { editable = "packages/corvidae-whatsapp" }
 dependencies = [
     { name = "corvidae" },
 ]

@@ -24,6 +24,7 @@ from corvidae_inotify import (
     parse_events,
     watch_target,
 )
+from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry
 
 # --- fakes -------------------------------------------------------------------
@@ -51,7 +52,11 @@ class FakeAHook:
         )
 
 
-class FakeAgent:
+class FakeAgent(Agent):
+    # Shadow Agent's read-only `started` property so the stub can assign it;
+    # subclassing Agent is what makes it pass get_dependency's isinstance.
+    started: bool = False
+
     def __init__(self):
         self.started = True
         self._started_event = asyncio.Event()
@@ -455,7 +460,11 @@ async def test_settle_no_marker_uses_debounce_only(tmp_path):
 # --- startup deadlock regression ---------------------------------------------
 
 
-class UnstartedFakeAgent:
+class UnstartedFakeAgent(Agent):
+    # Shadow Agent's read-only `started` property so the stub can assign it;
+    # subclassing Agent is what makes it pass get_dependency's isinstance.
+    started: bool = False
+
     """Agent that has not yet started — the real Runtime ordering."""
     def __init__(self):
         self.started = False

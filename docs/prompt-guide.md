@@ -96,7 +96,7 @@ Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `cor
 
 ## Plugin-injected context
 
-Before every LLM call, Corvidae fires the `before_agent_turn` hook. Plugins use this hook to inject contextual information — memory, retrieved documents, background notes — by appending to `channel.conversation`:
+Before every LLM call, Corvidae fires the `before_agent_turn` hook. Plugins can use this hook to inject contextual information by appending to `channel.conversation`. Memory, retrieved documents and background notes should instead go through `before_compose`, right after it, where the kernel frames them as data (see [Avoiding duplicate injections](#avoiding-duplicate-injections)):
 
 ```python
 # corvidae/hooks.py (hookspec)
@@ -128,7 +128,7 @@ Each message injected during `before_agent_turn` is individually persisted by `A
 
 Nothing is removed from the middle of the window, so a plugin never clears its earlier `CONTEXT` entries before injecting fresh ones. Inject at the tail instead, and let two mechanisms keep the window from filling with repeats:
 
-- **Dedupe.** Route injections through the funnel (`admit()`, or `ingest()` / `ingest_and_wake()` for deferred payloads; see [cognition.md](cognition.md#funnelplugin)). It drops entries that already appear in `CONTEXT` still in the window.
+- **Dedupe.** Route injections through the kernel's held-text store: return a `Contribution` from `before_compose`, or call `held.hold()` / `held.hold_and_wake()` for text that is ready outside a turn (see [plugin-guide.md](plugin-guide.md#contributing-text-for-the-next-turn)). The store frames the text as data, and with the funnel loaded its admission policy drops entries that already appear in `CONTEXT` still in the window (see [cognition.md](cognition.md#funnelplugin)).
 - **Aging.** Stale `CONTEXT` retires when it ages past the compaction boundary, so the window does not accumulate it indefinitely.
 
 ---
@@ -151,7 +151,7 @@ The full sequence for processing a queue item (`agent.py:_process_queue_item`):
 2. **Append user message** — add to `conv.messages` as `MessageType.MESSAGE`.
 3. **Persist** — fire `persist_message` hook for the user message.
 4. **Compact if needed** — fire `resolve_compaction` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain). A `tryfirst` handler may return None, which lets `CompactionPlugin` still run after it.
-5. **Inject context** — fire `before_agent_turn` hook; plugins append `CONTEXT` entries. Each injected entry is then individually persisted via `persist_message`.
+5. **Inject context** — fire `before_agent_turn` hook; plugins append `CONTEXT` entries. Each injected entry is then individually persisted via `persist_message`. Then gather `before_compose` under the channel's check allowance: the held-text store frames what plugins contribute (and anything held for this turn), appends it as `CONTEXT` and persists it, unless a tool call is outstanding on the channel.
 6. **Build prompt** — call `conv.build_prompt()` to produce the final message list.
 7. **Call LLM** — send `[system, ...history, ...injected context]` plus tool schemas.
 8. **Append assistant response** — add to `conv.messages`, fire `persist_message`.

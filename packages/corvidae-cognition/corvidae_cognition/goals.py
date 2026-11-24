@@ -132,10 +132,12 @@ class GoalsPlugin(CorvidaePlugin):
     """Goals table, the goal tools, and goals' section of the heartbeat's beat."""
 
     hookspecs = GoalsSpec
-    depends_on = frozenset({"persistence", "memory", "funnel", "clock"})
+    depends_on = frozenset({"persistence", "memory", "clock"})
     # The heartbeat owns the hook spec goals' beat section implements; it is
     # optional so a config without a heartbeat starts quietly (#1079).
-    optional_depends_on = frozenset({"heartbeat"})
+    # corvidae_planning owns resolve_corvidae_planning_goals, which goals
+    # answers; optional for the same reason (#1181).
+    optional_depends_on = frozenset({"heartbeat", "corvidae_planning"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -279,7 +281,9 @@ class GoalsPlugin(CorvidaePlugin):
         return goal
 
     def _now(self) -> float:
-        return self.pm.get_plugin("clock").now()
+        from corvidae.clock import Clock
+
+        return get_dependency(self.pm, "clock", Clock).now()
 
     async def _fire_state_changed(
         self,
@@ -313,10 +317,11 @@ class GoalsPlugin(CorvidaePlugin):
         )
 
     async def open_goals(self) -> list[dict]:
-        """Open goals (not retired), front of the queue first. For the heartbeat's review.
+        """Open goals (not retired), front of the queue first. For the heartbeat's
+        review and the planning lens (resolve_corvidae_planning_goals).
 
-        Each is {"id", "age_seconds", "summary"}: the goal's id, age
-        since creation on the kernel clock, and its text.
+        Each is {"id", "age_seconds", "summary", "status"}: the goal's id,
+        age since creation on the kernel clock, its text and its status.
         """
         db = await self._require_db()
         now = self._now()
@@ -330,6 +335,11 @@ class GoalsPlugin(CorvidaePlugin):
             {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text, "status": status}
             for gid, text, created_at, status in rows
         ]
+
+    @hookimpl
+    async def resolve_corvidae_planning_goals(self) -> list[dict]:
+        """Answer the planning lens's request for the open goal list (#1181)."""
+        return await self.open_goals()
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:

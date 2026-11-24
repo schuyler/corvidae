@@ -185,6 +185,9 @@ class ForkToolPlugin(CorvidaePlugin):
                         max_turns=self._max_turns,
                         max_result_chars=max_result_chars,
                         call_timeouts=call_timeouts,
+                        # Every call the fork tool's loop dispatches is
+                        # offered to should_execute_tool (#148).
+                        check=agent.check_tool_call,
                     )
             finally:
                 reset_attribution(attribution_token)

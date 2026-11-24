@@ -29,6 +29,10 @@ from corvidae.lease import ProviderLeases
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
+# The wait for an unloaded router model is fixed: the key that set it decided
+# only how long the user waited before being told, and the turn retries anyway
+# (#956).
+MODEL_NOT_LOADED_WAIT = 60.0
 # Minimum sleep between "model is not loaded" retries, so a zero backoff
 # config cannot spin without spending the wait budget.
 MODEL_NOT_LOADED_MIN_DELAY = 1.0
@@ -193,7 +197,7 @@ class LLMClient:
         timeout: float | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
-        model_not_loaded_wait: float = 60.0,
+        model_not_loaded_wait: float = MODEL_NOT_LOADED_WAIT,
         raw_reasoning: bool = False,
         reasoning_reopened: str = "truncate",
     ) -> None:

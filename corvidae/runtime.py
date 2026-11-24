@@ -52,6 +52,7 @@ from corvidae.shutdown import (
     parse_shutdown_timeouts,
 )
 from corvidae.spill import NotificationSpill
+from corvidae.system_locale import adopt_system_locale
 from corvidae.tool_collection import (
     parse_max_agent_depth,
     parse_read_file_window_fraction,
@@ -249,7 +250,7 @@ class Runtime:
             # failure here still cleans up under the configured bound.
             self.shutdown_timeouts = parse_shutdown_timeouts(config.get("daemon"))
             validate_agent_config(config.get("agent", {}))
-            validate_daemon_config(config.get("daemon") or {})
+            validate_daemon_config(config.get("daemon"))
             # The llm profiles, defaults and stage map: a bad block exits
             # here, before any plugin loads.
             parse_llm_config(config.get("llm"))
@@ -560,7 +561,9 @@ class Runtime:
             # thread before raising would still hold interpreter exit open,
             # so arm the same bound as the shutdown path (#757).
             if exit_watchdog:
-                arm_exit_watchdog(self.shutdown_timeouts.exit)
+                arm_exit_watchdog(
+                    self.shutdown_timeouts.exit, phase="the failed startup"
+                )
             raise
         _starting = False
         loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)
@@ -583,6 +586,9 @@ def run_daemon(runtime: Runtime) -> None:
     The single entry-point helper for serve, cli and acp, so none of them can
     hang on a leaked non-daemon thread after shutdown.
     """
+    # Adopt LC_TIME before asyncio.run starts any thread (setlocale is not
+    # thread-safe), so dates and the web region follow the system locale.
+    adopt_system_locale()
     # Arming happens inside the coroutine so it also covers asyncio.run's
     # up-to-300 s default-executor join.
     asyncio.run(runtime.run(exit_watchdog=True))

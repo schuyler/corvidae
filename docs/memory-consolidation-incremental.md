@@ -115,7 +115,7 @@ The reply shape (`CONSOLIDATION_SCHEMA`, sent as `response_format`):
 The entries of one consolidation are stored in one `_commit`: one
 watermark compare-and-set, then one `_insert_record` per entry, in the
 same transaction. They share `msg_id_start`/`msg_id_end`, `created_at`,
-`importance`, `valence`, `participants` and the stamp; each has its own
+`importance`, `participants` and the stamp; each has its own
 `summary` (the narrative), `topic_tags` and embedding. Each entry is
 embedded separately; one embedding call with a list of texts does it.
 
@@ -271,11 +271,7 @@ catch-up, as today.
 
 ### 4. Importance without an extra call
 
-`_commit` scores one prior per consolidation. With `AppraisalPrior`
-registered, a range that contains an appraised exchange is scored from it
-with no model call; turn ranges from user-originated turns contain the
-turn's own user message, so they are normally covered. Notification
-turns (heartbeats) aren't, and fall back as below. Otherwise `RubricPrior` makes a
+`_commit` scores one prior per consolidation. Left to itself, `RubricPrior` makes a
 separate model call on the `rubric` stage. On a single-slot server that
 is a slot switch, and the turn trigger makes consolidations many times
 more frequent.
@@ -284,9 +280,9 @@ So the fork rates importance itself (the `importance` field), and
 `_commit` passes that value to `importance_prior.score` as an optional
 `hint`. `RubricPrior` returns the hint, clamped to [0, 1], when one is
 given, and calls the model only when it isn't (catch-up replies from a
-provider that dropped the field, older override prompts). `AppraisalPrior`
-ignores the hint where appraisal covers the range and passes it to its
-`RubricPrior` fallback where it doesn't.
+provider that dropped the field, older override prompts). (An appraisal-driven
+prior that scored covered ranges from the appraisal vector was removed with
+the vector, #1189.)
 
 ### 5. Retrieval skips what the window still holds
 

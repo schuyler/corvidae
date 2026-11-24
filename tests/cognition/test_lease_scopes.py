@@ -23,6 +23,8 @@ from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT, AppraisalPl
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT, MemoryPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
+from tests.cognition.trace_helpers import add_trace
+from fake_clock import install_kernel_clock
 from helpers import build_plugin_and_channel, window_of
 from test_lease_scopes import ScriptedSession, loud_unleased_records, usage_rows
 
@@ -48,9 +50,9 @@ def _is_consolidation_key(key: object) -> bool:
         and key.startswith(CONSOLIDATION_KEY_PREFIX)
         and len(key) > len(CONSOLIDATION_KEY_PREFIX)
     )
-CRITIQUE_VERDICT = json.dumps(
-    {"objections": [{"claim": "it was Tuesday", "objection": "you said Monday"}]}
-)
+# The combined critique fork answers one key per lens (#1190).
+CRITIQUE_VERDICT = json.dumps({"predictive": {"objections": [
+    {"claim": "it was Tuesday", "objection": "you said Monday"}]}})
 RUBRIC_REPLY = json.dumps({"importance": 0.6})
 DIALOG = [
     ("user", "my weather station keeps dropping wifi"),
@@ -105,6 +107,8 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     # The memory plugin's dedicated writer needs the daemon's WAL mode.
     await db.execute("PRAGMA journal_mode=wal")
     pm = plugin.pm
+    # memory's on_start resolves the kernel clock and idle tracker (#1180).
+    install_kernel_clock(pm)
     config = {
         **EMBED_CONFIG,
         "daemon": {"session_db": db_path},
@@ -118,6 +122,8 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm, config)
+    # The reporters fire on_trace_record, so the trace plugin comes first.
+    add_trace(pm)
     outcome = OutcomeLogPlugin()
     pm.register(outcome, name="outcome_log")
     memory = MemoryPlugin()
@@ -131,7 +137,9 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     await llm.on_start(config)
     for p in (outcome, memory, appraisal, critique, usage_log):
         await p.on_init(pm=pm, config=config)
-        await p.on_start(config=config)
+        # Appraisal has no on_start of its own (#1189).
+        if p is not appraisal:
+            await p.on_start(config=config)
     # Embeddings are not under test: no HTTP and no usage row for them.
     llm._clients["embedding"] = _EmbedStub()
     plugin._client = llm.get_client()
@@ -151,14 +159,13 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
             (DEFAULT_FORK_PROMPTS["predictive"], CRITIQUE_VERDICT),
             (DEFAULT_CONSOLIDATION_FORK_PROMPT, CONSOLIDATION_JSON),
         ):
-            if isinstance(last, str) and last.startswith(prompt):
+            if isinstance(last, str) and prompt in last:
                 return _make_text_response(reply)
         return _make_text_response("ok")
 
     session.respond = respond
     yield Env(plugin, channel, db, session, memory, appraisal, critique, outcome, llm)
     await memory.wait_for_background_tasks()
-    await appraisal.on_stop()
     await critique.on_stop()
     await plugin.pm.get_plugin("task").on_stop()
     await llm.on_stop()
@@ -186,7 +193,6 @@ async def test_appraisal_stage2_is_keyed_by_channel(env: Env, caplog: pytest.Log
     """AC8: appraisal stage 2 (a fork) carries the channel id."""
     caplog.set_level(logging.WARNING)
     env.channel.conversation = window_of(env.channel.id, [41, 42])
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is the heater the culprit?", annotations={})
 
@@ -201,13 +207,14 @@ async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCap
     """AC8: a critique lens (a fork) carries the channel id."""
     caplog.set_level(logging.WARNING)
     env.channel.conversation = window_of(env.channel.id, [7, 8])
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.critique.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=7, text="when is the meeting?", annotations={})
 
-    await env.critique._run_critique(
-        env.channel, "k", "when is the meeting?", "It was Tuesday, as you said.",
-        ["predictive"], False, origin=None)
+    # The before-send point runs the lens fork inline through the public hook
+    # (the idle runner this called before was folded into the one fork, #1190).
+    await env.critique.on_appraisal_before_send(
+        channel=env.channel, trace_id="k", text="It was Tuesday, as you said.",
+        annotations={}, lenses={"predictive": 1.0})
 
     rows = await usage_rows(env.db)
     assert [key for stage, key, _m in rows if stage == "critique"] == [env.channel.id]

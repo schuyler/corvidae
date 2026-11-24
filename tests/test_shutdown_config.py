@@ -188,3 +188,23 @@ async def test_stop_uses_configured_graceful_bound(tmp_path, caplog):
     mock_os_exit.assert_called_once_with(1)
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("daemon.shutdown_timeout" in m for m in warnings), warnings
+
+
+def test_the_watchdog_warning_names_the_phase_it_waited_after(caplog):
+    """#854: on a failed start, shutdown never ran, so the line must not say it did."""
+    import threading
+
+    from corvidae.shutdown import arm_exit_watchdog
+
+    # The watchdog logs and then exits; patch the exit and wait for the log.
+    done = threading.Event()
+
+    def fake_exit(code):
+        done.set()
+
+    with patch("os._exit", fake_exit), caplog.at_level("WARNING"):
+        arm_exit_watchdog(0.01, phase="the failed startup")
+        assert done.wait(5), "the watchdog never fired"
+
+    assert "after the failed startup finished" in caplog.text
+    assert "after graceful shutdown finished" not in caplog.text

@@ -350,3 +350,41 @@ class TestGeneratedProjectContents:
             env={**os.environ, "PYTHONPATH": str(target)},
         )
         assert load.returncode == 0, load.stdout + load.stderr
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["config", "pm", "registry", "class", "2fa", "installed_plugin"],
+)
+def test_scaffold_refuses_a_name_that_cannot_load(tmp_path, monkeypatch, name):
+    """#849: a name that generates an unloadable project fails up front, named."""
+    from click.testing import CliRunner
+
+    from corvidae import scaffold
+    from corvidae.scaffold import scaffold_command
+
+    monkeypatch.chdir(tmp_path)
+    # Which plugins are installed depends on the extras this environment has,
+    # so the "taken by an installed plugin" case is supplied rather than found.
+    monkeypatch.setattr(
+        scaffold, "_installed_entry_point_names",
+        lambda: frozenset({"registry", "installed_plugin"}),
+    )
+    result = CliRunner().invoke(scaffold_command, [name])
+
+    assert result.exit_code != 0
+    assert f"plugin name {name!r}" in result.output
+    assert "choose another name" in result.output or "start it with a letter" in result.output
+    assert not (tmp_path / name).exists()
+
+
+def test_scaffold_accepts_an_ordinary_name(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from corvidae.scaffold import scaffold_command
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(scaffold_command, ["weather-report"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "weather_report").is_dir()

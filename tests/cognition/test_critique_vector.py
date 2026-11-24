@@ -20,7 +20,7 @@ revision additions), named by its ``T#`` in the docstring:
           alignment are checked in their own test files).
 
 Critique is driven the way the daemon drives it: ``on_agent_response`` and
-the appraisal stage-2 listener (``handle_stage2``) for the same trace, then
+appraisal's ``on_appraisal_idle`` hook for the same trace, then
 every task critique queued. Appraisal is driven through its real fork path.
 """
 
@@ -38,6 +38,7 @@ from corvidae_cognition.critique import (
 )
 
 from helpers import FakeForkAgent, window_of
+from tests.cognition.test_appraisal_hooks import PeerSpy, _wire
 from tests.cognition.test_appraisal_stage2 import (
     _read_appraisal,
     _teardown as _teardown_appraisal,
@@ -50,6 +51,7 @@ from tests.cognition.test_critique import (
     RenderingForkAgent,
     UNSUPPORTED_VERDICT,
     _fire,
+    _stage2_hook,
     _provenance_exchange,
     _read_outcomes,
     _run_next_task,
@@ -93,17 +95,10 @@ def _lens(name="mine", **kwargs):
     return Lens(name=name, **kwargs)
 
 
-class OfferAppraisal(FakeAppraisal):
-    """FakeAppraisal that also keeps the lens-offer provider critique hands
-    it (``AppraisalPlugin.set_lens_offer``), so a test reads the offer."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.offer = None
-
-    def set_lens_offer(self, provider):
-        # Critique registers its offers here at start-up.
-        self.offer = provider
+async def _offer(env):
+    """The offer critique makes at the idle trigger: what appraisal collects
+    from ``on_appraisal_prompts`` to score (#1169)."""
+    return await env.plugin.on_appraisal_prompts(channel=env.channel, trigger="idle")
 
 
 class Contributor(CorvidaePlugin):
@@ -136,7 +131,7 @@ class Misbuilder(CorvidaePlugin):
 
 async def _env(
     tmp_path, *lenses, contributors=None, chat_text=LENS_VERDICT, config=None,
-    with_funnel=False, rng=0.99, appraisal=None,
+    with_held=False, rng=0.99, appraisal=None,
 ):
     """critique's real wiring with an offer-recording appraisal and the
     lenses held by one ``kb`` contributor (or ``contributors``, name ->
@@ -144,8 +139,8 @@ async def _env(
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
-        tmp_path, appraisal or OfferAppraisal(stage2={"past_claims": []}),
-        chat_text, with_funnel=with_funnel, config=config,
+        tmp_path, appraisal or FakeAppraisal(),
+        chat_text, with_held=with_held, config=config,
         extra_plugins=contributors,
     )
     env.plugin._rng = FixedRng(value=rng)
@@ -165,9 +160,8 @@ async def _judged_turn(env, trace_id="kv", vector=None, origin="user", stage2="v
     await _fire(env, trace_id, origin=origin)
     if stage2 == "vector":
         stage2 = {"past_claims": [], "lenses": vector}
-    [listener] = env.appraisal.stage2_listeners
-    await listener(
-        channel=env.channel, trace_id=trace_id, response_text="resp",
+    await _stage2_hook(
+        env, channel=env.channel, trace_id=trace_id, response_text="resp",
         annotations={} if origin == "user" else {"origin": origin},
         stage2=stage2,
     )
@@ -187,10 +181,10 @@ def _warnings(caplog, *needles):
     ]
 
 
-def _watch_funnel(env):
-    """Spy on funnel.ingest and replace ingest_and_wake with a mock."""
-    env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-    env.funnel.ingest_and_wake = AsyncMock()
+def _watch_held(env):
+    """Spy on held.hold and replace hold_and_wake with a mock."""
+    env.held.hold = AsyncMock(wraps=env.held.hold)
+    env.held.hold_and_wake = AsyncMock()
 
 
 # ---------------------------------------------------------------------------
@@ -203,22 +197,19 @@ class TestSelection:
         ("mine", "LENSBRIEF-mine:"),                      # a plugin lens
         ("constrained", "[Self-critique: constrained]"),  # a built-in lens
     ])
-    async def test_top_of_the_vector_runs_alone_and_the_last_stage2_is_ignored(
+    async def test_every_lens_above_none_runs_in_one_fork(
         self, tmp_path, winner, marker,
     ):
-        """T1: the lens with the highest share runs, and only it, although
-        get_last_stage2 holds a vector the old selectors would act on."""
-        stale = OfferAppraisal(
-            stage1={"commitment_density": 0.9, "disagreement": 0.9},
-            stage2={"ambiguity": 0.95, "novelty": 0.9, "valence": 0.0, "past_claims": []},
-        )
-        env = await _env(tmp_path, _lens("mine"), appraisal=stale)
+        """T1 as #1190 S1 changes it (was: the top lens runs alone): every
+        lens whose share beats "none"'s is selected, and the selected lenses
+        share one fork; a lens at or below "none" does not run."""
+        env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt1", {winner: 0.6, "predictive": 0.3, "none": 0.1})
-            # Exactly one lens forked and it is the winner; the stale
-            # vector's predictive lens did not run.
-            assert [marker in c["instruction"] for c in env.fork_agent.calls] == [True]
-            assert _marker_runs(env, "[Self-critique: predictive]") == 0
+            # One fork carries both lenses above none.
+            assert len(env.fork_agent.calls) == 1
+            assert _marker_runs(env, marker) == 1
+            assert _marker_runs(env, "[Self-critique: predictive]") == 1
         finally:
             await _teardown(env)
 
@@ -230,13 +221,13 @@ class TestSelection:
         self, tmp_path, vector,
     ):
         """T2: "none" winning (or tying) runs nothing; lens_selection is
-        recorded with no ``lens`` key (RNG above sample_below_rate)."""
+        recorded with no ``lenses`` key (RNG above sample_below_rate)."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt2", vector)
             assert env.fork_agent.calls == []
-            selection = (await _read_outcomes(env.db, "kt2"))["lens_selection"]
-            assert "lens" not in selection
+            selection = (await _read_outcomes(env.recorder, "kt2"))["lens_selection"]
+            assert "lenses" not in selection
             assert selection["sampled"] is False
             assert selection["basis"] == "none"
         finally:
@@ -272,15 +263,16 @@ class TestSelection:
         finally:
             await _teardown(env)
 
-    async def test_the_earliest_offered_lens_wins_a_tie_between_lenses(self, tmp_path):
-        """T1 (tie among lenses): the earlier lens in offer order wins; the
-        built-ins come before an added lens."""
+    async def test_lenses_share_one_fork_in_offer_order(self, tmp_path):
+        """T1 (was: the earliest lens wins a tie between lenses): two lenses
+        tied above "none" are both selected, in one fork, in offer order: the
+        built-ins before an added lens."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt1b", {"mine": 0.4, "predictive": 0.4, "none": 0.2})
-            assert [
-                "[Self-critique: predictive]" in c["instruction"]
-                for c in env.fork_agent.calls] == [True]
+            [call] = env.fork_agent.calls
+            text = call["instruction"]
+            assert text.index("[Self-critique: predictive]") < text.index("LENSBRIEF-mine:")
         finally:
             await _teardown(env)
 
@@ -304,7 +296,7 @@ class TestQuestionRequired:
             "contrib": Contributor(bare, _lens("good"))})
         try:
             assert _warnings(caplog, "contrib", "bare", "appraisal_question"), caplog.text
-            offered = [name for name, _ in env.appraisal.offer()]
+            offered = [name for name, _ in await _offer(env)]
             assert "good" in offered and "bare" not in offered
         finally:
             await _teardown(env)
@@ -351,7 +343,7 @@ class TestConfigKeys:
                 "predictive": {"appraisal_question": "OPERATOR-QUESTION-predictive"},
             }}})
         try:
-            offer = dict(env.appraisal.offer())
+            offer = dict(await _offer(env))
             assert offer["mine"] == "OPERATOR-QUESTION-mine"
             assert offer["predictive"] == "OPERATOR-QUESTION-predictive"
         finally:
@@ -415,7 +407,7 @@ class TestConfigKeys:
             assert _warnings(
                 caplog, "critique.lens.mine.appraisal_question",
                 "one line, non-empty"), caplog.text
-            assert dict(env.appraisal.offer())["mine"] == QUESTION.format("mine")
+            assert dict(await _offer(env))["mine"] == QUESTION.format("mine")
             assert env.plugin._fork_prompts["mine"].startswith("RELOADED-BRIEF-9q")
         finally:
             await _teardown(env)
@@ -427,14 +419,14 @@ class TestConfigKeys:
 
         env = await _env(tmp_path, config={"critique": {"lens": {"predictive": None}}})
         try:
-            assert dict(env.appraisal.offer())["predictive"] == BUILTIN_LENSES["predictive"][0]
+            assert dict(await _offer(env))["predictive"] == BUILTIN_LENSES["predictive"][0]
         finally:
             await _teardown(env)
 
     async def test_provenance_fork_prompt_key_is_read(self, tmp_path):
         """T4b: critique.provenance.fork_prompt is the provenance brief."""
         env = await build_critique(
-            tmp_path, OfferAppraisal(), config={"critique": {
+            tmp_path, FakeAppraisal(), config={"critique": {
                 "sample_below_rate": 0.0,
                 "provenance": {"fork_prompt": "OPERATOR-PROVENANCE-7m"}}},
             fork=False)
@@ -455,14 +447,14 @@ class TestConfigKeys:
 
 class TestWake:
     async def test_a_waking_plugin_lens_wakes_the_channel(self, tmp_path):
-        """T5: a wakes=True plugin lens's objection fires ingest_and_wake on
+        """T5: a wakes=True plugin lens's objection fires hold_and_wake on
         the critique origin."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5a", {"mine": 1.0})
-            env.funnel.ingest_and_wake.assert_awaited_once()
-            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+            env.held.hold_and_wake.assert_awaited_once()
+            kwargs = env.held.hold_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert LENS_OBJECTION in "\n".join(kwargs["entries"])
         finally:
@@ -470,24 +462,24 @@ class TestWake:
 
     async def test_a_plugin_lens_without_wakes_waits(self, tmp_path):
         """T5: without wakes the objection waits for the next turn."""
-        env = await _env(tmp_path, _lens("mine"), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine"), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5b", {"mine": 1.0})
-            env.funnel.ingest.assert_called_once()
-            assert LENS_OBJECTION in "\n".join(env.funnel.ingest.call_args.kwargs["entries"])
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold.assert_called_once()
+            assert LENS_OBJECTION in "\n".join(env.held.hold.call_args.kwargs["entries"])
+            env.held.hold_and_wake.assert_not_awaited()
         finally:
             await _teardown(env)
 
     async def test_a_waking_plugin_lens_waits_on_a_critique_origin_turn(self, tmp_path):
         """T5: the critique-origin brake holds for a waking plugin lens."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5c", {"mine": 1.0}, origin="critique")
-            env.funnel.ingest.assert_called_once()
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold.assert_called_once()
+            env.held.hold_and_wake.assert_not_awaited()
         finally:
             await _teardown(env)
 
@@ -497,12 +489,12 @@ class TestWake:
         """T5: with a root set, the stub is RETENTION_WAKE_NOTE plus the
         appended sentence, even when the plugin lens's wake fires first."""
         env = await _env(
-            tmp_path, _lens("mine", wakes=True), with_funnel=True,
+            tmp_path, _lens("mine", wakes=True), with_held=True,
             config={"critique": {"retention": {"root": ROOT}}})
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5d", {"mine": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             base = RETENTION_WAKE_NOTE.format(root=quote(ROOT), marker=NO_REPLY_MARKER)
             assert stub.startswith(base)
             assert stub.endswith(WAKE_SENTENCE)
@@ -514,11 +506,11 @@ class TestWake:
     ):
         """T5 (Revision 3): no root and a waking plugin lens loaded: the
         stub is PROVENANCE_NOTE plus the appended sentence."""
-        env = await _env(tmp_path, _lens("mine", wakes=True), with_funnel=True)
+        env = await _env(tmp_path, _lens("mine", wakes=True), with_held=True)
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5e", {"mine": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             assert stub.startswith(PROVENANCE_NOTE)
             assert stub.endswith(WAKE_SENTENCE)
         finally:
@@ -531,13 +523,13 @@ class TestWake:
         which wakes, switched off), retention (selected by the vector) wakes
         with today's note, byte for byte."""
         env = await _env(
-            tmp_path, _lens("mine"), with_funnel=True, chat_text=RETENTION_VERDICT,
+            tmp_path, _lens("mine"), with_held=True, chat_text=RETENTION_VERDICT,
             config={"critique": {"retention": {"root": ROOT},
                                  "lens": {"proactivity": {"enabled": False}}}})
         try:
-            _watch_funnel(env)
+            _watch_held(env)
             await _judged_turn(env, "kt5f", {"retention": 1.0})
-            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            stub = env.held.hold_and_wake.await_args.kwargs["stub_text"]
             assert stub == RETENTION_WAKE_NOTE.format(
                 root=quote(ROOT), marker=NO_REPLY_MARKER)
         finally:
@@ -548,9 +540,7 @@ class TestWake:
 # T6, T8 - the stage-2 fork carries the offer; the vector is persisted
 # ---------------------------------------------------------------------------
 
-DIMENSIONS_JSON = {
-    "valence": 0.1, "stakes": 0.2, "ambiguity": 0.3,
-    "commitment_density": 0.4, "novelty": 0.6, "correction": False,
+CLAIMS_JSON = {
     "past_claims": [{"claim": "we met Friday", "queries": ["Friday"]}],
 }
 OFFER = [("alpha", "Did the reply say alpha?"), ("beta", "Did the reply say beta?")]
@@ -570,12 +560,12 @@ async def _appraise(tmp_path, reply, offer=OFFER, fork_prompt="Score it."):
     env.appraisal.config = new_config
     await env.appraisal.on_config_reload(new_config)
     if offer is not None:
-        env.appraisal.set_lens_offer(lambda: offer)
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
+        # A peer offers the lenses at the idle trigger (on_appraisal_prompts).
+        _wire(env, PeerSpy({"idle": offer}))
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is it Friday?", annotations={})
     await env.appraisal._run_stage2(env.channel, "k", "is it Friday?", "yes, Friday", None)
-    stored = ((await _read_appraisal(env.db, "k")) or {}).get("stage2")
+    stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown_appraisal(env)
     return env, agent, stored
 
@@ -586,8 +576,8 @@ class TestStage2Offer:
     ):
         """T6: the fork instruction lists each offered lens's name and
         question after the (overridden) prompt; one fork call, no
-        standalone call; dimensions and past_claims still parse."""
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        standalone call; past_claims still parse."""
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         env, agent, stored = await _appraise(tmp_path, reply)
         assert len(agent.calls) == 1
         assert env.stub.chat_calls == []
@@ -598,7 +588,6 @@ class TestStage2Offer:
             assert line in instruction
             assert instruction.index(line) > len("Score it.")
         assert '"lenses"' in instruction
-        assert stored["novelty"] == 0.6
         assert stored["past_claims"][0]["claim"] == "we met Friday"
 
     async def test_extra_body_carries_the_lenses_schema_without_touching_the_shared_one(
@@ -608,7 +597,7 @@ class TestStage2Offer:
         "none", required; the module's static schema is not modified."""
         from corvidae_cognition.appraisal import STAGE2_SCHEMA
 
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         _, agent, _ = await _appraise(tmp_path, reply)
         schema = agent.calls[0]["extra_body"]["response_format"]["json_schema"]["schema"]
         lenses = schema["properties"]["lenses"]
@@ -621,20 +610,21 @@ class TestStage2Offer:
         self, tmp_path,
     ):
         """T8: stage2["lenses"] is stored on the exchange, as shares of 1."""
-        reply = {**DIMENSIONS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
+        reply = {**CLAIMS_JSON, "lenses": {"alpha": 60, "beta": 10, "none": 30}}
         _, _, stored = await _appraise(tmp_path, reply)
         assert stored["lenses"] == pytest.approx({"alpha": 0.6, "beta": 0.1, "none": 0.3})
 
 
 class TestChoiceRecorded:
     async def test_the_chosen_lens_is_recorded(self, tmp_path):
-        """T8: lens_selection holds the lens, sampled false and the basis."""
+        """T8: lens_selection holds the lenses (a list, #1190), sampled false
+        and the basis."""
         env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt8", {"mine": 0.7, "none": 0.3})
-            outcomes = await _read_outcomes(env.db, "kt8")
+            outcomes = await _read_outcomes(env.recorder, "kt8")
             assert outcomes["lens_selection"] == {
-                "lens": "mine", "sampled": False, "basis": "vector"}
+                "lenses": ["mine"], "sampled": False, "basis": "vector"}
         finally:
             await _teardown(env)
 
@@ -649,7 +639,7 @@ def _parse(lenses, caplog, trace_id="k7", offered=("alpha", "beta")):
     (the raw JSON text, so NaN can be written); a None leaves the field out."""
     from corvidae_cognition.appraisal import _stage2_from_text
 
-    body = json.dumps({k: v for k, v in DIMENSIONS_JSON.items()})
+    body = json.dumps({k: v for k, v in CLAIMS_JSON.items()})
     if lenses is not None:
         body = body[:-1] + ', "lenses": ' + lenses + "}"
     caplog.set_level("WARNING")
@@ -661,7 +651,6 @@ class TestLensVector:
         """T7: the percentages become shares that sum to 1."""
         stage2 = _parse('{"alpha": 30, "beta": 10, "none": 10}', caplog)
         assert stage2["lenses"] == pytest.approx({"alpha": 0.6, "beta": 0.2, "none": 0.2})
-        assert stage2["novelty"] == 0.6
 
     def test_unknown_name_and_negative_value_are_dropped_with_warnings(self, caplog):
         """T7: each drop is a warning naming the entry and the trace."""
@@ -686,10 +675,10 @@ class TestLensVector:
                              ids=["missing", "not-a-dict", "all-zero"])
     def test_unusable_vector_leaves_none_and_warns_naming_the_trace(self, caplog, lenses):
         """T7: no usable vector warns with the trace and the reason; the
-        dimensions still land and stage2 has no ``lenses`` key."""
+        claims still land and stage2 has no ``lenses`` key."""
         stage2 = _parse(lenses, caplog)
         assert "lenses" not in stage2
-        assert stage2["novelty"] == 0.6
+        assert stage2["past_claims"][0]["claim"] == "we met Friday"
         assert _warnings(caplog, "k7", "lenses"), caplog.text
 
     async def test_critique_warns_naming_the_trace_when_stage2_is_none(
@@ -703,7 +692,7 @@ class TestLensVector:
             await _judged_turn(env, "kt7", stage2=None)
             assert _warnings(caplog, "kt7", "vector"), caplog.text
             assert env.fork_agent.calls == []
-            selection = (await _read_outcomes(env.db, "kt7"))["lens_selection"]
+            selection = (await _read_outcomes(env.recorder, "kt7"))["lens_selection"]
             assert selection == {"sampled": False, "basis": "no_vector"}
         finally:
             await _teardown(env)
@@ -723,10 +712,10 @@ class TestSampling:
         try:
             await _judged_turn(env, "kt9", {"mine": 0.1, "none": 0.9})
             assert _marker_runs(env, "LENSBRIEF-mine:") == 1
-            outcomes = await _read_outcomes(env.db, "kt9")
+            outcomes = await _read_outcomes(env.recorder, "kt9")
             assert outcomes["critique"]["mine"]["sampled"] is True
             selection = outcomes["lens_selection"]
-            assert (selection["lens"], selection["sampled"]) == ("mine", True)
+            assert (selection["lenses"], selection["sampled"]) == (["mine"], True)
         finally:
             await _teardown(env)
 
@@ -743,7 +732,7 @@ class TestOffers:
         question, in that order."""
         env = await _env(tmp_path, config={"critique": {"retention": {"root": ROOT}}})
         try:
-            offer = env.appraisal.offer()
+            offer = await _offer(env)
             assert [name for name, _ in offer] == [
                 "predictive", "constrained", "adversarial", "retention", "proactivity"]
             for name, question in offer:
@@ -755,6 +744,6 @@ class TestOffers:
         """T10: no knowledge-base root, no retention offer."""
         env = await _env(tmp_path)
         try:
-            assert "retention" not in [name for name, _ in env.appraisal.offer()]
+            assert "retention" not in [name for name, _ in await _offer(env)]
         finally:
             await _teardown(env)

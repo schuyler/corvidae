@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 import aiosqlite
 import pytest
 
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -50,6 +52,9 @@ async def build_memory_plugin(config: dict | None = None):
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
@@ -193,6 +198,9 @@ class TestEncoderMismatch:
         await db.commit()
 
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
@@ -265,6 +273,9 @@ class TestPrefixSupport:
         await db.commit()
 
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
@@ -302,6 +313,9 @@ class TestPrefixSupport:
         await db.commit()
 
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
@@ -340,6 +354,9 @@ class TestPrefixSupport:
         await db.commit()
 
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
