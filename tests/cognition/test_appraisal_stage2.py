@@ -352,6 +352,38 @@ class TestStage2Persist:
         assert env_appraisal["stage2"] == json.loads(VALID_STAGE2_JSON)
         await _teardown(env)
 
+    async def test_the_fork_writes_a_fork_log_row(self, tmp_path):
+        """#1204: the call site, not just record(), puts a row in the table."""
+        import aiosqlite as _aio
+
+        env = await build_env(tmp_path)
+        await _originate(env, "kl")
+        await env.appraisal.on_agent_response(
+            channel=env.channel, request_text="req", response_text="resp",
+            trace_id="kl", annotations={},
+            logprobs=None,
+        )
+        await _run_next_task(env.task)
+        db = await _aio.connect(env.db_path)
+        try:
+            async with db.execute(
+                "SELECT stage, channel_id, prompt_sha256, instruction,"
+                " system_sha256, reconstructable FROM fork_log"
+            ) as cur:
+                rows = await cur.fetchall()
+            assert len(rows) == 1
+            _stage, _channel, sha, instruction, system_sha, restorable = rows[0]
+            assert sha, "the row names the prompt it rendered"
+            assert instruction, "the instruction is the question side"
+            assert system_sha, "the system prompt is stored once per version"
+            assert restorable == 1
+            # the window's identity is stored, and the system prompt with it
+            async with db.execute("SELECT count(*) FROM fork_block") as cur:
+                assert (await cur.fetchone())[0] >= 1
+        finally:
+            await db.close()
+        await _teardown(env)
+
     async def test_malformed_output_records_no_stage2_no_exception(self, tmp_path):
         env = await build_env(tmp_path, chat_text="not json at all")
         await _originate(env, "kbad")

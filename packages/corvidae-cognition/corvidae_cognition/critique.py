@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae_cognition.fork_log import ForkRecorder
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.held import HeldContext
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
@@ -111,6 +112,12 @@ FORKS_OFF_REASON = (
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.critique.
 logger = logging.getLogger("corvidae.critique")
+
+
+def _window_blocks(channel) -> list[dict]:
+    """The window a fork renders, as blocks; empty when there is none."""
+    conv = getattr(channel, "conversation", None)
+    return list(getattr(conv, "messages", None) or [])
 
 # --------------------------------------------------------------------------
 # Best-guess defaults (§6-tunable; resolved through resolve_tunable at
@@ -879,6 +886,11 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
+        self._fork_log = ForkRecorder(
+            config.get("daemon", {}).get("session_db", "sessions.db"),
+            sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+        )
+        self._last_fork_point = {}
         # A key #1078 or #1126 removed fails startup, naming the key that
         # replaces it. So does a value critique can't use: a question the
         # offer block can't hold (#1127), a non-bool enabled (#1126).
@@ -1218,8 +1230,17 @@ class CritiquePlugin(CorvidaePlugin):
             "the provenance check stays off until message_fts exists",
         )
 
+    async def _record_fork(self, **kwargs) -> None:
+        """Record one critique fork for #1204; never affects the verdict."""
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.record(**kwargs)
+
     @hookimpl
     async def on_stop(self) -> None:
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.close()
         # Close the probe connection; later get() calls open nothing.
         if self._probe is not None:
             await self._probe.close()
@@ -1753,6 +1774,11 @@ class CritiquePlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, stage="critique", cut=cut,
                 extra_body=provenance_extra_body(len(evidence)))
+            await self._record_fork(
+                channel=channel, stage="critique", point="provenance",
+                blocks=_window_blocks(channel),
+                instruction=instruction, trace_id=trace_id, result=result,
+            )
             objections, supported = self._verdicts_from_text(result.text, evidence)
         except Exception:
             self._skip_provenance(
@@ -2221,6 +2247,14 @@ class CritiquePlugin(CorvidaePlugin):
                 # A compaction during the last request is a miss too.
                 if idle and self._compactions.get(channel.id, 0) != epoch:
                     raise _ForkStale
+                # One fork carries every selected lens (#1226), so this is one
+                # row per exchange: the lenses are named in lens_id.
+                await self._record_fork(
+                    channel=channel, stage="critique", point="lens",
+                    blocks=_window_blocks(channel), instruction=instruction,
+                    trace_id=trace_id, result=result,
+                    lens_id="+".join(lenses),
+                )
                 parsed = _parse_json_block(result.text)
         except _ForkStale:
             for lens in lenses:

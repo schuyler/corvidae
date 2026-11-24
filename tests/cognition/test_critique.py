@@ -644,6 +644,39 @@ class TestRetentionRootFromRecall:
         assert any("knowledge base root is «values/»" in t for t in instructions), instructions
         await _teardown(env)
 
+    async def test_the_lens_fork_writes_a_fork_log_row(self, tmp_path):
+        """#1204: the lens point is recorded, not just the provenance one."""
+        env = await self._env(tmp_path, {"root": "values/"})
+        await _fire(env, "klens", origin="user", vector={"retention": 1.0})
+        await _run_next_task(env.task)
+        async with env.db.execute(
+            "SELECT stage, point, instruction, lens_id FROM fork_log"
+        ) as cur:
+            rows = await cur.fetchall()
+        assert any(
+            stage == "critique" and point == "lens" and "knowledge base root" in instr
+            and lens_id == "retention"
+            for stage, point, instr, lens_id in rows
+        ), rows
+        await _teardown(env)
+
+    async def test_two_lenses_in_one_fork_are_named_in_lens_id(self, tmp_path):
+        """#1226 shape: one fork carries every lens; the row names them all."""
+        env = await self._env(tmp_path, {"root": "values/"})
+        await _fire(
+            env, "ktwo", origin="user",
+            vector={"retention": 1.0, "constrained": 1.0},
+        )
+        await _run_next_task(env.task)
+        async with env.db.execute(
+            "SELECT lens_id FROM fork_log WHERE point = 'lens'"
+        ) as cur:
+            ids = [r[0] for r in await cur.fetchall()]
+        assert ids, "no lens row"
+        assert all(set(i.split("+")) >= {"retention", "constrained"} for i in ids), ids
+        assert len(env.fork_agent.calls) == 1, "one fork, not one per lens"
+        await _teardown(env)
+
     async def test_the_wake_stub_names_recalls_root(self, tmp_path):
         """AC9a: the filing turn is told the same root."""
         env = await self._env(
@@ -1493,6 +1526,21 @@ class TestProvenanceRealPath:
             assert CLAIM["claim"] in fork["instruction"]
             outcomes = await _read_outcomes(env.recorder, trace_id)
             assert outcomes["provenance"]["objections"] == 1
+        finally:
+            await _real_path_teardown(env)
+
+    async def test_the_provenance_fork_writes_a_fork_log_row(self, tmp_path):
+        """#1204: critique's capture lands through the real fork path."""
+        env = await _real_path_env(tmp_path, [CUE_FREE_REPLY], [CLAIM])
+        try:
+            await _say(env, "when is it due?")
+            async with env.db.execute(
+                "SELECT stage, point, instruction FROM fork_log"
+            ) as cur:
+                rows = await cur.fetchall()
+            points = {(r[0], r[1]) for r in rows}
+            assert ("critique", "provenance") in points
+            assert ("appraisal", "after-send") in points
         finally:
             await _real_path_teardown(env)
 

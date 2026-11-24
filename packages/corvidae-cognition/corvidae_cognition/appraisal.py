@@ -31,6 +31,7 @@ import math
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
+from corvidae_cognition.fork_log import ForkRecorder
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
 from corvidae.prompts import resolve_prompt
@@ -498,6 +499,27 @@ class AppraisalPlugin(CorvidaePlugin):
         self._before_send_prompt = resolve_prompt(
             config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
         )
+        self._fork_log = ForkRecorder(
+            config.get("daemon", {}).get("session_db", "sessions.db"),
+            sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+        )
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.close()
+
+    async def _record_fork(self, **kwargs) -> None:
+        """Record one fork for #1204; the recorder never raises.
+
+        ``blocks`` is the window the fork rendered. v1 hashes the window, not
+        the fully rendered request: the tool schemas and the mid-conversation
+        role are applied inside ``agent.fork`` and are not part of this hash.
+        """
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.record(**kwargs)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -806,6 +828,16 @@ class AppraisalPlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, stage="appraisal", extra_body=extra_body
             )
+            conv = channel.conversation
+            await self._record_fork(
+                channel=channel,
+                stage="appraisal",
+                point="after-send",
+                blocks=list(conv.messages) if conv is not None else [],
+                instruction=instruction,
+                trace_id=trace_id,
+                result=result,
+            )
             return _stage2_from_text(
                 result.text, [name for name, _ in offer] or None, trace_id)
         except Exception as exc:
@@ -951,6 +983,16 @@ class AppraisalPlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, stage="appraisal",
                 extra_body=_extra_body_with_lenses(names, claims=False),
+            )
+            before_conv = channel.conversation
+            await self._record_fork(
+                channel=channel,
+                stage="appraisal",
+                point="before-send",
+                blocks=list(before_conv.messages) if before_conv is not None else [],
+                instruction=instruction,
+                trace_id=trace_id,
+                result=result,
             )
             return _lens_vector(
                 _parse_json_block(result.text).get("lenses"), names, trace_id,

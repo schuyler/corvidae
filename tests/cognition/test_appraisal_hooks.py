@@ -416,3 +416,43 @@ async def test_on_start_is_quiet_when_forks_are_on_for_appraisal(tmp_path, caplo
         assert not [r for r in caplog.records if "agent.forks" in r.getMessage()]
     finally:
         await _teardown(env)
+
+
+async def test_the_before_send_fork_is_recorded_with_its_own_point(tmp_path):
+    """#1204: the pre-send fork shares stage="appraisal" but is its own point."""
+    import aiosqlite as _aio
+
+    env, _spy = await _before_send_env(tmp_path)
+    try:
+        await _send(env, "a reply")
+        db = await _aio.connect(env.db_path)
+        try:
+            async with db.execute(
+                "SELECT stage, point FROM fork_log ORDER BY id"
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await db.close()
+        assert ("appraisal", "before-send") in rows
+    finally:
+        await _teardown(env)
+
+
+async def test_a_failed_capture_logs_an_error_and_counts_it(tmp_path, caplog):
+    """#1204: a fork whose row cannot be written must not fail silently."""
+    import logging
+
+    env, _spy = await _before_send_env(tmp_path)
+    try:
+        async def boom(**kwargs):
+            raise RuntimeError("disk full")
+
+        env.appraisal._fork_log.log.record = boom
+        with caplog.at_level(logging.ERROR, logger="corvidae.fork_log"):
+            result = await _send(env, "a reply")
+        assert result is None, "a capture failure must not hold or alter the send"
+        assert env.appraisal._fork_log.write_failures == 1
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("could not record" in r.getMessage() for r in errors)
+    finally:
+        await _teardown(env)

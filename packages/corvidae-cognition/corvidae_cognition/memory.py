@@ -110,6 +110,7 @@ from corvidae.context import (
     message_tokens,
     well_formed_calls,
 )
+from corvidae_cognition.fork_log import ForkRecorder, window_blocks
 from corvidae.fork import (
     ForkRefused,
     ViewInputs,
@@ -1997,6 +1998,10 @@ class MemoryPlugin(CorvidaePlugin):
         """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
+        self._fork_log = ForkRecorder(
+            config.get("daemon", {}).get("session_db", "sessions.db"),
+            sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+        )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(
             config,
@@ -2169,6 +2174,12 @@ class MemoryPlugin(CorvidaePlugin):
         # Arm even if the schema was not ready; the arm retries its read.
         await self._arm_retention()
 
+    async def _record_fork(self, **kwargs) -> None:
+        """Record one consolidation fork for #1204; never affects the result."""
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            await log.record(**kwargs)
+
     @hookimpl
     async def on_stop(self) -> None:
         """Cancel the watches and timers, then tracked background tasks."""
@@ -2193,6 +2204,16 @@ class MemoryPlugin(CorvidaePlugin):
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._tasks.clear()
+        # Close the fork-log connection: ForkLog opens it lazily on the first
+        # record, so any consolidation this process ran leaves an aiosqlite
+        # worker thread that keeps the interpreter alive after the daemon is
+        # asked to exit (the same hazard _write_db below is closed for).
+        log = getattr(self, "_fork_log", None)
+        if log is not None:
+            try:
+                await log.close()
+            except Exception:
+                logger.warning("memory fork-log connection failed to close cleanly", exc_info=True)
         # No task is writing any more: close the dedicated write connection.
         if self._write_db is not None:
             write_db, self._write_db = self._write_db, None
@@ -2371,6 +2392,16 @@ class MemoryPlugin(CorvidaePlugin):
         result = await agent.fork(
             channel, instruction, stage="consolidation", cut=cut,
             extra_body=CONSOLIDATION_EXTRA_BODY, **fork_kwargs,
+        )
+        # A snapshot fork renders the snapshot, not the live window (#628):
+        # recording the live window would describe blocks that were not sent.
+        await self._record_fork(
+            channel=channel, stage="consolidation", point="consolidation",
+            blocks=(
+                list(snapshot.conv.messages) if snapshot is not None
+                else window_blocks(channel)
+            ),
+            instruction=instruction, trace_id=None, result=result,
         )
         # Stamp the fork instruction (not the code-generated range
         # sentence, which quotes conversation text) and the model sent.
