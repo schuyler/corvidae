@@ -594,11 +594,17 @@ class TestMaxToolCallsPerTurn:
         plugin, channel, _db = plugin_and_channel
         result = _make_turn_result(text="", tool_calls=self._five_calls())
         plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc:
             await plugin._handle_response(
                 result=result, channel=channel, max_turns_limit=10,
-                request_text="go", max_tool_calls=3,
+                request_text="go", item=None, max_tool_calls=3,
             )
+        # A bare pytest.raises(TypeError) would also pass if the call were
+        # malformed for an unrelated reason (a missing or misspelled argument).
+        # item has a default and the method takes no **kwargs, so the only
+        # remaining source is the retired keyword — pin that.
+        msg = str(exc.value)
+        assert "unexpected keyword argument" in msg and "max_tool_calls" in msg
 
     async def test_no_limit_dispatches_all(self, plugin_and_channel):
         """limit=None (the default) -> every call is dispatched."""
