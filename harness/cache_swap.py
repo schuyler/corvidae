@@ -67,20 +67,20 @@ def parse_cache_ram(args: list[str]) -> int:
     """Return the --cache-ram limit in MiB from the model's launch args."""
     # Both spellings mean the same thing, so neither may be reported as
     # "missing from the preset" — that sends the operator to the wrong file.
-    raw: str | None = None
-    for a in args:
+    # Validate every occurrence before converting any value: `--cache-ram=4096
+    # --cache-ram` must report the malformed flag, not quietly return 4096.
+    values: list[str] = []
+    for i, a in enumerate(args):
         if a == "--cache-ram":
-            i = args.index(a)
             if i + 1 >= len(args):
                 raise ValueError(
                     "--cache-ram requires a value (a positive MiB limit), but it "
                     "is the last argument"
                 )
-            raw = args[i + 1]
-            break
-        if a.startswith("--cache-ram="):
-            raw = a.split("=", 1)[1]
-            break
+            values.append(args[i + 1])
+        elif a.startswith("--cache-ram="):
+            values.append(a.split("=", 1)[1])
+    raw: str | None = values[0] if values else None
     if raw is None:
         raise ValueError(
             "--cache-ram is missing from the model's status.args; set it to a "

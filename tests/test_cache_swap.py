@@ -550,3 +550,36 @@ def test_r2_section_survives_a_size_with_no_fill_rows():
                cached_tokens=0, prompt_ms=100.0, wall_ms=110.0)
     lines = _r2_section({"cache_ram_mib": 8192}, [row])
     assert any("8192" in l or "n/a" in l.lower() for l in lines)
+
+
+def test_parse_cache_ram_still_reports_a_dangling_flag_when_an_earlier_form_is_valid():
+    # Review round 2: a valid --cache-ram=4096 followed by a dangling bare
+    # --cache-ram must not quietly return 4096; the malformed occurrence is the
+    # thing the operator needs to hear about. Validate every occurrence before
+    # converting any value.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram=4096", "--cache-ram"])
+    assert "requires a value" in str(exc.value)
+    assert "preset" not in str(exc.value)
+
+
+def test_parse_cache_ram_dangling_message_offers_the_right_remedy():
+    # The missing-flag message names the preset; a dangling flag is not that
+    # problem and must not send the operator there.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram"])
+    assert "--cache-ram" in str(exc.value)
+    assert "requires a value" in str(exc.value)
+    assert "preset" not in str(exc.value)
+
+
+def test_r2_section_keeps_the_probe_row_and_blanks_only_the_cold_mean():
+    # Avoiding ZeroDivisionError is not enough: the row still has to report the
+    # evicted timings it measured, with only the cold mean blanked.
+    row = _row("r2-8192", "probe_1", prompt_tokens=1000, expected_cached=500,
+               cached_tokens=0, prompt_ms=123.0, wall_ms=456.0)
+    lines = _r2_section({"cache_ram_mib": 8192}, [row])
+    row_line = next(l for l in lines if l.startswith("| 8192 |"))
+    cells = [c.strip() for c in row_line.strip("|").split("|")]
+    assert cells[5] == "123" and cells[6] == "456"   # measured evicted timings survive
+    assert cells[7] == "-"                            # only the cold mean is blanked
