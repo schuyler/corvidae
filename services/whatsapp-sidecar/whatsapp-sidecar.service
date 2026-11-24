@@ -15,16 +15,14 @@ WorkingDirectory=%h/workspace/services/whatsapp-sidecar
 ExecStart=%h/.local/bin/node src/index.js --socket %h/workspace/state/whatsapp.sock --auth-dir %h/workspace/state/whatsapp-auth
 Restart=on-failure
 RestartSec=5
-# The socket and the credential directory are the only paths it writes.
+# The socket, the credential directory and the media directory are the only
+# paths it writes.
 NoNewPrivileges=yes
 PrivateTmp=yes
 # Baileys writes creds.json with the process umask, and the default 0022 leaves the
 # account credential world-readable inside a directory only this user can enter. The
 # installer makes the directories 0700; this makes the files 0600.
 UMask=0077
-# Baileys writes creds.json with the process umask, and the default 0022 leaves the
-# account credential world-readable inside a directory only this user can enter.
-# The installer makes the directories 0700; this makes the files 0600.
 
 [Install]
 WantedBy=default.target

@@ -16,8 +16,14 @@ npm install
 node src/index.js --socket state/whatsapp.sock --auth-dir state/whatsapp-auth
 ```
 
-Flags or `WHATSAPP_SOCKET` / `WHATSAPP_AUTH_DIR`. Pass the same socket path
-the transport's `whatsapp.socket` in `agent.yaml` names.
+Flags, or `WHATSAPP_SOCKET` / `WHATSAPP_AUTH_DIR` / `WHATSAPP_MEDIA_DIR` (flags
+win). Pass the same socket path the transport's `whatsapp.socket` in `agent.yaml`
+names. There is no default socket: with none supplied the process exits 2 rather
+than listening, because `listen(undefined)` is a TCP port on every interface and
+the RPC on it is unauthenticated. The credential directory is required too --
+Baileys otherwise dies on `useMultiFileAuthState(undefined)`, which reads like a
+bug rather than a missing flag. The media directory defaults to
+`<dir containing --auth-dir>/whatsapp-media`.
 
 `--offline-version 2.3000.102` pins the WhatsApp protocol version instead of
 negotiating it, which keeps startup from needing WhatsApp reachable.
@@ -52,9 +58,16 @@ It deliberately does **not** pair and does **not** start the daemon (pass
 unpaired sidecar retries forever, which reads as a healthy service and fills the
 journal. The script prints the pairing command last:
 
+```sh
+npm run pair -- --phone 15551234567 \
+  --socket /home/lex/workspace/state/whatsapp.sock \
+  --auth-dir /home/lex/workspace/state/whatsapp-auth
 ```
-PATH="$HOME/.local/bin:$PATH" npm run pair -- --phone <E.164 digits, e.g. 15551234567>
-```
+
+Substitute your own digits (country code, no `+`), and pass the same paths the
+daemon runs with: pair without them and the pairing run and the daemon drive two
+different sessions. Run it in a terminal -- the code prints there, and it is a
+short-lived device-link credential that has no business in a journald copy.
 
 `whatsapp-sidecar.service` in this directory is the template the installer
 rewrites; copying it by hand to another host means editing three paths yourself.

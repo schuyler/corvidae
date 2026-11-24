@@ -7,7 +7,7 @@
 
 import { WhatsAppAdapter } from "./whatsapp.js";
 import { FakeAdapter } from "./fake-adapter.js";
-import { parseArgs } from "./args.js";
+import { parseArgs, resolvePaths } from "./args.js";
 import { createServer } from "./server.js";
 import { fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
 
@@ -15,6 +15,15 @@ import { fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
 // importing an entrypoint that starts a daemon.
 
 const args = parseArgs(process.argv.slice(2));
+
+// Paths are resolved and validated before an adapter or a listener exists: with
+// no socket path this process used to open a TCP port on every interface.
+const paths = resolvePaths(args);
+if (!paths.ok) {
+  console.error(paths.message);
+  process.exit(2);
+}
+const { socket: socketPath, authDir, mediaDir } = paths;
 
 // A pinned version keeps the daemon from reaching the network at startup; with
 // none supplied, Baileys negotiates it, which needs WhatsApp reachable.
@@ -25,15 +34,16 @@ const fetchVersion = args.offlineVersion
 // --fake swaps in the scripted adapter: same socket, same JSON-RPC surface, no
 // WhatsApp and no phone. The transport is developed and tested against this.
 const adapter = args.fake
-  ? new FakeAdapter({ state: process.env.WHATSAPP_FAKE_STATE ?? "linked", mediaDir: args.mediaDir, logger: console })
-  : new WhatsAppAdapter({ authDir: args.authDir, mediaDir: args.mediaDir, logger: console, fetchVersion });
-const server = createServer(adapter, { socketPath: args.socket });
+  ? new FakeAdapter({ state: process.env.WHATSAPP_FAKE_STATE ?? "linked", mediaDir, logger: console })
+  : new WhatsAppAdapter({ authDir, mediaDir, logger: console, fetchVersion });
+const server = createServer(adapter, { socketPath });
 
 await server.listenSync();
 console.log(
   args.fake
-    ? `whatsapp-sidecar: FAKE adapter, listening on ${args.socket} (no WhatsApp link)`
-    : `whatsapp-sidecar: listening on ${args.socket} (auth ${args.authDir})`,
+    ? `whatsapp-sidecar: FAKE adapter, listening on ${socketPath} (no WhatsApp link)`
+    : `whatsapp-sidecar: listening on ${socketPath} (auth ${authDir}, media ${mediaDir})`,
+  
 );
 
 await adapter.start();

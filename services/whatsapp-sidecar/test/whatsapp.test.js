@@ -475,13 +475,13 @@ test("the first reconnect after a fresh pairing says reconnecting, not unpaired"
   await adapter.close();
 });
 
-test("get_media finds an attachment the account itself sent (fromMe true)", async () => {
+test("an attachment the account itself sent is served from the upsert cache", async () => {
+  // This test used to drive sock.getMessage(chat, {fromMe:true}) -- a call that
+  // does not exist on a Baileys socket, so it always threw and the "fix" was
+  // unprovable. What actually makes an outgoing attachment fetchable is that
+  // messages.upsert carries it (key.fromMe true) and the adapter remembers it.
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-fromme-"));
   const sock = fakeSocket();
-  sock.getMessage = async (jid, opts) =>
-    opts.fromMe
-      ? { key: { id: "wamid.ME", remoteJid: jid, fromMe: true }, message: { imageMessage: { mimetype: "image/jpeg" } } }
-      : null; // an inbound-keyed lookup misses our own message
   const adapter = new WhatsAppAdapter({
     authDir: "/tmp/unused",
     mediaDir: dir,
@@ -493,6 +493,17 @@ test("get_media finds an attachment the account itself sent (fromMe true)", asyn
   });
   await adapter.start();
   sock.handlers["connection.update"]({ connection: "open", self: { jid: "5550000@s.whatsapp.net" } });
+
+  sock.handlers["messages.upsert"]({
+    type: "notify",
+    messages: [
+      {
+        key: { id: "wamid.ME", remoteJid: "15550000@s.whatsapp.net", fromMe: true },
+        message: { imageMessage: { mimetype: "image/jpeg", caption: "sent from this phone" } },
+      },
+    ],
+  });
+
   const got = await adapter.getMedia({ chat_jid: "15550000@s.whatsapp.net", id: "wamid.ME" });
   assert.ok(got.path.endsWith(".jpg"), `unexpected path ${got.path}`);
   assert.equal(await fs.promises.readFile(got.path, "utf8"), "jpeg-bytes");

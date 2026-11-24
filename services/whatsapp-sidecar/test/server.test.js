@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { createServer } from "../src/server.js";
+import { bind, createServer } from "../src/server.js";
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR } from "../src/protocol.js";
 
 function fakeAdapter() {
@@ -255,4 +255,73 @@ test("a socket file left by an unclean exit is replaced", async () => {
   assert.equal(reply.result.connected, true);
   client.close();
   server.close();
+});
+
+test("a string-coded error from a method is answered as an integer, and the connection lives", async (t) => {
+  // Corvidae #1248, Critical 2. Errors thrown inside a method are not all ours: fs
+  // errors carry a STRING code (ENOTDIR, EACCES, ENOSPC), and they reach here
+  // through mkdir/realpath/writeFile in get_media and readFile in send_media. The
+  // merged transport int()s error.code, so "ENOTDIR" on the wire raised a ValueError
+  // inside its read loop, cancelled every pending call and stopped delivering every
+  // inbound message. One bad attachment took the channel down.
+  const adapter = fakeAdapter();
+  adapter.getMedia = async () => {
+    const err = new Error("ENOTDIR: not a directory, mkdir '/srv/state/whatsapp-media'");
+    err.code = "ENOTDIR";
+    throw err;
+  };
+  const { server, socketPath } = await startSidecar(adapter);
+  t.after(() => server.close());
+  const client = await connect(socketPath);
+  t.after(() => client.close());
+
+  const frame = await client.sendAndAwait({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "get_media",
+    params: { chat_jid: "15551234567@s.whatsapp.net", id: "M1" },
+  });
+  assert.equal(typeof frame.error.code, "number", "error.code must stay an integer on the wire");
+  assert.equal(frame.error.code, INTERNAL_ERROR);
+  // The original code is not lost, it moves to the field that is free-form.
+  assert.equal(frame.error.data.code, "ENOTDIR");
+  assert.match(frame.error.message, /ENOTDIR/);
+
+  // And the connection is still usable: the failure must not be the last frame
+  // this side ever answers.
+  const after = await client.sendAndAwait({ jsonrpc: "2.0", id: 8, method: "status" });
+  assert.equal(after.result.linked, true, "a coded failure must not end the connection");
+});
+
+test("an integer-coded error keeps its code and its data untouched", async (t) => {
+  const adapter = fakeAdapter();
+  adapter.pair = async () => {
+    const err = new Error("not linked");
+    err.code = -32001;
+    err.data = { state: "unpaired", fix: "pair" };
+    throw err;
+  };
+  const { server, socketPath } = await startSidecar(adapter);
+  t.after(() => server.close());
+  const client = await connect(socketPath);
+  t.after(() => client.close());
+
+  const frame = await client.sendAndAwait({
+    jsonrpc: "2.0",
+    id: 9,
+    method: "pair",
+    params: { phone: "15551234567" },
+  });
+  assert.equal(frame.error.code, -32001);
+  assert.deepEqual(frame.error.data, { state: "unpaired", fix: "pair" });
+});
+
+test("bind refuses to listen when there is no socket path", async () => {
+  // Defense in depth behind the entrypoint check: every guard in bind() used to be
+  // written `if (socketPath)`, so a missing path skipped them all and the server
+  // fell through to a TCP listener on 0.0.0.0.
+  const net_ = net.createServer();
+  await assert.rejects(() => bind(net_, undefined), /socket path is required/);
+  await assert.rejects(() => bind(net_, ""), /socket path is required/);
+  net_.close();
 });

@@ -17,6 +17,7 @@ import {
   NOT_LINKED,
   WhatsAppAdapter,
   mediaExtension,
+  mediaCacheKey,
   sanitizeMediaId,
 } from "../src/whatsapp.js";
 import { createServer } from "../src/server.js";
@@ -36,13 +37,13 @@ function protoWith(field, extra = {}) {
   return { key: { id: "M1", remoteJid: CHAT, fromMe: false }, message: { [field]: extra } };
 }
 
-function adapterWith({ mediaDir, downloader, sock = {}, state = "linked" }) {
+function adapterWith({ mediaDir, downloader, sock = {}, state = "linked", socketFactory }) {
   const quiet = { info() {}, warn() {}, error() {} };
   const adapter = new WhatsAppAdapter({
     authDir: "unused",
     mediaDir,
     logger: quiet,
-    socketFactory: () => sock,
+    socketFactory: socketFactory ?? (() => sock),
     authState: { creds: { registrationId: 1 } },
     mediaDownloader: downloader,
   });
@@ -55,10 +56,17 @@ function adapterWith({ mediaDir, downloader, sock = {}, state = "linked" }) {
 }
 
 test("sanitizeMediaId neutralizes path separators and dot-only ids", () => {
-  assert.equal(sanitizeMediaId("../../../etc/passwd"), "__.._.._etc_passwd");
+  // Names are the sanitised id plus a digest of the whole thing: truncation and
+  // replacement are lossy, and the writer overwrites, so two ids that sanitise to
+  // the same string used to clobber each other's file on disk.
+  assert.match(sanitizeMediaId("../../../etc/passwd"), /^__\.\._\.\._etc_passwd-[0-9a-f]{12}$/);
   assert.match(sanitizeMediaId("AB/CD=="), /^[A-Za-z0-9._-]+$/);
-  assert.equal(sanitizeMediaId("..."), "_");
-  assert.equal(sanitizeMediaId("".padStart(200, "a")).length, 80);
+  assert.match(sanitizeMediaId("..."), /^_-[0-9a-f]{12}$/);
+  assert.equal(sanitizeMediaId("".padStart(200, "a")).length, 80 + 1 + 12);
+  assert.notEqual(sanitizeMediaId("A/B"), sanitizeMediaId("A_B"), "lossy sanitising must not collide");
+  const longA = "a".repeat(120) + "-A";
+  const longB = "a".repeat(120) + "-B";
+  assert.notEqual(sanitizeMediaId(longA), sanitizeMediaId(longB), "past the truncation point");
   assert.throws(() => sanitizeMediaId(""), /non-empty string/);
 });
 
@@ -72,14 +80,14 @@ test("mediaExtension prefers the sender's mime, never their filename", () => {
 test("get_media writes the bytes under the root and reports what it wrote", async (t) => {
   const dir = tmpDir(t);
   const adapter = adapterWith({ mediaDir: dir, downloader: async () => Buffer.from("pixel-data") });
-  adapter.recentMedia.set("M1", protoWith("imageMessage", { mimetype: "image/png", fileLength: 10, caption: "hi" }));
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M1"), protoWith("imageMessage", { mimetype: "image/png", fileLength: 10, caption: "hi" }));
 
   const result = await adapter.getMedia({ chat_jid: CHAT, id: "M1" });
   assert.equal(result.kind, "image");
   assert.equal(result.mime, "image/png");
   assert.equal(result.size, 10);
   assert.equal(path.dirname(result.path), fs.realpathSync(dir));
-  assert.equal(path.basename(result.path), "M1.png");
+  assert.match(path.basename(result.path), /^M1-[0-9a-f]{12}\.png$/);
   assert.deepEqual(fs.readFileSync(result.path), Buffer.from("pixel-data"));
   assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
   assert.equal(fs.statSync(fs.realpathSync(dir)).mode & 0o777, 0o700);
@@ -95,7 +103,7 @@ test("the downloader is told to fetch original bytes, not a thumbnail", async (t
       return Buffer.from("x");
     },
   });
-  adapter.recentMedia.set("M1", protoWith("documentMessage", { mimetype: "application/pdf", fileName: "a.pdf" }));
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M1"), protoWith("documentMessage", { mimetype: "application/pdf", fileName: "a.pdf" }));
   await adapter.getMedia({ chat_jid: CHAT, id: "M1" });
   assert.equal(seen[0][1], "document");
 });
@@ -111,7 +119,7 @@ test("an advertised size over the cap is refused before anything is downloaded",
     },
   });
   adapter.recentMedia.set(
-    "M1",
+    mediaCacheKey(CHAT, "M1"),
     protoWith("videoMessage", { mimetype: "video/mp4", fileLength: DEFAULT_MAX_MEDIA_BYTES + 1 }),
   );
   await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M1" }), (err) => {
@@ -131,7 +139,7 @@ test("a download that lies about its size is refused after the fact", async (t) 
     downloader: async () => Buffer.alloc(99, 7),
   });
   adapter.maxMediaBytes = 4;
-  adapter.recentMedia.set("M1", protoWith("imageMessage", { mimetype: "image/jpeg" }));
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M1"), protoWith("imageMessage", { mimetype: "image/jpeg" }));
   await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M1" }), (err) => {
     assert.equal(err.data.state, "too_large");
     return true;
@@ -142,7 +150,7 @@ test("a download that lies about its size is refused after the fact", async (t) 
 test("a zero-byte download is not_success, not an empty file", async (t) => {
   const dir = tmpDir(t);
   const adapter = adapterWith({ mediaDir: dir, downloader: async () => Buffer.alloc(0) });
-  adapter.recentMedia.set("M1", protoWith("imageMessage", { mimetype: "image/png" }));
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M1"), protoWith("imageMessage", { mimetype: "image/png" }));
   await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M1" }), (err) => {
     assert.equal(err.code, MEDIA_UNAVAILABLE);
     assert.equal(err.data.state, "not_found");
@@ -163,44 +171,102 @@ test("an unknown id says not_found, a known id without media says no_media", asy
     return true;
   });
 
-  adapter.recentMedia.set("M2", { key: { id: "M2", remoteJid: CHAT }, message: { conversation: "text only" } });
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M2"), { key: { id: "M2", remoteJid: CHAT }, message: { conversation: "text only" } });
   await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M2" }), (err) => {
     assert.equal(err.data.state, "no_media");
     return true;
   });
 });
 
-test("the cache is consulted first, then getMessage, and a fetched proto is cached", async (t) => {
+test("an uncached id says not_found, because there is no message history to fetch from", async (t) => {
+  // `getMessage` is a makeWASocket config callback, not a socket method: the
+  // sock.getMessage(...) call that used to sit in #fetchRaw always threw, so
+  // "could not be fetched" was the permanent answer and the cache was the only
+  // store. This test used to assert a two-step fallback that never worked.
   const dir = tmpDir(t);
-  const raw = protoWith("audioMessage", { mimetype: "audio/ogg" });
-  raw.key.id = "M3"; // the fallback must answer with the id that was asked for
-  let fetched = 0;
+  let socketTouched = 0;
   const sock = {
     getMessage: async () => {
-      fetched += 1;
-      if (fetched === 1) throw new Error("not available offline"); // a miss, not a failure
-      return raw;
+      socketTouched += 1;
+      throw new Error("not a method on the socket");
     },
   };
-  const adapter = adapterWith({ mediaDir: dir, downloader: async () => Buffer.from("late"), sock });
+  const adapter = adapterWith({ mediaDir: dir, downloader: async () => Buffer.from("x"), sock });
 
-  // 1. nothing cached, fallback throws -> not_found.
-  await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M3" }), /not cached/);
-  assert.equal(fetched, 1);
+  await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "NEVER" }), (err) => {
+    assert.equal(err.code, MEDIA_UNAVAILABLE);
+    assert.equal(err.data.state, "not_found");
+    return true;
+  });
+  assert.equal(socketTouched, 0, "no phantom history call");
+  assert.equal(fs.readdirSync(dir).length, 0, "nothing is written for an id we never saw");
+});
 
-  // 2. fallback answers -> served, and the proto is kept for next time.
-  const result = await adapter.getMedia({ chat_jid: CHAT, id: "M3" });
-  assert.equal(result.kind, "audio");
-  assert.equal(result.mime, "audio/ogg");
-  assert.equal(fetched, 2, "a cache miss consults the fallback");
+test("the same message id in two chats does not cross the cache", async (t) => {
+  // Keyed by id alone, whichever chat was cached last answered for both, and one
+  // person's attachment could be handed over for another's request. Both sides of
+  // the key are exercised: the entry arrives through messages.upsert, which is how
+  // the cache is really filled.
+  const dir = tmpDir(t);
+  const other = "15550000999@s.whatsapp.net";
+  let sock;
+  const adapter = adapterWith({
+    mediaDir: dir,
+    downloader: async () => Buffer.from("bytes"),
+    socketFactory: () => {
+      // Capture the handlers: an ev.on that drops them would leave this test
+      // unable to deliver an upsert at all.
+      const handlers = {};
+      sock = { handlers, ev: { on: (e, cb) => { handlers[e] = cb; } }, end: async () => {} };
+      return sock;
+    },
+  });
+  await adapter.start();
+  // get_media is gated on the session being linked, so open the link the way the
+  // socket does before delivering anything.
+  sock.handlers["connection.update"]({ connection: "open", self: { jid: "15550000111@s.whatsapp.net" } });
 
-  // 3. second request is served from the cache: no third round trip.
-  const again = await adapter.getMedia({ chat_jid: CHAT, id: "M3" });
-  assert.equal(again.kind, "audio");
-  assert.equal(fetched, 2, "a fetched proto is remembered, not re-fetched");
+  const upsert = (chat, id) => {
+    const raw = protoWith("imageMessage", { mimetype: "image/png" });
+    raw.key = { id, remoteJid: chat };
+    sock.handlers["messages.upsert"]({ type: "notify", messages: [raw] });
+  };
 
-  // And the fallback only runs when the id is absent to begin with.
-  assert.ok(adapter.recentMedia.has("M3"));
+  upsert(other, "SHARED");
+  assert.equal(adapter.recentMedia.size, 1, "the upsert filled the cache");
+
+  await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "SHARED" }), (err) => {
+    assert.equal(err.data.state, "not_found", "the other chat's entry must not answer here");
+    return true;
+  });
+
+  const mine = await adapter.getMedia({ chat_jid: other, id: "SHARED" });
+  assert.equal(mine.kind, "image");
+});
+
+test("the getMessage config handed to the socket factory reads the cache", async (t) => {
+  // Baileys calls this when a message it cannot decrypt references another one.
+  // It arrived as undefined, which silently disabled that path.
+  const dir = tmpDir(t);
+  let config = null;
+  const adapter = adapterWith({
+    mediaDir: dir,
+    downloader: async () => Buffer.from("bytes"),
+    socketFactory: (cfg) => {
+      config = cfg;
+      return { ev: { on: () => {} }, end: async () => {} };
+    },
+  });
+  await adapter.start();
+  assert.equal(typeof config.getMessage, "function", "getMessage is config, not a socket method");
+
+  const raw = protoWith("imageMessage", { mimetype: "image/png" });
+  raw.key.id = "CFG1";
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "CFG1"), raw);
+
+  assert.equal(await config.getMessage({ remoteJid: CHAT, id: "CFG1" }), raw);
+  assert.equal(await config.getMessage({ remoteJid: CHAT, id: "UNKNOWN" }), null);
+  await adapter.close();
 });
 
 test("a fallback that answers with a different message's id is a miss, not a substitute", async (t) => {
@@ -224,10 +290,10 @@ test("a symlink waiting at the target path is refused, not followed", async (t) 
   fs.writeFileSync(outside, "sensitive");
 
   const adapter = adapterWith({ mediaDir: dir, downloader: async () => Buffer.from("overwrite-me") });
-  adapter.recentMedia.set("M1", protoWith("documentMessage", { mimetype: "application/pdf" }));
+  adapter.recentMedia.set(mediaCacheKey(CHAT, "M1"), protoWith("documentMessage", { mimetype: "application/pdf" }));
   // The filename is ours (sanitized id + our extension); this simulates a bug or
   // a prior compromise leaving a link there, which must not become a write.
-  fs.symlinkSync(outside, path.join(fs.realpathSync(dir), "M1.pdf"));
+  fs.symlinkSync(outside, path.join(fs.realpathSync(dir), `${sanitizeMediaId("M1")}.pdf`));
 
   await assert.rejects(() => adapter.getMedia({ chat_jid: CHAT, id: "M1" }), (err) => {
     assert.equal(err.code, MEDIA_UNAVAILABLE);

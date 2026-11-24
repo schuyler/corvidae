@@ -9,6 +9,7 @@
 // so the paths marked UNVERIFIED are pinned by shape tests only.
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { INVALID_PARAMS as INVALID_PARAMS_CODE } from "./protocol.js";
 import makeWASocket, {
@@ -45,6 +46,15 @@ export const RECENT_MEDIA_LIMIT = 256;
 
 // A WhatsApp wamid is base64-ish and can contain '/' and '='. It is the only
 // untrusted byte in the filename we are about to build, so it becomes opaque.
+// The media cache is keyed by BOTH the chat and the message id. Keyed by id
+// alone, two chats that happen to use the same id resolve to whichever message
+// was cached last, and one person's attachment is handed to another's request.
+// JSON.stringify of the pair, because a joined string is ambiguous for
+// pseudonymous JIDs: no separator is guaranteed absent from both halves.
+export function mediaCacheKey(chatJid, id) {
+  return JSON.stringify([chatJid ?? null, id ?? null]);
+}
+
 export function sanitizeMediaId(id) {
   if (typeof id !== "string" || id === "") {
     const err = new Error("media id must be a non-empty string");
@@ -52,7 +62,13 @@ export function sanitizeMediaId(id) {
     throw err;
   }
   const safe = id.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_").slice(0, 80);
-  return safe === "" ? "_" : safe;
+  // Truncation and replacement are lossy: "A/B" and "A_B" collapsed to the same
+  // name, as did anything past 80 characters, and the writer overwrites -- so a
+  // sender who controls the id could overwrite an attachment that had already
+  // been reported to the agent. The digest keeps names short and collisions
+  // impossible for distinct ids.
+  const digest = createHash("sha256").update(id).digest("hex").slice(0, 12);
+  return `${safe === "" ? "_" : safe}-${digest}`;
 }
 
 const EXT_BY_MIME = {
@@ -237,6 +253,12 @@ export class WhatsAppAdapter {
       auth: state,
       ...(version ? { version } : {}),
       logger: silentLogger(this.log),
+      // getMessage is a config callback, not a socket method: Baileys calls it
+      // when a message it cannot decrypt references a earlier one (and for
+      // reactions/edits). The default returns undefined, so hand it the media
+      // cache -- the only message store this process has.
+      getMessage: async (key) =>
+        key?.id ? (this.recentMedia.get(mediaCacheKey(key.remoteJid, key.id)) ?? null) : null,
     });
     this.sock = sock;
 
@@ -350,13 +372,10 @@ export class WhatsAppAdapter {
   // at notification time: an inbound photo nobody asks about costs nothing.
   async getMedia({ chat_jid, id }) {
     if (this.state !== "linked" || !this.sock) throw this.notReadyError();
-    let raw = this.recentMedia.get(id);
-    if (!raw) {
-      raw = await this.#fetchRaw(chat_jid, id);
-      // Remember what we fetched, so a second request for the same attachment
-      // costs one map lookup instead of another round trip to WhatsApp.
-      if (raw) this.#rememberMedia(raw);
-    }
+    // One lookup site. There used to be a cache read here as well as one inside
+    // #lookupRaw, which made the pair-keyed read impossible to test: mutate one of
+    // the two and the other still answered.
+    const raw = await this.#lookupRaw(chat_jid, id);
     if (!raw) {
       throw this.mediaError(
         "not_found",
@@ -396,31 +415,25 @@ export class WhatsAppAdapter {
   // wire, so this is the only way to reach a message we did not see live.
   // UNVERIFIED: the getMessage key shape and whether a linked-but-idle socket
   // answers it at all. A throw here is a miss, not a failure.
-  async #fetchRaw(chat_jid, id) {
-    let found = null;
-    // fromMe is part of the lookup key, so a single value silently misses the
-    // other half: media the account itself sent (a photo from this phone, which
-    // arrives with fromMe true) is otherwise unfetchable. Try the inbound key
-    // first, then the outbound one.
-    for (const fromMe of [false, true]) {
-      try {
-        found = await this.sock.getMessage(chat_jid, { remoteJid: chat_jid, fromMe, id });
-      } catch {
-        return null;
-      }
-      if (found?.key?.id === id) break;
-    }
-    if (!found) return null;
-    // Identity check: handing over another message's attachment because the
-    // lookup answered with something else is worse than answering not_found.
-    if (found?.key?.id !== id) return null;
-    return found;
+  async #lookupRaw(chatJid, id) {
+    // There is no Baileys call that fetches one message by id. `getMessage` is a
+    // makeWASocket CONFIG callback (Types/Socket.d.ts), not a socket method -- the
+    // this.sock.getMessage(...) that used to live here always threw, so every
+    // history lookup answered not_found and only the in-memory cache ever worked
+    // (corvidae #1248). Saying so is better than pretending: the cache that
+    // messages.upsert fills is the store, it is bounded, and an attachment older
+    // than that answers not_found rather than returning someone else's file.
+    return this.recentMedia.get(mediaCacheKey(chatJid, id)) ?? null;
   }
 
   #rememberMedia(raw) {
     const id = raw?.key?.id;
     if (!id || !mediaOf(raw)) return;
-    this.recentMedia.set(id, raw);
+    // Normalised on the way in, because getMedia is called with the jid this
+    // adapter published, which is normalised, while the raw key may carry a
+    // device suffix.
+    const storedChat = raw.key.remoteJid ? jidNormalizedUser(raw.key.remoteJid) : null;
+    this.recentMedia.set(mediaCacheKey(storedChat, id), raw);
     while (this.recentMedia.size > RECENT_MEDIA_LIMIT) {
       this.recentMedia.delete(this.recentMedia.keys().next().value);
     }

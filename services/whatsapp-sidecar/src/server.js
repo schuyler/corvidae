@@ -116,7 +116,25 @@ async function handleLine(line, methods) {
     return { jsonrpc: "2.0", id, result };
   } catch (error) {
     // error.data carries the sidecar's readiness state when there is one.
-    return rpcErrorFor(id, error.code ?? INTERNAL_ERROR, error.message, error.data);
+    //
+    // The code field must stay an integer. Errors thrown from inside a method are
+    // not always ours: fs errors carry a STRING code (ENOTDIR, EACCES, ENOSPC), and
+    // they reach here through mkdir/realpath/writeFile in get_media and readFile in
+    // send_media. The transport int()s this field, so a string on the wire ends its
+    // read loop, and after that every request times out and no inbound message is
+    // delivered at all (corvidae #1248, C2). The original code stays visible in
+    // data.code, which is free-form by contract.
+    const code = Number.isInteger(error?.code) ? error.code : INTERNAL_ERROR;
+    const data = { ...(error?.data ?? {}) };
+    if (!Number.isInteger(error?.code) && error?.code !== undefined) {
+      data.code = String(error.code);
+    }
+    return rpcErrorFor(
+      id,
+      code,
+      error?.message ?? String(error),
+      Object.keys(data).length ? data : undefined,
+    );
   }
 }
 
@@ -126,17 +144,29 @@ async function handleLine(line, methods) {
 // proves nobody is listening. Without that check a second instance would
 // silently steal the socket from the first.
 export async function bind(server, socketPath) {
-  if (socketPath && (await hasLiveListener(socketPath))) {
+  // Defense in depth behind resolvePaths: every guard here used to be written
+  // `if (socketPath)`, so a missing path skipped them all and server.listen()
+  // fell through to a TCP listener on 0.0.0.0. A unix socket is the access
+  // control, so a run without one is not a configuration choice.
+  if (typeof socketPath !== "string" || socketPath.length === 0) {
+    throw new Error(
+      "a socket path is required; refusing to listen on a TCP port, " +
+        "because the JSON-RPC on this socket is unauthenticated",
+    );
+  }
+  if (await hasLiveListener(socketPath)) {
     throw new Error(`another sidecar is already listening on ${socketPath}`);
   }
-  if (socketPath) {
-    await unlinkIfPresent(socketPath);
-  }
+  await unlinkIfPresent(socketPath);
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
   });
-  if (socketPath) fs.chmodSync(socketPath, 0o600);
+  // The mode is applied after listen() creates the node, so there is a window in
+  // which it inherits the process umask. The unit sets UMask=0077 and the
+  // installer creates the state directory 0700, so the installed path is not
+  // reachable by anyone else in that window; a manual run in a shared directory is.
+  fs.chmodSync(socketPath, 0o600);
 }
 
 function hasLiveListener(socketPath) {
