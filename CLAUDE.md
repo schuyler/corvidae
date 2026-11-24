@@ -48,7 +48,7 @@ everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra alignment  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra alignment --extra whatsapp  # everything
 uv run pytest                    # full suite
 uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery --ignore=tests/test_planning --ignore=tests/test_alignment  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
