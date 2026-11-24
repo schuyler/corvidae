@@ -229,7 +229,13 @@ only and should be confirmed at pairing time:
   key shape are unverified, and a linked-but-idle socket may not answer it at
   all. A throw there is deliberately treated as a miss (`not_found`), never as a
   failure, so the worst case is an honest "ask them to re-send";
-- the `quoted.key` shape used for `reply_to`;
+- senders addressed by the pseudonymous `@lid` form: `messages.upsert` can carry
+  `key.remoteJid` / `key.participant` as `<number>@lid` (and `remoteJidAlt` /
+  `participantAlt` alongside the phone form), and the adapter maps neither, so a
+  lid-addressed chat has no phone number to check against the allowlist and is
+  dropped by fail-closed sender checks. Whether that happens at all in a normal DM
+  or group needs a live link to answer, and mapping it before then would be
+  guessing at a JID shape;
 - `requestPairingCode`'s argument format and the code's real lifetime (the
   60s in `expires_at` is our assumption, not a value Baileys returns);
 - media upload for each kind, and whether `ptt: true` voice notes play as

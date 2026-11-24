@@ -123,3 +123,16 @@ test("a template that lost its Restart= line is refused", () => {
     fs.rmSync(s.root, { recursive: true, force: true });
   }
 });
+
+test("the checked-in unit template names the same three paths the installer writes", () => {
+  // The installer's awk generates --socket/--auth-dir/--media-dir; the template in
+  // the repo is what a manual run uses. They disagreed -- the template omitted
+  // --media-dir, so a manual run wrote into the default next to the auth dir while
+  // the comment above it claimed the media directory was one of the paths. A reader
+  // comparing the two files should not have to diff them by eye.
+  const template = fs.readFileSync(path.join(SIDECAR, "whatsapp-sidecar.service"), "utf8");
+  const exec = template.split("\n").find((l) => l.startsWith("ExecStart="));
+  for (const flag of ["--socket", "--auth-dir", "--media-dir"]) {
+    assert.ok(exec.includes(flag), `template ExecStart is missing ${flag}: ${exec}`);
+  }
+});

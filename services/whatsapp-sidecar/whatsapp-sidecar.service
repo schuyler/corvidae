@@ -12,7 +12,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/workspace/services/whatsapp-sidecar
-ExecStart=%h/.local/bin/node src/index.js --socket %h/workspace/state/whatsapp.sock --auth-dir %h/workspace/state/whatsapp-auth
+ExecStart=%h/.local/bin/node src/index.js --socket %h/workspace/state/whatsapp.sock --auth-dir %h/workspace/state/whatsapp-auth --media-dir %h/workspace/state/whatsapp-media
 Restart=on-failure
 RestartSec=5
 # The socket, the credential directory and the media directory are the only

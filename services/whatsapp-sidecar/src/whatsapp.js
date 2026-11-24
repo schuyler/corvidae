@@ -254,7 +254,7 @@ export class WhatsAppAdapter {
       ...(version ? { version } : {}),
       logger: silentLogger(this.log),
       // getMessage is a config callback, not a socket method: Baileys calls it
-      // when a message it cannot decrypt references a earlier one (and for
+      // when a message it cannot decrypt references an earlier one (and for
       // reactions/edits). The default returns undefined, so hand it the media
       // cache -- the only message store this process has.
       getMessage: async (key) =>
