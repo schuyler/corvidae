@@ -583,3 +583,31 @@ def test_r2_section_keeps_the_probe_row_and_blanks_only_the_cold_mean():
     cells = [c.strip() for c in row_line.strip("|").split("|")]
     assert cells[5] == "123" and cells[6] == "456"   # measured evicted timings survive
     assert cells[7] == "-"                            # only the cold mean is blanked
+
+
+# every occurrence must be checked, not just the first (review round 3)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--cache-ram=4096", "--cache-ram", "--foo"],      # dangling, not last
+        ["--cache-ram=4096", "--cache-ram="],              # empty value later
+        ["--cache-ram=4096", "--cache-ram=abc"],           # non-integer later
+    ],
+)
+def test_parse_cache_ram_reports_the_offending_occurrence(argv):
+    # Round 3: the loop validated only the FIRST collected value, so a valid
+    # --cache-ram=4096 ahead of any malformed occurrence swallowed the problem
+    # and the probe reported 4096.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(argv)
+    assert "--cache-ram" in str(exc.value)
+
+
+def test_parse_cache_ram_reports_every_offending_occurrence():
+    # The message should name all of them: with two bad spellings an operator
+    # fixing only the first would rerun into the second.
+    with pytest.raises(ValueError) as exc:
+        parse_cache_ram(["--cache-ram=abc", "--cache-ram=def"])
+    assert "abc" in str(exc.value) and "def" in str(exc.value)

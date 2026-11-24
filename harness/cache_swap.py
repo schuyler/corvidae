@@ -63,37 +63,61 @@ WORDS = (
 # ---------------------------------------------------------------------------
 
 
+def _is_int(raw: str) -> bool:
+    """True if `raw` is an integer literal (bool-shaped strings excluded)."""
+    try:
+        int(raw)
+    except ValueError:
+        return False
+    return True
+
+
 def parse_cache_ram(args: list[str]) -> int:
     """Return the --cache-ram limit in MiB from the model's launch args."""
     # Both spellings mean the same thing, so neither may be reported as
     # "missing from the preset" — that sends the operator to the wrong file.
-    # Validate every occurrence before converting any value: `--cache-ram=4096
-    # --cache-ram` must report the malformed flag, not quietly return 4096.
+    # Validate every occurrence before converting any value: `--cache-ram=4096`
+    # ahead of a malformed one must not swallow the problem (round 2 fixed the
+    # dangling case only; round 3 found the other occurrences still unchecked).
     values: list[str] = []
+    dangling: list[int] = []
     for i, a in enumerate(args):
         if a == "--cache-ram":
             if i + 1 >= len(args):
-                raise ValueError(
-                    "--cache-ram requires a value (a positive MiB limit), but it "
-                    "is the last argument"
-                )
-            values.append(args[i + 1])
+                dangling.append(i)
+            else:
+                values.append(args[i + 1])
         elif a.startswith("--cache-ram="):
             values.append(a.split("=", 1)[1])
-    raw: str | None = values[0] if values else None
-    if raw is None:
+
+    if not values and not dangling:
         raise ValueError(
             "--cache-ram is missing from the model's status.args; set it to a "
             "positive MiB limit in the model preset (the server default is "
             "not reported, and residency arithmetic needs a finite limit)"
         )
-    try:
-        value = int(raw)
-    except ValueError:
+    if dangling:
         raise ValueError(
-            f"--cache-ram is {raw!r}, not an integer; set a positive MiB "
-            "limit in the model preset"
-        ) from None
+            f"--cache-ram requires a value (a positive MiB limit) at argument "
+            f"position {dangling[0]} of {len(args)}; it was given without one"
+        )
+
+    bad = [v for v in values if not _is_int(v)]
+    if bad:
+        named = ", ".join(repr(v) for v in bad)
+        raise ValueError(
+            f"--cache-ram is {named}, not an integer; set a positive MiB limit "
+            "in the model preset"
+        )
+    numbers = [int(v) for v in values]
+    non_positive = [v for v in numbers if v <= 0]
+    if non_positive:
+        raise ValueError(
+            f"--cache-ram is {', '.join(str(v) for v in non_positive)}; set a "
+            "positive MiB limit in the model preset (the residency arithmetic "
+            "needs a finite limit)"
+        )
+    value = numbers[0]
     if value <= 0:
         raise ValueError(
             f"--cache-ram is {value}; set a positive MiB limit in the model "
