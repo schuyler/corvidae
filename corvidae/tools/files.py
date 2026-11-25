@@ -4,6 +4,8 @@ import asyncio
 import os
 import pathlib
 import re
+import stat
+import tempfile
 
 from corvidae.context import message_tokens
 from corvidae.tool import MAX_TOOL_RESULT_CHARS
@@ -352,3 +354,120 @@ def _write_file_sync(path: str, content: str) -> str:
         return f"Error: permission denied: {exc}"
     except OSError as exc:
         return f"Error: could not write file: {exc}"
+
+
+async def edit_file(
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str:
+    """Replace an exact passage in a file, refusing an ambiguous or missing one.
+
+    ``old_string`` must appear exactly once unless ``replace_all`` is true. The
+    bytes outside the passage are untouched, which is the whole reason this
+    exists beside ``write_file``: a whole-file rewrite costs output tokens in
+    proportion to the file, and a model reproducing a long file can drop parts
+    it did not mean to touch.
+    """
+    return await asyncio.to_thread(
+        _edit_file_sync, path, old_string, new_string, replace_all
+    )
+
+
+def _edit_file_sync(path: str, old_string: str, new_string: str, replace_all: bool) -> str:
+    p = pathlib.Path(path)
+    # Bytes, not text: read_text translates newlines, so a CRLF file would come
+    # back LF and the edit would silently rewrite every line ending.
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        return (
+            f"Error: {path} does not exist; edit_file changes an existing file. "
+            f"Create it with write_file first"
+        )
+    except PermissionError as exc:
+        return f"Error: permission denied reading {path}: {exc}"
+    except OSError as exc:
+        return f"Error: could not read {path}: {exc}"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return (
+            f"Error: {path} is not valid UTF-8 (byte {exc.start}); edit_file edits "
+            f"text files. Use write_file to replace it whole, or shell for bytes"
+        )
+
+    if not old_string:
+        return (
+            f"Error: old_string is empty, which every file matches; give the exact "
+            f"passage to replace in {path}"
+        )
+    if old_string == new_string:
+        return f"Error: old_string and new_string are identical, so nothing in {path} would change"
+
+    found = text.count(old_string)
+    if found == 0:
+        return (
+            f"Error: old_string was not found in {path}. It must match exactly, "
+            f"including indentation and line endings; read the file again and pass a "
+            f"passage copied from it verbatim"
+        )
+    if found > 1 and not replace_all:
+        return (
+            f"Error: old_string appears {found} times in {path}, so the target is "
+            f"ambiguous; include more of the surrounding lines to make it unique, or "
+            f"pass replace_all=true to replace every one"
+        )
+
+    replaced = found if replace_all else 1
+    updated = (
+        text.replace(old_string, new_string)
+        if replace_all
+        else text.replace(old_string, new_string, 1)
+    )
+    # Where the first change landed, so the caller need not read the file back.
+    line = text.count("\n", 0, text.find(old_string)) + 1
+
+    # Write through a symlink rather than over it: os.replace on the link path
+    # would swap the link itself for a regular file and leave its target alone,
+    # while reporting success.
+    target = p.resolve()
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except OSError as exc:
+        return f"Error: could not stat {path}: {exc}"
+    tmp_path = None
+    try:
+        # mkstemp, not a fixed name: two edits of one file in parallel would
+        # otherwise share ".name.edit-tmp" and one would replace the other's
+        # half-written bytes.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=target.parent, prefix=f".{target.name}.", suffix=".edit-tmp"
+        )
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(updated.encode("utf-8"))
+        # mkstemp hands back 0600, so replacing a 0755 script would lose its
+        # executable bits and a 0640 config its group read; put the original
+        # mode back before the file takes its place.
+        os.chmod(tmp_path, mode)
+        # Same directory, so the replace is atomic and a crash cannot leave a
+        # half-written file behind.
+        os.replace(tmp_path, target)
+        tmp_path = None
+    except PermissionError as exc:
+        return f"Error: permission denied writing {path}: {exc}"
+    except OSError as exc:
+        return f"Error: could not write {path}: {exc}"
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    plural = "" if replaced == 1 else "s"
+    return (
+        f"Edited {path}: replaced {replaced} occurrence{plural} at line {line}; "
+        f"file {len(raw)} -> {len(updated.encode('utf-8'))} bytes"
+    )

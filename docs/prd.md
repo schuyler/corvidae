@@ -911,7 +911,7 @@ Per transport:
 
 ### 3.5 Tools
 
-1. Built-in tools: the shell, file read and write, web fetch and web
+1. Built-in tools: the shell, file read, write and edit, web fetch and web
    search, the task pipeline and its status, the agent's settings tool,
    subagent, fork, the scheduler's reminder tools (set, list, cancel) and
    job tools (add, update), memory's search, transcript search and raw recall,
@@ -933,7 +933,7 @@ Per transport:
    server) on its next turn without rebuilding schemas when nothing
    changed.
 3. Tools run unsandboxed as the daemon user. The dangerous ones (the shell,
-   file read and write, the task pipeline, subagent) are opt-in;
+   file read, write and edit, the task pipeline, subagent) are opt-in;
    the file tools are rooted in a configured directory when on;
    web fetch refuses non-HTTP schemes and private address ranges and
    caps the response. The task pipeline is the shell by another name:

@@ -48,7 +48,7 @@ def _plugins():
     "index, expected",
     [
         (0, {"shell", "task_pipeline"}),
-        (1, {"read_file", "write_file"}),
+        (1, {"read_file", "write_file", "edit_file"}),
         (2, {"web_fetch", "web_search"}),
     ],
     ids=["shell", "file", "web"],

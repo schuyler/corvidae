@@ -7,7 +7,7 @@ in ``plugins.disabled``:
 - ``ShellToolPlugin`` (``shell_tools``): ``shell`` and ``task_pipeline``.
   ``task_pipeline`` runs each step through the shell, so it rides with
   ``shell``: disabling the plugin removes both (PRD §3.5.3).
-- ``FileToolsPlugin`` (``file_tools``): ``read_file`` and ``write_file``.
+- ``FileToolsPlugin`` (``file_tools``): ``read_file``, ``write_file`` and ``edit_file``.
 - ``WebToolsPlugin`` (``web_tools``): ``web_fetch`` and ``web_search``; owns
   the ``aiohttp.ClientSession`` ``web_fetch`` reuses.
 
@@ -24,7 +24,7 @@ from corvidae.tool import Tool, ToolContext
 from corvidae.tool_collection import ToolCollectionPlugin
 
 from corvidae.tools.shell import shell
-from corvidae.tools.files import page_chars, read_file, write_file
+from corvidae.tools.files import edit_file, page_chars, read_file, write_file
 from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
@@ -73,7 +73,8 @@ class ShellToolPlugin(CorvidaePlugin):
 
 
 class FileToolsPlugin(CorvidaePlugin):
-    """Registers ``read_file`` and ``write_file``; owns ``tools.max_file_read_bytes``."""
+    """Registers ``read_file``, ``write_file`` and ``edit_file``; owns
+    ``tools.max_file_read_bytes``."""
 
     # read_file resolves the spill service (stale pointers), the tool
     # collection (the live result cap and page fraction) and, optionally,
@@ -162,6 +163,10 @@ class FileToolsPlugin(CorvidaePlugin):
         tool_registry.extend([
             Tool.from_function(read_file),
             Tool.from_function(write_file),
+            # The same opt-in and the same reach as write_file: disabling this
+            # plugin removes all three, so an edit tool cannot outlive the
+            # write tool it stands in for (#1160).
+            Tool.from_function(edit_file),
         ])
 
 
