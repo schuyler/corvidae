@@ -266,6 +266,90 @@ Sample size is one session and five probes — suggestive, not a settled
 rate. Full message-id-level detail is in
 `$BUSTER_ROOT/sessions/20260827T033822Z/observations.md` on the Buster host.
 
+## Cache-ram swap cost (2026-10-31, sagan)
+
+**Historical.** These figures were taken on sagan serving `swift-1.5`, which
+was no longer in sagan's lineup by 2026-11-19 (only a 3B and the embedding
+model were being served then). Treat every number below as unreproducible
+until rerun against a current model; the method is reproducible, the timings
+are not.
+
+Not a shakedown session: a mechanical probe, `harness/cache_swap.py`
+(README section "Measuring cache-ram swap cost"), run for #231 to price
+what it costs when a second prompt (a background call, an effort switch,
+another channel) pushes the agent's window out of the slot and the
+llama-server prompt cache (`--cache-ram`) has to swap it back.
+
+Setup: llama-server build b11827-970b51ce7 under the router, model
+`swift-1.5`, one slot, `cache-ram 32768` MiB, ctx 163840, q8_0 KV, MTP
+speculative decoding. Lex was stopped, so nothing else used the server.
+One repetition per cell. Raw output: `run.json`, `requests.jsonl` and
+`report.md` under `lex/state/cache-swap/2026-10-31-cram32768/` on sagan.
+
+"Overhead" is wall time minus `prompt_ms` minus `predicted_ms`. That
+covers saving the slot's prompt to the cache, loading the matching
+entry, and about 0.4 s of fixed per-request cost (the smoke run's
+smallest restores came in at 0.55 s).
+
+**Restoring after a small (~4k) interloper (R1).** The window came back
+from the cache every time:
+
+| window tokens | restore wall s | cold wall s |
+|---|---|---|
+| 16384 | 1.3 | 19 |
+| 65536 | 2.4 | 87 |
+| 131072 | 4.0 | 203 |
+| 160000 | 4.5 | 264 |
+
+Going the other way (the 4k prompt returning after the big window) takes
+1.2–5.4 s, because the big window has to be saved first. Restore cost
+grows with the tokens saved plus the tokens loaded, at about 25–30 µs a
+token each way (noisier at 16k, where the fixed cost dominates).
+
+**Effort switch (R1).** Our template prepends a reasoning-effort line to
+the system block, so the same conversation at `medium` and at `xhigh` is
+two cache entries. Each swap saves one big window and loads the other,
+so from 65k up it costs about twice the small-interloper case: 1.6 s at
+16k, 4.3 s at 65k, 8.0 s at 131k, 9.4 s at 160k, against 19–271 s to
+reprocess cold. Each of these swaps needs both windows resident at once,
+so the 160k hit is direct evidence that two near-full windows fit.
+
+**Residency (R2).** The cache held at least 19 entries of 16k, 6 of 65k,
+4 of 131k and 3 of 160k. Every probe hit, so these are lower bounds: the
+probe filled the cache assuming about 120 KiB per token (what Lex's
+evictions suggested), and the probe's entries are smaller than that. No
+entry was evicted, so no residency limit and no evicted-restore cost were
+measured. A rerun of `--units r2` with `--kib-per-token` of about 60 or
+less would find them. At 160k one entry is at most 10,923 MiB (about
+10.7 GiB, ≤ 70 KiB/token), so two near-full windows fit in 32 GiB.
+
+**Catch-up (R3).** After a restore at 65k, the new turns since the save
+are processed at the normal prompt rate on top of the restore: 3.5 s
+with 1 new turn (507 tokens), 6.6 s with 5 (2478), 18.2 s with 20
+(9907). Cold, the same prompts take 89–105 s.
+
+**After compaction (R4).** A compacted window (131k compacted to ~54k
+tokens) shares only its system block with anything cached: `compacted_messages`
+deliberately keeps `messages[0]`, and `unit_r4` leaves the previous window's
+entry in the cache before the compacted request goes out. That is a mechanism
+inference from the code, not something this document can quote: the harness records
+`cached_tokens` for every request (README, `requests.jsonl` keys), but the R4 row is
+not reproduced in this section, so the size of that shared prefix is not citable from
+here. What is recorded is the timing: 73.8 s for the compacted request and 73.7 s for
+the same prompt with caching turned off -- one run each, so the 0.1 s gap distinguishes
+neither case, and both figures belong to swift-1.5 rather than to compaction in general.
+
+**Caveat on entry size.** Lex's own evictions earlier the same day
+removed entries of 7.0–7.5 GiB while its windows were around 50–90k
+tokens. That's more per token than the probe's entries. A probe entry
+is one request deep, while a long-lived window may carry extra context
+checkpoints. The server log doesn't record the token count of an evicted
+entry, so the gap can't be pinned down from these runs. "Two near-full
+windows fit" is measured for probe-shaped entries. If Lex's entries
+really run 7 GiB at 60k, two of them at 160k would not fit in 32 GiB.
+`cache-ram` was left at 32768, because the approved criterion (the
+probe's own measurement) said yes.
+
 ## What's next
 
 Two open threads, both design questions rather than obvious fixes:
