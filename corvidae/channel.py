@@ -120,7 +120,7 @@ def validate_agent_config(agent: dict) -> None:
     _check_seconds(agent.get("check_allowance_min"), "agent.check_allowance_min")
     # Agent-level defaults reach every channel that sets no value of its own
     # (#850), so the same positivity rule applies here.
-    for int_key in ("max_turns", "max_context_tokens"):
+    for int_key in ("max_turns", "max_context_tokens", "max_tool_calls_per_turn"):
         _check_int_key(agent.get(int_key), f"agent.{int_key}")
     _check_positive_int(agent.get("held_entry_max_chars"), "agent.held_entry_max_chars")
     parse_forks_config(agent)
@@ -129,7 +129,8 @@ def validate_agent_config(agent: dict) -> None:
 #: The keys a ``channels:`` entry (exact or transport-wide) accepts; any other
 #: key is rejected (#205). Keep in step with the ChannelConfig fields below.
 CHANNEL_ENTRY_KEYS: tuple[str, ...] = (
-    "register_prompt", "max_context_tokens", "max_turns", "reasoning_history", "tools",
+    "register_prompt", "max_context_tokens", "max_turns",
+    "max_tool_calls_per_turn", "reasoning_history", "tools",
     "check_allowance",
 )
 
@@ -204,6 +205,8 @@ class ChannelConfig:
     # resolve(): corvidae.checks.resolve_check_allowance reads it, then the
     # wide entries, then the transport's default, then the minimum.
     check_allowance: float | None = None
+    # Parallel tool calls allowed per turn; None = no limit (#285).
+    max_tool_calls_per_turn: int | None = None
     # channels.<id>.tools.disabled, layered on the global tools.disabled
     # (issue #149). Unlike the fields above it is not merged by resolve():
     # the Agent snapshots it per conversation (corvidae/tool_policy.py),
@@ -249,6 +252,14 @@ class ChannelConfig:
                 self.max_turns if self.max_turns is not None
                 else agent_defaults.get("max_turns", 10)
             ),
+            # None (unlimited) is the default: a falsy 0 must not be
+            # mistaken for "not set" by an `or`-based fallback, so the
+            # resolved value is passed through as-is.
+            "max_tool_calls_per_turn": (
+                self.max_tool_calls_per_turn
+                if self.max_tool_calls_per_turn is not None
+                else agent_defaults.get("max_tool_calls_per_turn")
+            ),
         }
 
         if runtime_overrides:
@@ -273,7 +284,10 @@ class ChannelConfig:
 
 #: ChannelConfig fields resolved by ChannelConfig.resolve (disabled_tools
 #: is unioned by Channel.disabled_tools instead).
-_SCALAR_FIELDS = ("register_prompt", "max_context_tokens", "reasoning_history", "max_turns")
+_SCALAR_FIELDS = (
+    "register_prompt", "max_context_tokens", "reasoning_history",
+    "max_turns", "max_tool_calls_per_turn",
+)
 
 #: The suffix that turns a ``channels:`` key into a transport-wide entry.
 WIDE_SUFFIX = "*"
@@ -539,12 +553,14 @@ def parse_positive_int(value: object, key: str) -> int:
     return value
 
 
-def _check_int_key(value: object, where: str) -> None:
+def _check_int_key(value: object, where: str, minimum: int | None = None) -> None:
     """Raise ValueError unless value is None or a positive integer (bool excluded).
 
     Zero and negative values are refused for the same reason set_settings refuses
     them (#850): a channel with no turns or no context cannot answer, so the
     limit would fail at turn time with nothing naming the key.
+
+    With ``minimum`` (#285), a present value below it is also an error. The
     """
     if value is None:
         return
@@ -557,6 +573,11 @@ def _check_int_key(value: object, where: str) -> None:
         raise ValueError(
             f"{where} must be a positive integer, got {value}; use a whole "
             f"number of at least 1 or remove the key"
+        )
+    if minimum is not None and value < minimum:
+        raise ValueError(
+            f"{where} must be at least {minimum}, got {value}; "
+            f"use a whole number >= {minimum} or remove the key"
         )
 
 
@@ -661,12 +682,18 @@ def parse_channel_config(config: dict) -> ParsedChannels:
         _check_seconds(
             overrides.get("check_allowance"), f"channels.{channel_id}.check_allowance"
         )
+        _check_int_key(
+            overrides.get("max_tool_calls_per_turn"),
+            f"channels.{channel_id}.max_tool_calls_per_turn",
+            minimum=1,
+        )
         channel_config = ChannelConfig(
             register_prompt=overrides.get("register_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
             reasoning_history=overrides.get("reasoning_history"),
             max_turns=overrides.get("max_turns"),
             check_allowance=overrides.get("check_allowance"),
+            max_tool_calls_per_turn=overrides.get("max_tool_calls_per_turn"),
             disabled_tools=parse_channel_tools(
                 overrides.get("tools"), f"channels.{channel_id}"
             ),

@@ -116,6 +116,40 @@ class TestChannelConfigResolve:
 # validate_agent_config — fail loudly on stale or bad reasoning config (#57)
 # ---------------------------------------------------------------------------
 
+class TestMaxToolCallsPerTurnConfig:
+    """max_tool_calls_per_turn: config surface (#285)."""
+
+    def test_resolve_defaults_to_no_limit(self):
+        cfg = ChannelConfig()
+        result = cfg.resolve({"system_prompt": "x"})
+        assert result["max_tool_calls_per_turn"] is None
+
+    def test_resolve_agent_default_fills_gap(self):
+        cfg = ChannelConfig()
+        result = cfg.resolve({"max_tool_calls_per_turn": 3})
+        assert result["max_tool_calls_per_turn"] == 3
+
+    def test_resolve_channel_override_wins(self):
+        cfg = ChannelConfig(max_tool_calls_per_turn=5)
+        result = cfg.resolve({"max_tool_calls_per_turn": 3})
+        assert result["max_tool_calls_per_turn"] == 5
+
+    @pytest.mark.parametrize("value", [1, 3, 10])
+    def test_parse_accepts_positive_int(self, value):
+        parsed = parse_channel_config({"channels": {
+            "irc:#a": {"max_tool_calls_per_turn": value},
+        }})
+        (cid, transport, scope, config), = parsed.exact
+        assert config.max_tool_calls_per_turn == value
+
+    @pytest.mark.parametrize("value", [0, -1, "3", True, 2.5])
+    def test_parse_rejects_non_positive_or_non_int(self, value):
+        with pytest.raises(ValueError, match="max_tool_calls_per_turn"):
+            parse_channel_config({"channels": {
+                "irc:#a": {"max_tool_calls_per_turn": value},
+            }})
+
+
 class TestValidateAgentConfig:
     @pytest.mark.parametrize("value", ["drop", "exchange", "keep"])
     def test_accepts_valid_values(self, value):
@@ -133,6 +167,29 @@ class TestValidateAgentConfig:
         must not quietly fall back to the default."""
         with pytest.raises(ValueError, match="keep_thinking_in_history"):
             validate_agent_config({"keep_thinking_in_history": True})
+
+    # #1257: agent.max_tool_calls_per_turn reaches every channel that sets no
+    # value of its own (agent_defaults, #850), so a value that would drop every
+    # tool call of every turn has to be refused at load, exactly like max_turns.
+    @pytest.mark.parametrize("value", [0, -3, "3", 2.5, True])
+    def test_rejects_non_positive_or_non_integer_max_tool_calls(self, value):
+        with pytest.raises(ValueError, match="agent.max_tool_calls_per_turn"):
+            validate_agent_config({"max_tool_calls_per_turn": value})
+
+    def test_rejects_zero_max_tool_calls_naming_key_value_and_fix(self):
+        """Not just the raise: the message names the key, the bad value and the fix."""
+        with pytest.raises(ValueError) as exc:
+            validate_agent_config({"max_tool_calls_per_turn": 0})
+        msg = str(exc.value)
+        assert "agent.max_tool_calls_per_turn" in msg and "positive integer" in msg and "0" in msg
+
+    def test_rejects_quoted_number_max_tool_calls(self):
+        with pytest.raises(ValueError) as exc:
+            validate_agent_config({"max_tool_calls_per_turn": "3"})
+        assert "agent.max_tool_calls_per_turn" in str(exc.value)
+
+    def test_accepts_a_positive_max_tool_calls(self):
+        validate_agent_config({"max_tool_calls_per_turn": 3})
 
 
 # ---------------------------------------------------------------------------

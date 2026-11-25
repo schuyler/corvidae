@@ -828,3 +828,32 @@ class TestMarkerRowIdAcrossAwait:
         marker = next(m for m in conv.messages if unsent_marker_emission(m.get("content")) is not None)
         racer = next(m for m in conv.messages if m.get("content") == "racer")
         assert marker.get("_db_id") == 4242 and "_db_id" not in racer
+
+    async def test_suppressed_tool_calls_marker_keeps_its_own_id(self, env):
+        """#517 one function over: the suppressed-tool-calls marker (#285) must
+        stamp the row it appended, not whatever landed during the persist await."""
+        from types import SimpleNamespace
+
+        from corvidae.context import ContextWindow
+
+        plugin, channel, _db = env
+        conv = channel.conversation = ContextWindow(channel.id)
+
+        async def persist(channel, message, message_type):
+            conv.append({"role": "user", "content": "racer"}, MessageType.MESSAGE)
+            return [4343]
+
+        real_pm, plugin.pm = plugin.pm, SimpleNamespace(ahook=SimpleNamespace(persist_message=persist))
+        try:
+            await plugin._append_suppressed_tool_calls_marker(
+                channel, [{"function": {"name": "shell"}}]
+            )
+        finally:
+            plugin.pm = real_pm
+
+        marker = next(
+            m for m in conv.messages
+            if "suppressed by max_tool_calls_per_turn" in (m.get("content") or "")
+        )
+        racer = next(m for m in conv.messages if m.get("content") == "racer")
+        assert marker.get("_db_id") == 4343 and "_db_id" not in racer

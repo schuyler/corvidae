@@ -549,6 +549,153 @@ class TestHandleResponse:
         # no OutboundMessage may be sent when tool calls are dispatched
         assert sent(plugin.pm, OutboundMessage) == []
 
+
+class TestMaxToolCallsPerTurn:
+    """_handle_response enforces the per-turn parallelism cap (#285)."""
+
+    @staticmethod
+    def _conv(channel):
+        from corvidae.context import ContextWindow
+
+        if channel.conversation is None:
+            channel.conversation = ContextWindow(channel.id)
+        return channel.conversation
+
+    @staticmethod
+    def _five_calls():
+        return [
+            {
+                "id": f"call-{i}",
+                "function": {"name": f"tool_{i}", "arguments": "{}"},
+            }
+            for i in range(1, 6)
+        ]
+
+    async def test_limit_dispatches_prefix_only(self, plugin_and_channel):
+        """5 calls, limit 3 -> only the first 3 are dispatched."""
+        plugin, channel, db = plugin_and_channel
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+
+        await plugin._handle_response(
+            result=result,
+            channel=channel,
+            max_turns_limit=10,
+            request_text="go",
+            max_tool_calls_per_turn=3,
+        )
+
+        assert channel.pending_tool_call_ids == {"call-1", "call-2", "call-3"}
+
+    async def test_the_colliding_kwarg_name_is_gone(self, plugin_and_channel):
+        # main already owns a `max_tool_calls` parameter for a different feature
+        # (the fork-dispatch limit). This branch's cap must not be reachable
+        # under that name, or a call site can silently configure the wrong one.
+        plugin, channel, _db = plugin_and_channel
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+        with pytest.raises(TypeError) as exc:
+            await plugin._handle_response(
+                result=result, channel=channel, max_turns_limit=10,
+                request_text="go", max_tool_calls=3,
+            )
+        # Pin the source of the TypeError, not just its type: name the callee so
+        # a TypeError raised inside the body (or by a nested call) cannot count
+        # as this one. item is left out on purpose — it has a default, so
+        # passing it explicitly proved nothing.
+        msg = str(exc.value)
+        assert "unexpected keyword argument" in msg, msg
+        # Quoted, deliberately: `max_tool_calls` is a substring of
+        # `max_tool_calls_per_turn`, so an unquoted check also passes when the
+        # NEW name is the one that leaked into the retired parameter. Python
+        # reprs the keyword in the message, so the quotes are free to match.
+        assert "'max_tool_calls'" in msg, msg
+        # Qualified with the class and the call parens: a bare "_handle_response"
+        # would also match a TypeError raised by a nested function whose name
+        # merely contains it. Not pinned to `Agent.` alone being enough — the
+        # unique-kwarg assert above is what really excludes other call sites.
+        assert "Agent._handle_response() got" in msg, msg
+
+    async def test_no_limit_dispatches_all(self, plugin_and_channel):
+        """limit=None (the default) -> every call is dispatched."""
+        plugin, channel, db = plugin_and_channel
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+
+        await plugin._handle_response(
+            result=result,
+            channel=channel,
+            max_turns_limit=10,
+            request_text="go",
+        )
+
+        assert channel.pending_tool_call_ids == {
+            "call-1", "call-2", "call-3", "call-4", "call-5",
+        }
+
+    async def test_limit_at_or_above_count_is_a_noop(self, plugin_and_channel):
+        plugin, channel, db = plugin_and_channel
+        conv = self._conv(channel)
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+
+        await plugin._handle_response(
+            result=result,
+            channel=channel,
+            max_turns_limit=10,
+            request_text="go",
+            max_tool_calls_per_turn=5,
+        )
+
+        assert len(channel.pending_tool_call_ids) == 5
+        assert not any(
+            "suppressed" in str(m.get("content", ""))
+            for m in conv.messages
+        )
+
+    async def test_dropped_calls_named_in_window_marker(self, plugin_and_channel, caplog):
+        """The model sees what was suppressed: a CONTEXT row names the
+        dropped calls, and the operator sees a warning."""
+        plugin, channel, db = plugin_and_channel
+        conv = self._conv(channel)
+        result = _make_turn_result(text="", tool_calls=self._five_calls())
+        plugin._tools = {f"tool_{i}": self._noop_tool() for i in range(1, 6)}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await plugin._handle_response(
+                result=result,
+                channel=channel,
+                max_turns_limit=10,
+                request_text="go",
+                max_tool_calls_per_turn=3,
+            )
+
+        marker = next(
+            (
+                m for m in conv.messages
+                if m.get("role") == "system"
+                and "suppressed" in str(m.get("content", ""))
+            ),
+            None,
+        )
+        assert marker is not None, "no suppressed-calls marker in the window"
+        content = marker["content"]
+        assert "tool_4" in content and "tool_5" in content
+        assert "tool_3" not in content
+        assert any(
+            "dropping 2 tool call(s)" in r.message and "tool_4, tool_5" in r.message
+            for r in caplog.records
+        )
+
+    @staticmethod
+    def _noop_tool():
+        async def tool() -> str:
+            """A tool."""
+            return "ok"
+
+        return tool
+
     async def test_tool_calls_under_limit_increment_turn_counter(
         self, plugin_and_channel
     ):

@@ -1425,6 +1425,49 @@ class Agent(CorvidaePlugin):
             return resolved or fallback
         return resolved
 
+
+    async def _append_suppressed_tool_calls_marker(
+        self, channel: Channel, dropped: list[dict]
+    ) -> None:
+        """Tell the model which tool calls were suppressed this turn (#285).
+
+        A CONTEXT system row, persisted like the not-sent marker, so the
+        note survives reload and the model sees the drops it needs to
+        re-issue rather than assuming the calls ran.
+        """
+        conv = channel.conversation
+        if conv is None:
+            return
+        names = ", ".join(c["function"]["name"] for c in dropped)
+        marker = {
+            "role": "system",
+            "content": (
+                f"{len(dropped)} tool call(s) from your last response were "
+                f"suppressed by max_tool_calls_per_turn and did NOT run: "
+                f"{names}. Re-issue them in a later turn."
+            ),
+        }
+        conv.append(marker, MessageType.CONTEXT)
+        # Hold the window row itself before the await, as the not-sent marker
+        # does: a row appended while this persists would otherwise be what
+        # `messages[-1]` names when the id comes back, and the marker's log id
+        # would land on its neighbour (#517).
+        window_row = conv.messages[-1]
+        try:
+            results = await self.pm.ahook.persist_message(
+                channel=channel, message=marker, message_type=MessageType.CONTEXT,
+            )
+            rowid = resolve_single_result(results, "persist_message")
+            if rowid is not None:
+                window_row["_db_id"] = rowid
+        except Exception:
+            logger.warning(
+                "persist_message hook failed for the suppressed tool calls "
+                "marker on %s",
+                channel.id, exc_info=True, extra={"channel": channel.id},
+            )
+
+
     async def _handle_response(
         self,
         result: AgentTurnResult,
@@ -1435,6 +1478,7 @@ class Agent(CorvidaePlugin):
         *,
         display_text: str | None = None,
         unsent: bool = False,
+        max_tool_calls_per_turn: int | None = None,
     ) -> None:
         """Dispatch tool calls or send text response.
 
@@ -1469,7 +1513,25 @@ class Agent(CorvidaePlugin):
                         logger.warning("send hook failed for progress", exc_info=True, extra={"channel": channel.id})
                 else:
                     await self._append_unsent_marker(channel, "progress", result.text)
-            await self._dispatch_tool_calls(result.tool_calls, channel)
+            tool_calls = result.tool_calls
+            # Per-turn parallelism cap (#285): keep the first N — the model
+            # ordered them, so the prefix is its own priority — and tell the
+            # model what was dropped so it re-issues the rest next turn.
+            if max_tool_calls_per_turn is not None and len(tool_calls) > max_tool_calls_per_turn:
+                kept, dropped = tool_calls[:max_tool_calls_per_turn], tool_calls[max_tool_calls_per_turn:]
+                names = [c["function"]["name"] for c in dropped]
+                logger.warning(
+                    "max_tool_calls_per_turn=%d: dropping %d tool call(s) "
+                    "this turn: %s",
+                    max_tool_calls_per_turn, len(dropped), ", ".join(names),
+                    extra={"channel": channel.id},
+                )
+                tool_calls = kept
+            await self._dispatch_tool_calls(tool_calls, channel)
+            if max_tool_calls_per_turn is not None and len(result.tool_calls) > max_tool_calls_per_turn:
+                await self._append_suppressed_tool_calls_marker(
+                    channel, result.tool_calls[max_tool_calls_per_turn:]
+                )
             # Do NOT send text response; return and wait for tool results
             return
         elif result.tool_calls:
@@ -1801,6 +1863,7 @@ class Agent(CorvidaePlugin):
             # 3. Resolve config and read max_turns_limit
             resolved = self._registry.resolve_config(channel)
             max_turns_limit = resolved["max_turns"]
+            max_tool_calls_per_turn = resolved.get("max_tool_calls_per_turn")
 
             # Steps 4-6 already ran on the first attempt of a retried turn (its
             # output is in the window), so a retry goes straight to the LLM call.
@@ -2015,6 +2078,7 @@ class Agent(CorvidaePlugin):
             await self._handle_response(
                 result, channel, max_turns_limit, request_text, item,
                 display_text=display_text, unsent=unsent,
+                max_tool_calls_per_turn=max_tool_calls_per_turn,
             )
 
             # 11. Log phase timing breakdown

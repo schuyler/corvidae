@@ -149,6 +149,7 @@ class TestPrecedence:
             "max_context_tokens": 4000,
             "reasoning_history": "keep",
             "max_turns": 2,
+            "max_tool_calls_per_turn": 4,
         }
         # check_allowance is not merged by resolve(); its wide-entry path is
         # tested with resolve_check_allowance (tests/test_check_allowance.py).
@@ -162,6 +163,7 @@ class TestPrecedence:
         assert resolved["max_context_tokens"] == 4000
         assert resolved["reasoning_history"] is ReasoningHistory.KEEP
         assert resolved["max_turns"] == 2
+        assert resolved["max_tool_calls_per_turn"] == 4
 
     def test_wide_beats_agent_and_agent_fills_the_rest(self):
         registry = _registry({"channels": {"signal:*": {"max_turns": 3}}})
