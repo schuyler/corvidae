@@ -109,8 +109,10 @@ node src/index.js --socket state/whatsapp.sock --auth-dir state/whatsapp-auth \
 ```
 
 prints a pairing code to type into the phone (WhatsApp → Settings → Linked
-Devices → Link a Device). This needs the phone, so it is the step that waits
-for Schuyler. Credentials land in `--auth-dir`; that directory is a
+Devices → Link a Device). The code is requested once WhatsApp's handshake is
+done; if that takes more than 30 seconds, `pair` fails with "no WhatsApp socket
+is open" (`-32002` over the socket, fix `wait`). This needs the phone, so it is
+the step that waits for Schuyler. Credentials land in `--auth-dir`; that directory is a
 credential set — it is git-ignored, and it is not to be copied into a repo, a
 prompt, or a log.
 

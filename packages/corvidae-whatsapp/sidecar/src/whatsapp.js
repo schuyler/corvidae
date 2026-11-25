@@ -192,6 +192,7 @@ export class WhatsAppAdapter {
     mediaDir = DEFAULT_MEDIA_DIR,
     maxMediaBytes = DEFAULT_MAX_MEDIA_BYTES,
     mediaDownloader = null,
+    pairReadyTimeoutMs = 30000,
   }) {
     this.authDir = authDir;
     // Injected so tests never touch the credential directory on disk.
@@ -201,6 +202,8 @@ export class WhatsAppAdapter {
     this.log = logger;
     this.fetchVersion = fetchVersion;
     this.socketFactory = socketFactory;
+    this.pairReadyTimeoutMs = pairReadyTimeoutMs;
+    this.sockReady = null;
     this.notify = () => {};
     this.sock = null;
     this.connected = false;
@@ -284,12 +287,17 @@ export class WhatsAppAdapter {
         key?.id ? (this.recentMedia.get(mediaCacheKey(key.remoteJid, key.id)) ?? null) : null,
     });
     this.sock = sock;
+    let markReady;
+    this.sockReady = new Promise((resolve) => {
+      markReady = resolve;
+    });
 
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr, self } = update;
       if (self?.jid) this.selfJid = jidNormalizedUser(self.jid);
+      if (qr || connection === "open") markReady();
       if (connection === "open") {
         this.connected = true;
         this.linked = true;
@@ -527,8 +535,8 @@ export class WhatsAppAdapter {
 
   // Baileys returns the code but no expiry; WhatsApp shows pairing codes as
   // short-lived, so expires_at is our own 60s assumption, flagged as such.
-  // Pairing runs before the session is linked, so it gates on the socket
-  // existing rather than on state === 'linked' — the #sock() gate would refuse
+  // Pairing runs before the session is linked, so it gates on the socket being
+  // ready rather than on state === 'linked' — the #sock() gate would refuse
   // the one call that has to work while unlinked.
   async pair({ phone } = {}) {
     if (!phone) throw new Error("pair: 'phone' is required (E.164 without '+' or spaces)");
@@ -548,6 +556,17 @@ export class WhatsAppAdapter {
       // Still no socket means nothing to ask, and that is a real state worth the
       // typed error: a stopped adapter, or a connect that has not produced one.
       if (!this.sock) throw this.pairSocketError();
+    }
+    // Baileys' sendRawMessage throws Connection Closed until the websocket is
+    // open; the first qr or open update is the earliest signal that it is.
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(this.pairSocketError()), this.pairReadyTimeoutMs);
+    });
+    try {
+      await Promise.race([this.sockReady, timeout]);
+    } finally {
+      clearTimeout(timer);
     }
     const code = await this.sock.requestPairingCode(String(phone).replace(/[^0-9]/g, ""));
     return { code, expires_at: Math.floor(Date.now() / 1000) + 60 };
