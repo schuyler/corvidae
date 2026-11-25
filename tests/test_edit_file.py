@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from corvidae.tool_policy import expand_disabled
@@ -114,3 +116,81 @@ def test_naming_write_file_as_disabled_also_disables_edit_file():
     """An edit tool must not outlive the write tool it stands in for (#1160)."""
     assert expand_disabled(["write_file"]) == frozenset({"write_file", "edit_file"})
     assert expand_disabled(["edit_file"]) == frozenset({"write_file", "edit_file"})
+
+
+async def test_a_0600_file_stays_0600(tmp_path):
+    """The tmp-then-replace dance must not widen a credential file (#1258).
+
+    state/*.env token files are 0600, and a create-then-replace that lets umask
+    decide hands back 0644: readable by every user on the box.
+    """
+    path = tmp_path / "tokens.env"
+    path.write_text("TOKEN=old\n")
+    path.chmod(0o600)
+
+    result = await edit_file(str(path), "old", "new")
+
+    assert "Edited" in result
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text() == "TOKEN=new\n"
+
+
+async def test_the_mode_of_an_executable_survives_an_edit(tmp_path):
+    path = tmp_path / "run.sh"
+    path.write_text("#!/bin/sh\necho old\n")
+    path.chmod(0o755)
+
+    await edit_file(str(path), "old", "new")
+
+    assert path.stat().st_mode & 0o777 == 0o755
+
+
+async def test_editing_through_a_symlink_changes_its_target(tmp_path):
+    """os.replace on the link path swaps the link for a file (#1258).
+
+    The edit has to land in the target, and the link has to still be a link;
+    otherwise the agent reports success while the real file is untouched.
+    """
+    target = tmp_path / "real.md"
+    target.write_text("before\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+
+    result = await edit_file(str(link), "before", "after")
+
+    assert "Edited" in result
+    assert target.read_text() == "after\n"
+    assert link.is_symlink()
+    assert link.read_text() == "after\n"
+
+
+async def test_no_temporary_file_is_left_behind(tmp_path):
+    path = tmp_path / "notes.md"
+    path.write_text("hello\n")
+
+    await edit_file(str(path), "hello", "goodbye")
+
+    assert [p.name for p in tmp_path.iterdir()] == ["notes.md"]
+
+
+async def test_parallel_edits_of_one_file_do_not_collide(tmp_path):
+    """A fixed ".name.edit-tmp" name lets two edits clobber each other (#1258).
+
+    Each edit may lose the race and report the passage as gone, which is
+    honest: what must not happen is a crash, a leftover temp file, or a file
+    that is not one of the outcomes of the edits that succeeded.
+    """
+    path = tmp_path / "notes.md"
+    path.write_text("a\nb\nc\n")
+
+    results = await asyncio.gather(
+        edit_file(str(path), "a", "A"),
+        edit_file(str(path), "b", "B"),
+        edit_file(str(path), "c", "C"),
+    )
+
+    assert all(r.startswith(("Edited", "Error: old_string was not found")) for r in results)
+    assert [p.name for p in tmp_path.iterdir()] == ["notes.md"]
+    final = path.read_text()
+    assert final.count("a") <= 1 and final.count("b") <= 1 and final.count("c") <= 1
+    assert len(final.split()) == 3
