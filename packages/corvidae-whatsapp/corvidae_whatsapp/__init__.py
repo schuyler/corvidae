@@ -3,7 +3,7 @@
     whatsapp:
       socket: state/whatsapp.sock
 
-The sidecar (services/whatsapp-sidecar in the workspace repo) links to WhatsApp
+The sidecar (packages/corvidae-whatsapp/sidecar in the workspace repo) links to WhatsApp
 and speaks JSON-RPC over that socket; this package is corvidae's half of it.
 """
 
