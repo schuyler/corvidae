@@ -22,6 +22,10 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger("corvidae.whatsapp")
 
+#: JSON-RPC's own "internal error", used when a reply's error payload cannot be
+#: read. The transport must not invent a code, and must not die over one.
+INTERNAL_ERROR = -32603
+
 #: Error codes the plugin translates into an operator sentence.
 NOT_LINKED = -32001
 NOT_CONNECTED = -32002
@@ -44,7 +48,17 @@ class SidecarError(RuntimeError):
 
 def _error_from_reply(error: dict) -> SidecarError:
     """One reply's ``error`` object as a SidecarError, naming the fix."""
-    code = int(error.get("code", 0))
+    # A sidecar fault must not be fatal here: a filesystem error surfaces as a
+    # string code ("ENOTDIR"), and int() of that used to kill the read loop.
+    raw_code = error.get("code", 0)
+    try:
+        code = int(raw_code)
+    except (TypeError, ValueError):
+        logger.warning(
+            "whatsapp: sidecar replied with a non-integer error code %r; "
+            "reporting it as an internal error", raw_code,
+        )
+        code = INTERNAL_ERROR
     data = error.get("data") or {}
     state = data.get("state") if isinstance(data, dict) else None
     fix = data.get("fix") if isinstance(data, dict) else None
@@ -147,7 +161,14 @@ class SidecarClient:
                 logger.warning("whatsapp: sidecar sent a JSON value that is not an object")
                 continue
             if "id" in payload and ("result" in payload or "error" in payload):
-                self._settle(payload)
+                try:
+                    self._settle(payload)
+                except Exception:
+                    # One malformed reply is a bad reply, not a dead transport:
+                    # the pending call gets an error and the loop keeps reading.
+                    logger.warning(
+                        "whatsapp: could not settle a reply; skipping it", exc_info=True,
+                    )
             elif "method" in payload:
                 # Queued, not awaited: a handler that calls `call()` would
                 # deadlock here, because the reply it waits for is read by this

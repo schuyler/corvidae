@@ -632,3 +632,29 @@ async def test_a_session_open_notification_is_quiet(tmp_path, caplog):
     finally:
         await plugin.on_stop()
         await sidecar.stop()
+
+
+async def test_a_string_error_code_is_not_fatal(tmp_path, caplog):
+    """A filesystem error's string code must not end the read loop (#1248 review)."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    sidecar.replies["send_text"] = (
+        "error", {"code": "ENOTDIR", "message": "not a directory"},
+    )
+    await sidecar.start()
+    plugin, recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        channel = plugin._registry.get_or_create("whatsapp", CHAT)
+        with caplog.at_level(logging.WARNING, logger="corvidae.whatsapp"):
+            # Bounded, so a guard that stops settling replies fails red here
+            # rather than hanging until pytest-timeout calls the test.
+            await asyncio.wait_for(
+                plugin.send_message(channel, OutboundMessage(text="hello")), 5,
+            )
+        assert any("non-integer error code" in r.getMessage() for r in caplog.records)
+        # The loop is still alive: the very next request gets its reply.
+        sidecar.replies["status"] = {"state": "connected", "linked": True}
+        assert (await plugin._client.call("status", {}))["state"] == "connected"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
