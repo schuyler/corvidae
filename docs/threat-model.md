@@ -1619,8 +1619,9 @@ line is plain text in the result, with no kernel header at all.
   a second route to the same effect: an injected "don't reply" can get the
   tool called. The tool is in the tool list of every channel and refuses on
   any that isn't conversational. The record is `silence = "tool"`,
-  written when the tool is called, so it shows the call and not whether the
-  follow-up stayed silent. `silence_reason` is the model's own words,
+  written when the turn ends and only if its final was withheld, so it shows a
+  call that stayed silent; a follow-up that was sent records nothing.
+  `silence_reason` is the model's own words,
   steerable by an injection, cut at 200 characters and stored in
   the outcome log, which is for offline analysis; check before routing
   it into a prompt. It adds no capability: the agent could already stay quiet by sending an empty final,
@@ -2206,7 +2207,7 @@ Two things are new.
   (finding 23): its objections re-enter as framed CONTEXT at the next turn
   and wake nothing, and the lens changes no goal. An injected goal can at
   most steer the planning lens's suggestions, which the agent then judges.
-  To switch it off, list `corvidae_planning` under `plugins.disabled`.
+  To switch it off, list `planning` under `plugins.disabled`.
 - **Plugins can rewrite lens instructions.** `transform_critique_prompt`
   ([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt))
   hands every implementer the instruction for each built-in lens fork
