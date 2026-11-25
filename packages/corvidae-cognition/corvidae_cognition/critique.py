@@ -2229,15 +2229,16 @@ class CritiquePlugin(CorvidaePlugin):
         idle = point == "idle"
         cap = self._bound("critique.max_tool_calls") if idle else 0
         timeout = self._bound("critique.fork_timeout")
-        # Wall time inside the deadline, which is exactly what the deadline
-        # bounds: the quiet wait plus every request. A warning that says only
-        # "exceeded the timeout" cannot tell a slow fork from a hung one (#1272).
-        started = time.monotonic()
         # Set once the pre-render wait is over: tells a deadline that hit
         # while the channel was still busy from one that hit after it.
         forking = False
         try:
             async with asyncio.timeout(timeout) as deadline:
+                # Wall time from here, because this is what the deadline bounds:
+                # the quiet wait plus every request. A warning that says only
+                # "exceeded the timeout" cannot tell a slow fork from a hung
+                # one (#1272).
+                started = time.monotonic()
                 if idle:
                     await self._wait_quiet(agent, channel)
                 forking = True
