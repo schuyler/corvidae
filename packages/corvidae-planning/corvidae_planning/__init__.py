@@ -10,7 +10,7 @@ agent reads it at its next turn and decides whether to act.
 The plugin also implements ``transform_critique_prompt`` to append the
 current open goal list to the fork instruction, so the fork can name
 specific goal ids and avoid suggesting goals that already exist. It asks for
-the list through a hook it owns, ``resolve_corvidae_planning_goals``, which
+the list through a hook it owns, ``resolve_planning_goals``, which
 the goals plugin implements (#1181), so planning never looks goals up.
 """
 
@@ -52,7 +52,7 @@ class PlanningSpec:
     """Hooks the planning plugin owns."""
 
     @hookspec(firstresult=True)
-    async def resolve_corvidae_planning_goals(self) -> list[dict] | None:
+    async def resolve_planning_goals(self) -> list[dict] | None:
         """The open goals, front of the queue first, or None when no goals
         plugin answers.
 
@@ -120,7 +120,7 @@ class PlanningLensPlugin(CorvidaePlugin):
         # fork runs unlisted, already reported at startup.
         try:
             goals: list[dict] | None = (
-                await self.pm.ahook.resolve_corvidae_planning_goals()
+                await self.pm.ahook.resolve_planning_goals()
             )
         except Exception:
             logger.warning(
