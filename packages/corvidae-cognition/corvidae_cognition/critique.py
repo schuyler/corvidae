@@ -166,8 +166,8 @@ RETENTION_WAKE_NOTE = (
     "context. For each [retention] finding, file it before you finish: read "
     "the named file under the knowledge base root «{root}», and append the "
     "content as a new section only if the file does not already hold it - "
-    "never rewrite the file. For claims the provenance check found that no "
-    "record supports, reply in the channel only if your earlier reply could "
+    "never rewrite the file. For a claim the critique found no record behind, "
+    "reply in the channel only if your earlier reply could "
     "lead the other party to take an incorrect action; then correct it "
     "briefly. Otherwise send nothing: reply with exactly {marker} and "
     "nothing reaches the channel."
@@ -177,11 +177,15 @@ RETENTION_WAKE_NOTE = (
 # CONTEXT entry: the store frames CONTEXT as data, and this is an
 # instruction written by us.
 PROVENANCE_NOTE = (
-    "Background self-check: the provenance check found claims in your last "
-    "reply that no record supports (see the critique context). By default, "
-    f"send nothing: reply with exactly {NO_REPLY_MARKER} and nothing reaches "
-    "the channel. Reply in the channel only if your earlier reply could lead "
-    "the other party to take an incorrect action; then correct it briefly."
+    # Neutral about which lens woke the turn: the funnel keeps one stub per
+    # drain, so it cannot know (#1134). Naming the provenance check told a
+    # proactivity-only wake that a finding existed when none did.
+    "Background self-check: your critique left findings in the critique "
+    "context. If one says a claim in your last reply has no record behind it, "
+    "by default send nothing: reply with exactly "
+    f"{NO_REPLY_MARKER} and nothing reaches the channel. Reply in the channel "
+    "only if your earlier reply could lead the other party to take an "
+    "incorrect action; then correct it briefly."
 )
 
 # Appended to whichever wake note applies while the proactivity lens is
@@ -1626,6 +1630,16 @@ class CritiquePlugin(CorvidaePlugin):
             return
         # The provenance check: on when enabled and stage 2 listed claims.
         claims = past_claims or []
+        if not claims:
+            # Say so rather than skipping silently: "why did provenance not
+            # run" is otherwise unanswerable from the log (#377).
+            logger.debug(
+                "critique provenance skipped for trace %s on %s: %s",
+                trace_id, channel.id,
+                "stage 2 listed no past claims" if past_claims is not None
+                else "stage 2 produced no vector",
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
         if claims and resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
         ):
@@ -1649,6 +1663,16 @@ class CritiquePlugin(CorvidaePlugin):
             "stage 2 produced no vector" if missed
             else "stage 2 has no usable lenses field",
             warn=missed,
+        )
+        # Say what happened on the exchange's own line: a "none" used to be
+        # countable only through exchange_log, never in the log an operator
+        # reads when asking why a lens did not run (#377).
+        logger.info(
+            "critique lens selection for trace %s on %s: %s",
+            trace_id, channel.id,
+            f"lenses={', '.join(chosen)}" if chosen
+            else f"none (offered: {', '.join(offered) or 'nothing'}; basis: {basis})",
+            extra={"channel": channel.id, "trace_id": trace_id},
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}

@@ -1076,6 +1076,35 @@ class TestWeekdayAnchor:
             parse_job({"name": "bad", "channel": "irc:#lex", "prompt": "go", **job}, Path("."))
 
 
+async def test_a_malformed_jobs_file_disables_no_job(memdb, tmp_path):
+    """#813: a file that will not parse must not look like "no jobs configured"."""
+    jobs_file = tmp_path / "jobs.yaml"
+    jobs_file.write_text(
+        "jobs:\n"
+        "  - name: keepme\n"
+        "    channel: irc:#lex\n"
+        "    every: 1h\n"
+        "    prompt: hi\n"
+    )
+
+    e = await Env(
+        memdb,
+        sched_config(jobs_file=str(jobs_file), _base_dir=str(tmp_path)),
+    ).init()
+    before = await e.rows()
+    assert before, "the file's job must be inserted"
+
+    # A file the reader refuses: YAML that cannot be parsed at all.
+    jobs_file.write_text("jobs: [unclosed\n")
+    await e.sched.on_config_reload(
+        sched_config(jobs_file=str(jobs_file), _base_dir=str(tmp_path))
+    )
+
+    rows = {r.name: r for r in await e.rows()}
+    assert rows["keepme"].enabled, "a read error must not disable a running job"
+    assert rows["keepme"].disabled_reason != "removed_from_config"
+
+
 # ---------------------------------------------------------------------------
 # #1186 R8: dates follow the system locale; logs keep one fixed format
 # ---------------------------------------------------------------------------
