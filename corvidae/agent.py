@@ -1448,13 +1448,18 @@ class Agent(CorvidaePlugin):
             ),
         }
         conv.append(marker, MessageType.CONTEXT)
+        # Hold the window row itself before the await, as the not-sent marker
+        # does: a row appended while this persists would otherwise be what
+        # `messages[-1]` names when the id comes back, and the marker's log id
+        # would land on its neighbour (#517).
+        window_row = conv.messages[-1]
         try:
             results = await self.pm.ahook.persist_message(
                 channel=channel, message=marker, message_type=MessageType.CONTEXT,
             )
             rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
-                conv.messages[-1]["_db_id"] = rowid
+                window_row["_db_id"] = rowid
         except Exception:
             logger.warning(
                 "persist_message hook failed for the suppressed tool calls "
