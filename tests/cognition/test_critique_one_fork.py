@@ -25,6 +25,7 @@ tests/test_fork_read_only_tools.py.
 
 import asyncio
 import json
+import re
 import logging
 
 import pytest
@@ -414,6 +415,71 @@ async def test_r5_5_a_channel_busy_past_the_deadline_is_a_miss(tmp_path, caplog,
         [text] = _warnings(caplog, "stayed busy past critique.fork_timeout")
         assert "predictive" in text and "trace kd2 " in text and env.channel.id in text
         assert "critique" not in (await _read_outcomes(env.recorder, "kd2"))
+    finally:
+        await _teardown(env)
+
+
+# --- how long the fork waited (#1272) -------------------------------------------------
+#
+# A timeout with no duration attached is a dead end: 208 skips in one 6-hour
+# window on one container all said "exceeded critique.fork_timeout (120.0 s)" and
+# nothing said whether the fork was slow or hung, or how long the successful ones
+# took. These three tests hold the two numbers that turn the symptom into a
+# diagnosis: the elapsed wall time on the deadline's own warning, and a warning
+# for a fork that finished but spent most of its allowance getting there.
+
+async def test_r5_5_the_deadline_warning_says_how_long_the_fork_waited(tmp_path, caplog):
+    """The timeout warning carries the wall time the fork occupied, so a slow
+    fork and a hung one are distinguishable from the log alone."""
+    async def hangs(i, channel):
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kd7", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        m = re.search(r"after (\d+\.\d+)s", text)
+        assert m, f"the warning must state its own elapsed time: {text!r}"
+        assert 0.05 <= float(m.group(1)) < 3.0, text
+    finally:
+        await _teardown(env)
+
+
+async def test_a_slow_but_finished_fork_warns_with_its_wall_time(tmp_path, caplog):
+    """A fork that spends over half of `critique.fork_timeout` warns while it
+    still succeeded: the early signal #1272 asks for, before the allowance runs
+    out. The lens names travel with it, since one fork carries every selected
+    lens (#1226)."""
+    async def slow(i, channel):
+        await asyncio.sleep(0.5)
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=slow)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.8}}, with_held=True)
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kd8", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "slow")
+        assert "predictive" in text and "trace kd8 " in text and env.channel.id in text, text
+        assert re.search(r"\d+\.\d+s", text), text
+        assert "fork_timeout" in text, "the allowance it is measured against travels with it"
+    finally:
+        await _teardown(env)
+
+
+async def test_a_fork_that_keeps_its_pace_logs_no_slow_warning(tmp_path, caplog):
+    """The warning is a threshold, not a log line per fork: an ordinary fork
+    must not add noise to every exchange."""
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 5.0}}, with_held=True)
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kd9", PREDICTIVE_ONLY)
+        assert _warnings(caplog, "slow") == [], caplog.messages
     finally:
         await _teardown(env)
 
