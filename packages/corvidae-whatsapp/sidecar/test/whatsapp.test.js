@@ -43,7 +43,7 @@ function fakeSocket() {
   };
 }
 
-function makeAdapter(sock) {
+function makeAdapter(sock, options = {}) {
   const logs = { warnings: [], infos: [] };
   const adapter = new WhatsAppAdapter({
       // Each adapter gets its own marker: a shared default path would let one
@@ -59,8 +59,20 @@ function makeAdapter(sock) {
     fetchVersion: async () => ({ version: [2, 3000, 102] }),
     socketFactory: () => sock,
     authState: { creds: { registrationId: 7, me: { id: "5550000@s.whatsapp.net" } } },
+    ...options,
   });
   return { adapter, logs };
+}
+
+const tick = () => new Promise((r) => setImmediate(r));
+
+// pair() on a reconnect re-registers the socket's handlers only after awaiting
+// authState and fetchVersion, so the qr has to land after that.
+async function pairAfterQr(adapter, sock, args) {
+  const pairing = adapter.pair(args);
+  for (let i = 0; i < 5; i++) await tick();
+  sock.handlers["connection.update"]({ qr: "Q" });
+  return pairing;
 }
 
 test("backoff grows and caps", () => {
@@ -253,8 +265,46 @@ test("a pairing code can be requested before the session links", async () => {
   const { adapter } = makeAdapter(sock);
   await adapter.start(); // no connection.update 'open' — this is the unlinked state
   assert.equal(adapter.status().state, "connecting");
+  sock.handlers["connection.update"]({ qr: "Q" });
   const { code } = await adapter.pair({ phone: "15551234567" });
   assert.equal(code, "ABCD1234");
+  await adapter.close();
+});
+
+test("pair() waits for the socket to signal ready before requesting a code", async () => {
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock);
+  await adapter.start();
+  const pairing = adapter.pair({ phone: "+1 (555) 123-4567" });
+  await tick();
+  assert.equal(sock.sent.some((entry) => "pairing" in entry), false, "no request before ready");
+  sock.handlers["connection.update"]({ qr: "Q" });
+  const { code } = await pairing;
+  assert.equal(code, "ABCD1234");
+  assert.deepEqual(sock.sent.at(-1), { pairing: "15551234567" });
+  await adapter.close();
+});
+
+test("a qr that fired before pair() was called still lets it proceed", async () => {
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock);
+  await adapter.start();
+  sock.handlers["connection.update"]({ qr: "Q" });
+  const { code } = await adapter.pair({ phone: "15551234567" });
+  assert.equal(code, "ABCD1234");
+  await adapter.close();
+});
+
+test("pair() rejects with a wait error when the socket never becomes ready", async () => {
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock, { pairReadyTimeoutMs: 20 });
+  await adapter.start();
+  await assert.rejects(() => adapter.pair({ phone: "15551234567" }), (error) => {
+    assert.equal(error.code, NOT_CONNECTED);
+    assert.equal(error.data.fix, "wait");
+    return true;
+  });
+  assert.equal(sock.sent.some((entry) => "pairing" in entry), false);
   await adapter.close();
 });
 
@@ -346,6 +396,42 @@ test("a session that never had credentials is reported as needing pairing", asyn
   await adapter.close();
 });
 
+test("a qr from a closed socket does not release the next socket's wait", async () => {
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock, { pairReadyTimeoutMs: 20 });
+  await adapter.start();
+  sock.handlers["connection.update"]({ qr: "Q" });
+  sock.handlers["connection.update"]({
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: 405 } } },
+  });
+  await assert.rejects(() => adapter.pair({ phone: "15551234567" }), (error) => error.code === NOT_CONNECTED);
+  assert.equal(sock.sent.some((entry) => "pairing" in entry), false);
+  await adapter.close();
+});
+
+test("pair() waits 30 seconds for ready by default", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock);
+  await adapter.start();
+  let outcome;
+  adapter.pair({ phone: "15551234567" }).then(
+    () => { outcome = "resolved"; },
+    (error) => { outcome = error; },
+  );
+  await tick();
+  t.mock.timers.tick(29999);
+  await tick();
+  assert.equal(outcome, undefined, "still waiting at 29999 ms");
+  t.mock.timers.tick(1);
+  await tick();
+  assert.equal(outcome.code, NOT_CONNECTED);
+  assert.equal(outcome.data.fix, "wait");
+  assert.equal(sock.sent.some((entry) => "pairing" in entry), false);
+  await adapter.close();
+});
+
 test("a pairing code survives the first disconnect of an unlinked device", async () => {
   // What actually happens on a never-linked device: it connects, WhatsApp closes
   // the session because nothing is paired yet, and the close handler nulls the
@@ -368,7 +454,7 @@ test("a pairing code survives the first disconnect of an unlinked device", async
     `expected an unlinked close state, got ${adapter.status().state}`);
   assert.equal(adapter.status().connected, false);
 
-  const result = await adapter.pair({ phone: "15551234567" });
+  const result = await pairAfterQr(adapter, sock, { phone: "15551234567" });
   assert.equal(result.code, "ABCD1234", "a retried pairing attempt must still produce a code");
   assert.deepEqual(sock.sent.at(-1), { pairing: "15551234567" });
   await adapter.close();
@@ -388,7 +474,7 @@ test("an unpaired state reconnects for pair(), and keeps the re-pair advice for 
   adapter.sock = null;
   adapter.state = "unpaired";
 
-  const { code } = await adapter.pair({ phone: "15551234567" });
+  const { code } = await pairAfterQr(adapter, sock, { phone: "15551234567" });
   assert.equal(code, "ABCD1234", "pair() must heal an unpaired no-socket state, not refuse it");
   assert.deepEqual(sock.sent.at(-1), { pairing: "15551234567" });
 
@@ -696,6 +782,7 @@ test("a pairing that was started and then abandoned still asks to pair after a r
 
   const first = build();
   await first.start();
+  live.handlers["connection.update"]({ qr: "Q" });
   const pairing = await first.pair({ phone: "5551212" });
   assert.match(JSON.stringify(pairing), /ABCD1234/, "the code the operator needs");
   assert.ok(authState.creds.me, "the request leaves a local `me` behind -- that is the trap");
