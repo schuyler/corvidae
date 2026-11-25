@@ -512,8 +512,20 @@ The full set takes about two hours on sagan. Output in `--out`:
 
 - `run.json`: `/props`, the router's `/models` entry (launch args), the
   parsed `cache_ram_mib`, build and model.
-- `requests.jsonl`: one row per request, written as each finishes: tokens,
-  `cached_tokens`, `prompt_ms`, client wall time.
+- `requests.jsonl`: one row per request, appended as each finishes, with its
+  source per key. From the server's `usage`: `prompt_tokens`, `cached_tokens`.
+  From the server's `timings`: `cache_n`, `prompt_n`, `prompt_ms`,
+  `predicted_ms`. Client-measured: `wall_ms`. Supplied by the caller of
+  `request()`: `expected_cached` (in the restore units it is the cold run's
+  `prompt_tokens`). Labels: `unit`, `label`, `effort`, `cache_prompt`.
+  `derive_row` adds two derived keys: `overhead_ms` =
+  `wall_ms - prompt_ms - predicted_ms`, and `hit`.
+- `hit` (`derive_row`) is the threshold test `cached_tokens >= expected_cached / 2`,
+  and `null` when `expected_cached` is 0. It compares two numbers on the row; it
+  is not a measurement of how much of a window survived, so a row whose
+  `cached_tokens` is exactly half of `expected_cached` is a hit. A claim of the
+  form "the window came back from the cache" should cite `cached_tokens` against
+  `prompt_tokens`, not this column.
 - `report.md`: the tables. *Overhead* is wall time minus `prompt_ms` and
   decode time: the cache save and restore, plus HTTP and tokenizing. No API
   reports the save or restore directly.

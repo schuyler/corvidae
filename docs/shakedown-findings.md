@@ -268,6 +268,12 @@ rate. Full message-id-level detail is in
 
 ## Cache-ram swap cost (2026-10-31, sagan)
 
+**Historical.** These figures were taken on sagan serving `swift-1.5`, which
+was no longer in sagan's lineup by 2026-11-19 (only a 3B and the embedding
+model were being served then). Treat every number below as unreproducible
+until rerun against a current model; the method is reproducible, the timings
+are not.
+
 Not a shakedown session: a mechanical probe, `harness/cache_swap.py`
 (README section "Measuring cache-ram swap cost"), run for #231 to price
 what it costs when a second prompt (a background call, an effort switch,
@@ -323,9 +329,15 @@ with 1 new turn (507 tokens), 6.6 s with 5 (2478), 18.2 s with 20
 (9907). Cold, the same prompts take 89–105 s.
 
 **After compaction (R4).** A compacted window (131k compacted to ~54k
-tokens) shares no prefix with anything cached, so its first request is
-a full cold prefill: 73.8 s, against 73.7 s for the same prompt with
-caching turned off. The cache neither helps nor costs anything here.
+tokens) shares only its system block with anything cached: `compacted_messages`
+deliberately keeps `messages[0]`, and `unit_r4` leaves the previous window's
+entry in the cache before the compacted request goes out. That is a mechanism
+inference from the code, not something this document can quote: the harness records
+`cached_tokens` for every request (README, `requests.jsonl` keys), but the R4 row is
+not reproduced in this section, so the size of that shared prefix is not citable from
+here. What is recorded is the timing: 73.8 s for the compacted request and 73.7 s for
+the same prompt with caching turned off -- one run each, so the 0.1 s gap distinguishes
+neither case, and both figures belong to swift-1.5 rather than to compaction in general.
 
 **Caveat on entry size.** Lex's own evictions earlier the same day
 removed entries of 7.0–7.5 GiB while its windows were around 50–90k
