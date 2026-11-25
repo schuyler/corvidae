@@ -34,7 +34,7 @@ One script does the install, and it is the only supported way to put this on a
 machine you did not develop on:
 
 ```
-services/whatsapp-sidecar/install-whatsapp-sidecar.sh
+packages/corvidae-whatsapp/sidecar/install-whatsapp-sidecar.sh
 ```
 
 Run it as the user corvidae runs as — no sudo. It is idempotent, and it does four

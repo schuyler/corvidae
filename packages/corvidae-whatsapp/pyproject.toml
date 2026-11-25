@@ -16,3 +16,10 @@ corvidae = { workspace = true }
 
 [project.entry-points.corvidae]
 whatsapp = "corvidae_whatsapp:WhatsAppPlugin"
+
+# sidecar/ is the Node process this transport talks to: a sibling of the Python
+# package inside the project directory. setuptools' flat-layout discovery sees a
+# second top-level directory there and refuses to build ("Multiple top-level
+# packages discovered"), so the Python package is named explicitly (#1265).
+[tool.setuptools]
+packages = ["corvidae_whatsapp"]

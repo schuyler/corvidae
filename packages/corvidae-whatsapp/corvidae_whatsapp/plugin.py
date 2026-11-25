@@ -189,7 +189,7 @@ class WhatsAppPlugin(TransportPlugin):
                     self._last_connect_warn = now
                     logger.warning(
                         "whatsapp: cannot reach the sidecar socket %s (%s); retrying every %.0fs"
-                        " (attempt %d). Start it with: node services/whatsapp-sidecar/index.js",
+                        " (attempt %d). Start it with: node packages/corvidae-whatsapp/sidecar/index.js",
                         self._socket_path, type(exc).__name__, RECONNECT_DELAY,
                         self._connect_failures,
                     )

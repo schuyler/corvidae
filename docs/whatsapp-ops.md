@@ -5,7 +5,7 @@ state from a healthy one. Written to match `docs/signal-ops.md` and
 `docs/discord-ops.md`, because the three channels are operated the same way and an
 operator should not have to learn a fourth shape.
 
-The implementation detail lives in `services/whatsapp-sidecar/README.md` — the wire
+The implementation detail lives in `packages/corvidae-whatsapp/sidecar/README.md` — the wire
 contract, the fake sidecar for development, the media rules, and the list of what is
 verified by tests versus pinned by shape only. This page is the runbook: the order to
 do things in, and what each failure means. Where the two disagree, the sidecar README
@@ -37,7 +37,7 @@ so.
 ## Install and start the sidecar
 
 ```sh
-services/whatsapp-sidecar/install-whatsapp-sidecar.sh
+packages/corvidae-whatsapp/sidecar/install-whatsapp-sidecar.sh
 ```
 
 Run it as the user corvidae runs as. No sudo. It is idempotent, installs from the
@@ -68,7 +68,7 @@ daemon uses — pair with different ones and the pairing run and the daemon driv
 different sessions:
 
 ```sh
-cd services/whatsapp-sidecar
+cd packages/corvidae-whatsapp/sidecar
 npm run pair -- --phone 15551234567 \
   --socket "${WHATSAPP_STATE_DIR:-$HOME/workspace/state}/whatsapp.sock" \
   --auth-dir "${WHATSAPP_STATE_DIR:-$HOME/workspace/state}/whatsapp-auth"

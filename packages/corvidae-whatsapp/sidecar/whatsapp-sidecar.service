@@ -11,7 +11,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/workspace/services/whatsapp-sidecar
+WorkingDirectory=%h/workspace/packages/corvidae-whatsapp/sidecar
 ExecStart=%h/.local/bin/node src/index.js --socket %h/workspace/state/whatsapp.sock --auth-dir %h/workspace/state/whatsapp-auth --media-dir %h/workspace/state/whatsapp-media
 Restart=on-failure
 RestartSec=5

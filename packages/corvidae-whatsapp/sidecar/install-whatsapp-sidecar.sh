@@ -3,7 +3,7 @@
 # from the lockfile, the credential and media directories, the systemd user
 # unit. Idempotent. Run as that user, no sudo:
 #
-#   services/whatsapp-sidecar/install-whatsapp-sidecar.sh
+#   packages/corvidae-whatsapp/sidecar/install-whatsapp-sidecar.sh
 #
 # Pairing is deliberately not scripted -- it needs the phone in hand and one
 # code typed into WhatsApp, and an unpaired session has nothing to serve. This
