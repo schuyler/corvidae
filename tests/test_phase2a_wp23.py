@@ -220,9 +220,6 @@ class TestResolveTunableDivergesFromChannelConfigResolve:
 
         channel = _make_channel(runtime_overrides={"critique.provenance.enabled": False})
         config = {}
-
-        # ChannelConfig.resolve has no notion of this key at all.
-
         result = resolve_tunable(channel, config, "critique.provenance.enabled", True)
 
         assert result is False

@@ -539,7 +539,10 @@ class TestCoreIsUnawareOfSilence:
         ]
         assert not offenders, "core must not couple to the silence plugin:\n" + "\n".join(offenders)
 
-    def test_hooks_exports_the_neutral_helper_only(self):
+    def test_hooks_exports_the_neutral_helper(self):
+        """``corvidae.hooks`` exposes ``final_was_unsent``. Presence only -- the
+        matching "and no silence-plugin symbol alongside it" check went with #1238,
+        so nothing here pins the set's size."""
         import corvidae.hooks as hooks
 
         assert hasattr(hooks, "final_was_unsent")

@@ -2,8 +2,8 @@
 
 "Core" is reserved for the System Two context of the core/periphery work, so
 no kernel identifier may use it to mean the kernel. This file is the one place
-allowed to spell the retired names: the guard below skips it, and the negative
-checks for the retired plugin class and entry point live here for that reason.
+allowed to spell the retired names: the guard below skips it, and the entry-point
+check for the retired plugin lives here for that reason.
 """
 
 import re

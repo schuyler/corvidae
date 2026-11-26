@@ -2036,4 +2036,3 @@ class TestAgentLLMDependency:
             "Agent.depends_on should include 'llm' — "
             "see plans/agent-decomposition-parts-3-4.md §Part 3"
         )
-
