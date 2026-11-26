@@ -20,6 +20,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+
+from _acp_extra import requires_acp
+
 from helpers import build_plugin_and_channel, drain, sent_texts
 from llm_response_fixtures import _make_text_response
 
@@ -176,6 +179,7 @@ class TestSlotRelease:
 # ---------------------------------------------------------------------------
 
 
+@requires_acp
 class TestAcpRelease:
     async def test_unsent_final_completes_the_prompt_with_end_turn(self):
         from corvidae.channels.acp import AcpPlugin

@@ -13,6 +13,10 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
 from helpers import acp_agent_env
 
+from _acp_extra import requires_acp
+
+pytestmark = requires_acp
+
 
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
