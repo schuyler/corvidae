@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+from _acp_extra import requires_acp
+
 try:  # the ACP transport needs the optional ``acp`` extra (#1281)
     import acp as _acp  # noqa: F401
 except ModuleNotFoundError:  # pragma: no cover - exercised by venvs without it
@@ -186,7 +188,7 @@ class TestSlotRelease:
 # ---------------------------------------------------------------------------
 
 
-@_acp_extra
+@requires_acp
 class TestAcpRelease:
     async def test_unsent_final_completes_the_prompt_with_end_turn(self):
         from corvidae.channels.acp import AcpPlugin

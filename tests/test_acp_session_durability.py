@@ -13,6 +13,10 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin, init_db
 
+from _acp_extra import requires_acp
+
+pytestmark = requires_acp
+
 
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
