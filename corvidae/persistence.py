@@ -50,7 +50,8 @@ def busy_timeout_ms_from_config(config: dict) -> int:
     YAML scalar yields. 0 and negatives are rejected: they disable busy
     handling, which is worse than the 5 s default this replaces.
     """
-    raw = (config.get("daemon") or {}).get(
+    daemon = config.get("daemon")
+    raw = (daemon if isinstance(daemon, dict) else {}).get(
         "sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS
     )
     low, high = BUSY_TIMEOUT_BOUNDS

@@ -1179,6 +1179,10 @@ def test_busy_timeout_ms_from_config_rejects_unusable_values():
     # AttributeError on a null, so this shape is pinned here rather than inherited.
     assert busy_timeout_ms_from_config({"daemon": None}) == DEFAULT_BUSY_TIMEOUT_MS
     assert busy_timeout_ms_from_config({"daemon": {}}) == DEFAULT_BUSY_TIMEOUT_MS
+    # A truthy non-mapping daemon section is the last shape that could raise
+    # inside the resolver; the sibling lookups in on_start still have this hole.
+    for bad in ("oops", [1], 7):
+        assert busy_timeout_ms_from_config({"daemon": bad}) == DEFAULT_BUSY_TIMEOUT_MS, bad
     assert busy_timeout_ms_from_config(
         {"daemon": {"sqlite_busy_timeout_ms": 1234}}
     ) == 1234
