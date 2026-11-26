@@ -68,6 +68,31 @@ async def test_a_turn_that_dies_before_a_final_is_reported():
         await db.close()
 
 
+async def test_a_final_is_not_reported_even_when_the_item_carries_no_annotations():
+    """The marker must exist on an item built without annotations (#424).
+
+    Otherwise the final is invisible to the turn-end check, the observation
+    fires anyway, and the transport releases a slot it already released.
+    """
+    plugin, channel, db = await build_plugin_and_channel()
+    plugin._client = MagicMock()
+    plugin._client.chat = AsyncMock(return_value=_make_text_response("hi"))
+    recorder = _Recorder()
+    plugin.pm.register(recorder)
+    item = QueueItem(
+        role=QueueItemRole.USER, content="hello", channel=channel, sender="schuyler",
+    )
+    item.annotations = None
+    try:
+        try:
+            await plugin._process_queue_item(item)
+        except Exception:
+            pass
+        assert recorder.calls == [], recorder.calls
+    finally:
+        await db.close()
+
+
 async def test_a_turn_with_a_final_is_not_reported():
     """A final, sent or unsent, already releases through the response hooks."""
     plugin, channel, db = await build_plugin_and_channel()

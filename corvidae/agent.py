@@ -1615,6 +1615,10 @@ class Agent(CorvidaePlugin):
         for the entire tool-calling sequence.
         """
         channel = item.channel
+        # The turn-end observation below keys off a marker on annotations, so
+        # it must exist even for an item built without any (#424).
+        if item.annotations is None:
+            item.annotations = {}
         # The whole body is guarded so a failed or early-returning item still
         # reports the channel as settled.
         try:
