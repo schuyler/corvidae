@@ -629,4 +629,7 @@ async def test_a_call_with_no_channel_omits_the_field_rather_than_logging_none(c
         await dispatch_tool_call(call, {"my_tool": tool_fn}, channel=None)
 
     dispatched = _tool_records(caplog, "tool call dispatched")[0]
+    # Not a name-is-gone check (#1238): `channel` is written by _attributed on
+    # the attributed path (corvidae/tool.py:511), so this pins the omit-vs-"None"
+    # contract on the unattributed one. Restored after the sweep deleted it.
     assert not hasattr(dispatched, "channel")

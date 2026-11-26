@@ -39,19 +39,6 @@ BASE_CONFIG = {
     },
 }
 
-BACKGROUND_CONFIG = {
-    "llm": {
-        "providers": {
-            "main": {"base_url": "http://localhost:8080"},
-            "background": {"base_url": "http://localhost:8081"},
-        },
-        "profiles": {
-            "main": {"model": "test-model"},
-            "background": {"provider": "background", "model": "bg-model"},
-        },
-    },
-}
-
 
 def _make_channel(transport="test", scope="scope1") -> Channel:
     return Channel(transport=transport, scope=scope, config=ChannelConfig())
@@ -608,21 +595,6 @@ class TestOnStart:
         plugin = SubagentPlugin(pm)
         # on_start should not raise
         await plugin.on_start(config=BASE_CONFIG)
-
-    async def test_on_start_does_not_set_llm_config(self):
-        """on_start must NOT set _llm_config — that attribute no longer exists.
-
-        After Part 3, LLM client config is owned by LLMPlugin. SubagentPlugin
-        reads the client from LLMPlugin at _launch time.
-        """
-        pm, _ = _make_pm_with_tool_registry()
-        plugin = SubagentPlugin(pm)
-        await plugin.on_start(config=BASE_CONFIG)
-
-        assert not hasattr(plugin, "_llm_config"), (
-            "SubagentPlugin must not have _llm_config after Part 3 "
-            "(LLM config is owned by LLMPlugin)"
-        )
 
 
 # ---------------------------------------------------------------------------

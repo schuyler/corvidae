@@ -56,8 +56,6 @@ AGENT_DEFAULTS = {
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Section 1 — on_start
 # ---------------------------------------------------------------------------
@@ -1227,7 +1225,6 @@ class TestOnNotify:
         await db.close()
 
 
-
 # ---------------------------------------------------------------------------
 # Section 13 — tool schema: underscore param exclusion (design review C3)
 # ---------------------------------------------------------------------------
@@ -2009,26 +2006,6 @@ class TestAgentPart4Interfaces:
             "Agent.depends_on should include 'tools' — see plans/agent-decomposition-parts-3-4.md §Part 4"
         )
 
-    def test_agent_plugin_does_not_have_get_tool_config(self):
-        """Agent.get_tool_config() must be removed after Part 4.
-
-        SubagentPlugin now gets tool config directly from ToolCollectionPlugin.
-        """
-        assert not hasattr(Agent, "get_tool_config"), (
-            "Agent.get_tool_config() should be removed — superseded by ToolCollectionPlugin"
-        )
-
-    def test_agent_plugin_does_not_have_tool_registry_attribute(self):
-        """Agent must not have a public tool_registry attribute after Part 4.
-
-        Tool registry ownership moves to ToolCollectionPlugin.
-        """
-        pm = create_plugin_manager()
-        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        plugin = Agent(pm)
-        assert not hasattr(plugin, "tool_registry"), (
-            "Agent should not have a 'tool_registry' attribute — moved to ToolCollectionPlugin"
-        )
 
 # ---------------------------------------------------------------------------
 # Section — Part 3 LLMPlugin integration (red phase)
@@ -2058,18 +2035,4 @@ class TestAgentLLMDependency:
         assert "llm" in Agent.depends_on, (
             "Agent.depends_on should include 'llm' — "
             "see plans/agent-decomposition-parts-3-4.md §Part 3"
-        )
-
-    def test_agent_plugin_no_public_client_attribute_after_init(self):
-        """Agent.__init__ must NOT set a public 'client' attribute.
-
-        After Part 3, LLM client ownership moves to LLMPlugin. Agent
-        may cache it as '_client' (private), but '.client' (public) must
-        not be present immediately after init.
-        """
-        pm = self._make_pm()
-        plugin = Agent(pm)
-        assert not hasattr(plugin, "client"), (
-            "Agent must not expose a public 'client' attribute after init — "
-            "LLM client ownership moves to LLMPlugin in Part 3"
         )

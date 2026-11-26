@@ -528,13 +528,6 @@ class TestRuntimeStart:
             rt = Runtime(config_path=str(config_path))
             await rt.start()
 
-    def test_runtime_no_longer_imports_mcp_validation(self):
-        """#277: the step-7 MCP special case is gone — runtime must not
-        import the disableable plugin module's validator (that import is
-        what made #265's workaround not scale)."""
-        from corvidae import runtime
-
-        assert not hasattr(runtime, "validate_mcp_config")
 
     async def test_start_unknown_channel_key_reports_config_error_and_exits(
         self, tmp_path, capsys

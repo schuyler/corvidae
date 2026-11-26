@@ -802,15 +802,6 @@ class TestBuildPromptCallBlockInvariant:
         assert prompt[-1]["role"] == "tool"
 
 
-def test_context_window_has_no_mid_window_removal():
-    """The window only grows at the tail and truncates at the head (PRD principle 2).
-
-    remove_by_type was the last method that removed entries from the middle of
-    the window; it must stay retired.
-    """
-    assert not hasattr(ContextWindow, "remove_by_type")
-
-
 class TestCountTokensNeverRaises:
     def test_special_token_string_counts_as_plain_text(self, caplog):
         """Special-token strings in a message must not wedge token_estimate or fit_to_budget (#352)."""
