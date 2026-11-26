@@ -380,6 +380,9 @@ def _edit_file_sync(path: str, old_string: str, new_string: str, replace_all: bo
     # Bytes, not text: read_text translates newlines, so a CRLF file would come
     # back LF and the edit would silently rewrite every line ending.
     try:
+        # The stamp the replace checks against, taken before the read so a
+        # write landing in this window is caught rather than overwritten (#1266).
+        st_before = p.stat()
         raw = p.read_bytes()
     except FileNotFoundError:
         return (
@@ -451,6 +454,21 @@ def _edit_file_sync(path: str, old_string: str, new_string: str, replace_all: bo
         # executable bits and a 0640 config its group read; put the original
         # mode back before the file takes its place.
         os.chmod(tmp_path, mode)
+        # Refuse rather than clobber: a writer may have changed the target since
+        # we read it, and os.replace would discard that write with no sign of it
+        # having happened (#1266). Identity and stamp together, because a fast
+        # write can keep the same size and the same second.
+        try:
+            st_now = target.stat()
+        except OSError as exc:
+            return f"Error: could not stat {path} before writing it: {exc}"
+        if (st_now.st_mtime_ns, st_now.st_size, st_now.st_ino) != (
+            st_before.st_mtime_ns, st_before.st_size, st_before.st_ino
+        ):
+            return (
+                f"Error: {path} changed while it was being edited, so this edit would "
+                f"have discarded that change; read it again and re-apply the edit"
+            )
         # Same directory, so the replace is atomic and a crash cannot leave a
         # half-written file behind.
         os.replace(tmp_path, target)
