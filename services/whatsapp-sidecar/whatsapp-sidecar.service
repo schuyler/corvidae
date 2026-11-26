@@ -1,0 +1,30 @@
+# systemd user unit for the WhatsApp sidecar.
+#
+# The paths below are the ones on the machine this was developed on. Do not copy
+# it by hand to another host: install-whatsapp-sidecar.sh rewrites
+# WorkingDirectory and ExecStart for the operator's checkout and Node location,
+# and runs systemd-analyze verify on the result. If you are installing by hand,
+# change all three paths (working directory, node binary, state dir) yourself.
+[Unit]
+Description=WhatsApp Baileys sidecar for corvidae
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/services/whatsapp-sidecar
+ExecStart=%h/.local/bin/node src/index.js --socket %h/workspace/state/whatsapp.sock --auth-dir %h/workspace/state/whatsapp-auth
+Restart=on-failure
+RestartSec=5
+# The socket and the credential directory are the only paths it writes.
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Baileys writes creds.json with the process umask, and the default 0022 leaves the
+# account credential world-readable inside a directory only this user can enter. The
+# installer makes the directories 0700; this makes the files 0600.
+UMask=0077
+# Baileys writes creds.json with the process umask, and the default 0022 leaves the
+# account credential world-readable inside a directory only this user can enter.
+# The installer makes the directories 0700; this makes the files 0600.
+
+[Install]
+WantedBy=default.target

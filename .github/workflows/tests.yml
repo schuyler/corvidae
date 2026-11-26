@@ -122,6 +122,28 @@ jobs:
       - name: Run tests
         run: uv run --no-sync pytest -q
 
+  # The WhatsApp sidecar is Node, not Python, so nothing above touches it.
+  # No skip guard: a job that goes green having run nothing is worse than a red
+  # one, and this branch is stacked on the sidecar's own PR so the code is here
+  # (#1220, #1248).
+  whatsapp-sidecar:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/whatsapp-sidecar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: services/whatsapp-sidecar/package-lock.json
+      # `npm ci`, never `npm install`: the lock pins the Baileys release
+      # candidate, and a quiet bump to a newer rc looks like a logout.
+      - run: npm ci
+      - run: npm test
+
   # Cognition without its sqlite-vec extra (#130): the FTS5-only degradation
   # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip
   # silently in every other configuration.

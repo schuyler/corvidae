@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Baileys sidecar for the corvidae WhatsApp transport: JSON-RPC 2.0 over a unix socket.",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "whatsapp-sidecar": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "pair": "node src/index.js --pair",
+    "test": "node --test --test-force-exit"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14"
+  }
+}
