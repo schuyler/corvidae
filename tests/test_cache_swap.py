@@ -8,6 +8,7 @@ import pytest
 
 from harness.cache_swap import (
     UNIT_GROUPS,
+    USER_WORDS,
     build_messages,
     check_single_slot,
     compacted_messages,
@@ -672,3 +673,51 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
     with pytest.raises(ValueError) as exc:
         parse_cache_ram(["--cache-ram"])
     assert "preset" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Guard coverage (#1275): the two branches that survived deletion in review
+# ---------------------------------------------------------------------------
+
+
+def test_fit_messages_refuses_a_prompt_it_cannot_size_within_one_percent():
+    """`fit_messages` must raise rather than return a mis-sized prompt.
+
+    `count_tokens` is a parameter, so the test supplies one coarser than 1% of
+    the target: a turn is worth 1000 tokens and the tail one token per word, so
+    the largest fit lands ~19 tokens short of 1500 - outside 1%, inside a wider
+    tolerance. Silently returning that would hand a run a prompt that is not the
+    size it claims to have measured.
+    """
+
+    def coarse(msgs):
+        turns = (len(msgs) - 2) // 2
+        return 1000 * turns + len(msgs[-1]["content"].split())
+
+    with pytest.raises(ValueError, match="outside 1%"):
+        fit_messages("guard-a", 1500, coarse)
+
+
+def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
+    """A retention that lands the tail on a user turn must be stepped back.
+
+    The summary turn is a user message, so a tail beginning on a user message
+    puts two user turns adjacent and the server sees a malformed conversation.
+    0.32 on this fixture is the variant that reaches the guard; the assert below
+    fails loudly if the fixture stops doing so, rather than quietly passing.
+    """
+    messages = build_messages("guard-b", 41, USER_WORDS)
+    turns = messages[1:]
+    raw_keep = round(0.32 * len(turns))
+    landed = turns[len(turns) - raw_keep]["role"]
+    assert landed == "user", (
+        f"fixture no longer exercises the guard: raw keep {raw_keep} lands on "
+        f"a {landed} turn"
+    )
+
+    out = compacted_messages(messages, 0.32, 40, "guard-b")
+
+    assert out[1]["role"] == "user" and out[1]["content"].startswith("Summary")
+    assert out[2]["role"] == "assistant", "tail must not start on a user turn"
+    roles = [m["role"] for m in out[1:]]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
