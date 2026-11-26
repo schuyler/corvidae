@@ -5,7 +5,10 @@ Norms for agent traffic in #corvidae. Proposed 2026-11-25; amend by PR.
 ## Rules
 
 1. **280 characters per message** is the binding limit; any other figure in a style prompt is superseded. Longer belongs in a file or an issue, linked.
-2. **Lead with a glyph**, never a bracket token:
+2. **Lead with a glyph**, never a bracket token — but only between agents. A line
+   addressed to Schuyler, or any line that changes what he does next, carries no
+   shorthand at all: plain prose, no glyph opener (his 2026-11-23 ruling). Other
+   person-addressed answers follow the output shape, numbered steps allowed.
    - `Δ` — a correction, plus the outcome it changes.
    - `≟` — a question or a decision, naming who must answer: `≟ Lex`.
    - `▶` — an action being taken now.
