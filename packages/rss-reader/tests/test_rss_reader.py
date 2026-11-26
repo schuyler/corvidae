@@ -130,11 +130,28 @@ def _make_plugin_for_on_init() -> RSSPlugin:
     return plugin
 
 
-def test_on_init_no_config_is_inert():
-    """Without an 'rss' config block, the plugin should be inert."""
-    plugin = RSSPlugin.__new__(RSSPlugin)
-    # The plugin has no _feeds attribute until on_init runs
-    assert not hasattr(plugin, "_feeds")
+@pytest.mark.asyncio
+async def test_on_init_no_config_is_inert():
+    """Without an 'rss' config block the plugin initializes inert: no feeds, no poll task.
+
+    #1238: this replaces `assert not hasattr(plugin, "_feeds")`, which probed a
+    pristine instance and so passed whether or not on_init did the right thing.
+    The behaviour that check stood in for is what on_init itself leaves behind
+    when there is no `rss:` block.
+    """
+    from unittest.mock import patch
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        await plugin.on_init(plugin.pm, {})
+
+    assert plugin._feeds == [], plugin._feeds
+    assert plugin._task is None, plugin._task
+    assert plugin._poll_secs == 0, plugin._poll_secs
 
 
 @pytest.mark.asyncio
