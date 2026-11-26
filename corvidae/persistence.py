@@ -10,6 +10,10 @@ Config:
       sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
                                     # allowed values: delete, truncate, persist,
                                     # memory, wal, off
+      sqlite_busy_timeout_ms: 30000 # ms a writer waits for this database's write
+                                    # lock before giving up (default 30000); the same
+                                    # value is applied as SQLite's busy_timeout on every
+                                    # in-daemon writer for it. 0 fails fast.
 """
 
 import json

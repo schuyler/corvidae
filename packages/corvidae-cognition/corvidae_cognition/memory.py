@@ -4583,13 +4583,6 @@ class MemoryPlugin(CorvidaePlugin):
         return self._write_db
 
     def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
-        """Report a write that waited out ``busy_timeout`` and gave up.
-
-        The test is the SQLite result code, not the message: ``SQLITE_LOCKED``
-        ("database table is locked") also contains "locked", and calling that a
-        timeout the connection never waited for would be the same kind of
-        unmeasured claim this change set out to remove.
-        """
         """Log once when a write gave up on the lock, whatever the statement.
 
         Every statement of a memory write section calls this through
@@ -4599,6 +4592,11 @@ class MemoryPlugin(CorvidaePlugin):
         (``_write_busy_ms``): the config value for the dedicated connection, the
         persistence connection's own for the no-file fallback. Returns True if it
         logged.
+
+        Whether an error is such a give-up is the SQLite result code's call, not
+        the message's: ``SQLITE_LOCKED`` ("database table is locked") also contains
+        "locked", and reporting that as a timeout the connection never waited for
+        would be the same kind of unmeasured claim this change set out to remove.
         """
         if not _is_busy_give_up(exc):
             return False

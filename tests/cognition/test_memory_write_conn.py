@@ -409,7 +409,11 @@ class TestWriteConnectionLifecycle:
         async with wdb.execute("PRAGMA journal_mode") as cursor:
             assert (await cursor.fetchone())[0] == "wal"
         async with wdb.execute("PRAGMA busy_timeout") as cursor:
-            assert (await cursor.fetchone())[0] == DEFAULT_BUSY_TIMEOUT_MS
+            # A literal, not DEFAULT_BUSY_TIMEOUT_MS: asserting against the constant
+            # the code falls back to cannot see that constant being zeroed. The other
+            # three writers assert 30000 literally and do fail that mutation; this one
+            # has to as well, or memory's wait is the unpinned one.
+            assert (await cursor.fetchone())[0] == 30000
         if memory._vec_available:
             async with wdb.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 0
