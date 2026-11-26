@@ -486,6 +486,104 @@ class TestWriteConnectionLifecycle:
         plugin = memory_module.MemoryPlugin()
         assert plugin._busy_timeout_ms == DEFAULT_BUSY_TIMEOUT_MS
 
+    def test_the_give_up_test_uses_the_result_code_not_the_word_locked(self):
+        """SQLITE_LOCKED is not a timeout the connection waited out.
+
+        A substring match on "locked" would report a table/schema lock as
+        "stayed locked past the N ms busy timeout" — naming a wait that never
+        happened, which is the class of claim this change exists to remove. A
+        hand-built exception carries no ``sqlite_errorname`` at all, so the
+        message floor is what the other tests in this file exercise.
+        """
+        class _Locked(sqlite3.OperationalError):
+            sqlite_errorname = "SQLITE_LOCKED"
+
+        class _Busy(sqlite3.OperationalError):
+            sqlite_errorname = "SQLITE_BUSY"
+
+        class _BusyTimeout(sqlite3.OperationalError):
+            # The extended code sqlite3 exposes for a wait that ran out. The
+            # measured WAL give-up here reports SQLITE_BUSY (code 5) after
+            # busy_timeout, so both names must count and neither may be
+            # confused with a lock that spent no wait.
+            sqlite_errorname = "SQLITE_BUSY_TIMEOUT"
+
+        assert memory_module._is_busy_give_up(_Busy("whatever the text says"))
+        assert memory_module._is_busy_give_up(_BusyTimeout("extended code text"))
+        assert not memory_module._is_busy_give_up(_Locked("database table is locked"))
+        assert not memory_module._is_busy_give_up(
+            sqlite3.OperationalError("no such table: memory")
+        )
+        assert memory_module._is_busy_give_up(
+            sqlite3.OperationalError("database is locked")
+        )
+        assert not memory_module._is_busy_give_up(
+            sqlite3.OperationalError("database is locked: extra text")
+        )
+
+    async def test_a_locked_error_that_is_not_a_timeout_logs_no_timeout(
+        self, tmp_path, caplog
+    ):
+        """The section must stay silent about a wait it did not spend."""
+        class _Locked(sqlite3.OperationalError):
+            sqlite_errorname = "SQLITE_LOCKED"
+
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=str(tmp_path / "sessions.db")
+        )
+        await memory._write_conn()
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            with pytest.raises(_Locked):
+                async with memory._write_txn():
+                    raise _Locked("database table is locked")
+        texts = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "stayed locked" in r.getMessage()
+        ]
+        assert texts == [], texts
+        await stop(memory, db)
+
+    async def test_a_failed_rollback_reopens_and_refreshes_the_wait(
+        self, tmp_path, monkeypatch
+    ):
+        """The re-open path re-runs the open, so the recorded wait is not stale.
+
+        A failed rollback drops the wedged connection and closes it; the next
+        memory write opens a fresh one. Nothing can change the in-force wait on
+        that dedicated connection underneath us — we set it — so what is pinned
+        here is that the re-open happens and the open path runs again, which is
+        what keeps ``_write_busy_ms`` from outliving the connection it describes.
+        """
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=str(tmp_path / "sessions.db")
+        )
+        first = await memory._write_conn()
+
+        real = first.execute
+
+        async def fail_rollback(sql, *args, **kwargs):
+            if str(sql).strip().upper() == "ROLLBACK":
+                raise sqlite3.OperationalError("cannot rollback - no transaction is active")
+            return await real(sql, *args, **kwargs)
+
+        monkeypatch.setattr(first, "execute", fail_rollback)
+        with pytest.raises(sqlite3.OperationalError):
+            # The section has to fail for the rollback to be attempted at all,
+            # and then the rollback itself fails: that is the path that drops
+            # the wedged connection.
+            async with memory._write_txn():
+                raise sqlite3.OperationalError("database is locked")
+
+        assert memory._write_db is None, "a failed rollback must drop the connection"
+        second = await memory._write_conn()
+        assert second is not first
+        assert memory._write_busy_ms == 4321
+        async with second.execute("PRAGMA busy_timeout") as cursor:
+            assert (await cursor.fetchone())[0] == 4321
+        await stop(memory, db)
+
     async def test_a_busy_write_inside_the_section_logs_once(
         self, tmp_path, caplog
     ):

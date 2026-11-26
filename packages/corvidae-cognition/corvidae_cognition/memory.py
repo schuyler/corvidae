@@ -1869,6 +1869,27 @@ def memory_section(memories: list[dict], *, full: bool) -> str | None:
     return f"{MEMORY_HEADER}\n" + "\n".join(lines)
 
 
+def _is_busy_give_up(exc: BaseException) -> bool:
+    """True when ``exc`` is SQLite saying it waited for the write lock and gave up.
+
+    ``sqlite_errorname`` is the precise test: SQLITE_BUSY and its extended
+    SQLITE_BUSY_TIMEOUT both mean a wait ran out, while SQLITE_LOCKED is a table
+    or schema lock that spent no wait at all. Measured on sqlite 3.50.4 with a
+    WAL writer held by an open ``BEGIN IMMEDIATE``: the give-up lands 0.30 s into
+    ``busy_timeout=300`` as SQLITE_BUSY (code 5), message "database is locked".
+    The message check is a floor for a build without the PEP 249 extensions —
+    measured here too, a hand-built ``sqlite3.OperationalError`` carries no
+    ``sqlite_errorname`` at all — and it stays exact rather than a substring
+    match, because a loose one is the bug this replaces.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    name = getattr(exc, "sqlite_errorname", "") or ""
+    if name:
+        return name in ("SQLITE_BUSY", "SQLITE_BUSY_TIMEOUT")
+    return str(exc).lower() == "database is locked"
+
+
 class MemoryPlugin(CorvidaePlugin):
     """Plugin that owns the memory store schema (consolidation and retrieval
     are layered on in later work packages of Phase 1a).
@@ -4562,6 +4583,13 @@ class MemoryPlugin(CorvidaePlugin):
         return self._write_db
 
     def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
+        """Report a write that waited out ``busy_timeout`` and gave up.
+
+        The test is the SQLite result code, not the message: ``SQLITE_LOCKED``
+        ("database table is locked") also contains "locked", and calling that a
+        timeout the connection never waited for would be the same kind of
+        unmeasured claim this change set out to remove.
+        """
         """Log once when a write gave up on the lock, whatever the statement.
 
         Every statement of a memory write section calls this through
@@ -4572,10 +4600,7 @@ class MemoryPlugin(CorvidaePlugin):
         persistence connection's own for the no-file fallback. Returns True if it
         logged.
         """
-        if not isinstance(exc, sqlite3.OperationalError):
-            return False
-        text = str(exc).lower()
-        if "locked" not in text and "busy" not in text:
+        if not _is_busy_give_up(exc):
             return False
         logger.warning(
             "memory write blocked: database %s stayed locked past the %d ms "
