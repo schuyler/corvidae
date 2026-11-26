@@ -432,6 +432,76 @@ class TestWriteConnectionLifecycle:
             assert (await cursor.fetchone())[0] == 4321
         await stop(memory, db)
 
+    async def test_busy_timeout_is_the_first_pragma_on_the_write_connection(
+        self, tmp_path, monkeypatch
+    ):
+        """The wait has to be in force for the mode switch, not after it.
+
+        ``PRAGMA journal_mode`` is itself an operation that can meet
+        SQLITE_BUSY, so installing the wait afterwards leaves the connection's
+        first potentially blocking statement on the inherited default — the
+        ordering this change also fixed in ``persistence.on_start``.
+        """
+        recorded: list[tuple[int, str]] = []
+        real_execute = aiosqlite.Connection.execute
+
+        def spy(self, sql, *args, **kwargs):
+            # Not ``async def``: aiosqlite's execute() result is awaited *and*
+            # used as an async context manager, so a coroutine would break
+            # ``async with db.execute(...)`` at the first schema call.
+            if str(sql).strip().upper().startswith("PRAGMA"):
+                recorded.append((id(self), str(sql)))
+            return real_execute(self, sql, *args, **kwargs)
+
+        monkeypatch.setattr(aiosqlite.Connection, "execute", spy)
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            db_path=str(tmp_path / "sessions.db")
+        )
+        wdb = await memory._write_conn()
+        stmts = [sql for conn_id, sql in recorded if conn_id == id(wdb)]
+        assert stmts, "no PRAGMA was recorded on the write connection"
+        assert stmts[0].strip().upper().startswith("PRAGMA BUSY_TIMEOUT"), stmts
+
+    async def test_wait_without_on_init_is_the_shared_default(self):
+        """A plugin built without on_init still shares the kernel's number."""
+        plugin = memory_module.MemoryPlugin()
+        assert plugin._busy_timeout_ms == DEFAULT_BUSY_TIMEOUT_MS
+
+    async def test_a_busy_commit_logs_the_give_up_once(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """COMMIT is the likelier give-up now the wait is config-scaled.
+
+        The give-up WARNING used to be reachable only from the BEGIN handler;
+        a COMMIT blocked by a long reader rolled back and propagated without
+        ever naming the timeout.
+        """
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=str(tmp_path / "sessions.db")
+        )
+        wdb = await memory._write_conn()
+        real = wdb.execute
+
+        async def fake(sql, *args, **kwargs):
+            if str(sql).strip().upper() == "COMMIT":
+                raise sqlite3.OperationalError("database is locked")
+            return await real(sql, *args, **kwargs)
+
+        monkeypatch.setattr(wdb, "execute", fake)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            with pytest.raises(sqlite3.OperationalError):
+                async with memory._write_txn() as txn:
+                    await txn.execute("SELECT 1")
+        texts = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "stayed locked" in r.getMessage()
+        ]
+        assert len(texts) == 1, texts
+        assert "4321" in texts[0], texts[0]
+        assert "sessions.db" in texts[0], texts[0]
+        await stop(memory, db)
+
     async def test_on_start_opens_and_on_stop_closes(self, tmp_path):
         memory, persistence, stub, channel, db = await build_consolidation_env(
             db_path=str(tmp_path / "sessions.db")

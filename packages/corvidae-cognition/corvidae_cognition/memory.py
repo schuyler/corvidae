@@ -4513,8 +4513,11 @@ class MemoryPlugin(CorvidaePlugin):
         journal_mode = str(row[0]) if row else "wal"
         conn = await aiosqlite.connect(path, isolation_level=None)
         try:
-            await conn.execute(f"PRAGMA journal_mode={journal_mode}")
+            # busy_timeout first: switching journal mode is itself an operation
+            # that can meet SQLITE_BUSY, and a wait installed after it is not in
+            # force for the statement that needed it (corvidae#1211).
             await conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
+            await conn.execute(f"PRAGMA journal_mode={journal_mode}")
             if self._vec_available and not await self._load_vec_extension(conn):
                 logger.warning(
                     "memory: sqlite-vec failed to load on the write connection "
@@ -4545,14 +4548,35 @@ class MemoryPlugin(CorvidaePlugin):
             self._owns_write_db = self._write_db is not shared
         return self._write_db
 
+    def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
+        """Log once when a write gave up on the lock, whatever the statement.
+
+        ``BEGIN IMMEDIATE`` and ``COMMIT`` both call this, so the same failure
+        cannot be reported twice and cannot go unreported. The number named is
+        the one in force on this connection (``daemon.sqlite_busy_timeout_ms``),
+        not a constant that may have drifted from it. Returns True if it logged.
+        """
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        text = str(exc).lower()
+        if "locked" not in text and "busy" not in text:
+            return False
+        logger.warning(
+            "memory write blocked: database %s stayed locked past the %d ms "
+            "busy timeout; the write will be retried on the next trigger",
+            path, self._busy_timeout_ms,
+        )
+        return True
+
     @asynccontextmanager
     async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
         """One memory write as a real SQLite transaction on the write connection.
 
         ``BEGIN IMMEDIATE`` .. ``COMMIT``; any exception (and cancellation)
         rolls back, logs a failed rollback at WARNING, and propagates for the
-        caller to report. A write blocked past the busy timeout logs a
-        WARNING naming the database path and timeout, then propagates.
+        caller to report. A write that gives up on the lock -- at ``BEGIN
+        IMMEDIATE`` or at ``COMMIT`` against a long reader -- logs one WARNING
+        naming the database path and the timeout in force, then propagates.
         Callers hold ``_db_lock`` so memory's own writers don't contend.
         """
         conn = await self._write_conn()
@@ -4566,20 +4590,17 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 await conn.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as exc:
-                if "locked" in str(exc) or "busy" in str(exc):
-                    logger.warning(
-                        "memory write blocked: database %s stayed locked past "
-                        "the %d ms busy timeout; the write will be retried "
-                        "on the next trigger",
-                        path, self._busy_timeout_ms,
-                    )
+                self._log_busy_give_up(exc, path)
                 raise
         try:
             yield conn
             # COMMIT is inside the try: a failed commit (SQLITE_BUSY against a
             # long reader) must roll back rather than leave the lock held.
             await (conn.execute("COMMIT") if own_txn else conn.commit())
-        except BaseException:
+        except BaseException as exc:
+            # A give-up at COMMIT is the likelier one now the wait is
+            # config-scaled, and it reaches here, not the BEGIN handler.
+            self._log_busy_give_up(exc, path)
             # Undo every statement of the section, including cancellation.
             try:
                 await (conn.execute("ROLLBACK") if own_txn else conn.rollback())
