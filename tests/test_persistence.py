@@ -1155,6 +1155,49 @@ class TestBusyTimeout:
 
         assert actual_ms == 1234
 
+    async def test_on_start_applies_the_wait_before_the_schema_writes(
+        self, tmp_path, monkeypatch
+    ):
+        """The DDL is a write, so it must not run on the inherited default (N4).
+
+        ``on_start`` used to call ``init_db`` (schema + migrations, committed
+        there) before setting the PRAGMA, which left the boot-time writes on
+        sqlite3's 5.0 s handler — the same ordering this change fixed in
+        ``markdown_recall/index.py``, where the PRAGMA precedes
+        ``journal_mode`` for exactly this reason.
+        """
+        import corvidae.persistence as persistence_module
+        from corvidae.persistence import PersistencePlugin
+
+        seen = {}
+        real_init_db = persistence_module.init_db
+
+        async def spy(db):
+            async with db.execute("PRAGMA busy_timeout") as cursor:
+                seen["busy_ms"] = (await cursor.fetchone())[0]
+            return await real_init_db(db)
+
+        monkeypatch.setattr(persistence_module, "init_db", spy)
+
+        pm = create_plugin_manager()
+        pm.register(_make_registry(), name="registry")
+        plugin = PersistencePlugin(pm)
+        await plugin.on_start(config={
+            "daemon": {
+                "session_db": str(tmp_path / "ordering.db"),
+                "sqlite_busy_timeout_ms": 7777,
+            }
+        })
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            final_ms = (await cursor.fetchone())[0]
+        await plugin.db.close()
+
+        assert seen.get("busy_ms") == 7777, (
+            "init_db ran before the PRAGMA: the schema writes were unbounded"
+        )
+        assert final_ms == 7777
+
 
 def test_busy_timeout_ms_from_config_rejects_unusable_values():
     """0 or a negative wait disables busy handling -- worse than 5 s.

@@ -241,8 +241,9 @@ only `MemoryPlugin` writes to, opened in `on_start` once the schema
 exists (lazily on first write when the persistence DB wasn't open yet)
 and closed in `on_stop`. It opens the same file as persistence, in the
 journal mode persistence runs in (WAL by default), with sqlite-vec loaded
-when memory uses vectors and `busy_timeout` set to
-`WRITE_BUSY_TIMEOUT_MS` (5000, a module constant). So no other plugin's
+when memory uses vectors and `busy_timeout` set from
+`daemon.sqlite_busy_timeout_ms` (the same key the kernel writers read, so one
+file carries one wait policy; `corvidae#1211`). So no other plugin's
 commit can land mid-section and a rollback cannot discard another
 plugin's pending row; a consolidation's effects are all visible or none
 are. Any failure rolls back, then logs a WARNING naming the channel, the

@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
-#: Default write-lock wait for the writers on the session database: the
-#: conversation writer and the writers that share its file (fork log, markdown
-#: index). memory.py and goals.py set their own values.
+#: Default write-lock wait for every in-daemon writer on the session database:
+#: the conversation writer, the fork log, the markdown index, and memory's
+#: dedicated write connection, which is opened on this same file. Out-of-process
+#: tools (the goals and redact CLIs, reconsolidate) connect on their own.
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
 
 #: A wait outside this window is a mistake, not a policy: 0 or a negative value
@@ -41,8 +42,10 @@ BUSY_TIMEOUT_BOUNDS = (1, 600_000)
 def busy_timeout_ms_from_config(config: dict) -> int:
     """Resolve ``daemon.sqlite_busy_timeout_ms``, or the default when unusable.
 
-    Shared by every writer on the session database so one config key sets one
-    wait for all of them, instead of three waits on one file.
+    Shared by every in-daemon writer on the session database -- the conversation
+    writer, the fork log, the markdown index, and memory's dedicated write
+    connection, which is opened on this same file -- so one config key sets one
+    wait. Out-of-process tools connect on their own and are not covered.
 
     Types are checked before conversion: ``int()`` would accept ``True`` as 1 ms
     and truncate ``1.5``, and ``int(float("inf"))`` raises OverflowError, which
@@ -351,10 +354,28 @@ class PersistencePlugin(CorvidaePlugin):
     @hookimpl
     async def on_start(self, config: dict) -> None:
         # Open SQLite database (only if not already injected for testing)
-        if self.db is None:
+        opened_here = self.db is None
+        if opened_here:
             db_path = config.get("daemon", {}).get("session_db", "sessions.db")
             base_dir = config.get("_base_dir", Path("."))
             self.db = await aiosqlite.connect(str(Path(base_dir) / db_path))
+
+        # A writer that inherits sqlite3.connect's 5.0 s default gives up while
+        # another connection still holds the WAL write lock, and every give-up
+        # drops a conversation row (corvidae#1211). The wait is bounded, not
+        # removed: a holder that never commits still costs a failed write.
+        # It lands before the first write on this connection -- init_db's schema
+        # and migrations are writes too -- which is the ordering
+        # markdown_recall/index.py already uses for journal_mode.
+        busy_ms = busy_timeout_ms_from_config(config)
+        async with self.db.execute(f"PRAGMA busy_timeout={busy_ms}") as cursor:
+            row = await cursor.fetchone()
+        logger.info(
+            "SQLite busy timeout set to %d ms", row[0] if row else busy_ms,
+            extra={"busy_timeout_ms": row[0] if row else busy_ms},
+        )
+
+        if opened_here:
             await init_db(self.db)
 
         # Set journal mode (WAL by default for concurrent access)
@@ -365,18 +386,6 @@ class PersistencePlugin(CorvidaePlugin):
                 f"Invalid sqlite_journal_mode: {journal_mode!r} "
                 f"(accepted values: {allowed})"
             )
-        # A writer that inherits sqlite3.connect's 5.0 s default gives up while
-        # another connection still holds the WAL write lock, and every give-up
-        # drops a conversation row (corvidae#1211). The wait is bounded, not
-        # removed: a holder that never commits still costs a failed write.
-        busy_ms = busy_timeout_ms_from_config(config)
-        async with self.db.execute(f"PRAGMA busy_timeout={busy_ms}") as cursor:
-            row = await cursor.fetchone()
-        logger.info(
-            "SQLite busy timeout set to %d ms", row[0] if row else busy_ms,
-            extra={"busy_timeout_ms": row[0] if row else busy_ms},
-        )
-
         async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
             row = await cursor.fetchone()
         actual_mode = row[0] if row else journal_mode

@@ -16,9 +16,11 @@ import pytest
 
 from corvidae.channel import Channel
 from corvidae.context import MessageType
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 from corvidae_cognition import memory as memory_module
 
 from .test_memory_consolidation import (
+    EMBED_CONFIG,
     build_consolidation_env,
     fetch_memories,
     fetch_watermark,
@@ -308,9 +310,11 @@ class TestFailureLogging:
         self, tmp_path, caplog, monkeypatch
     ):
         path = str(tmp_path / "sessions.db")
-        monkeypatch.setattr(memory_module, "WRITE_BUSY_TIMEOUT_MS", 100)
+        # The wait is config-resolved (I1), so a short one is asked for the way
+        # an operator would set it rather than by patching a module constant.
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 100}}
         memory, persistence, stub, channel, db = await build_consolidation_env(
-            db_path=path
+            config=config, db_path=path
         )
         rowids = await seed_dialog(persistence, channel, DIALOG)
 
@@ -405,10 +409,27 @@ class TestWriteConnectionLifecycle:
         async with wdb.execute("PRAGMA journal_mode") as cursor:
             assert (await cursor.fetchone())[0] == "wal"
         async with wdb.execute("PRAGMA busy_timeout") as cursor:
-            assert (await cursor.fetchone())[0] == memory_module.WRITE_BUSY_TIMEOUT_MS
+            assert (await cursor.fetchone())[0] == DEFAULT_BUSY_TIMEOUT_MS
         if memory._vec_available:
             async with wdb.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 0
+        await stop(memory, db)
+
+    async def test_write_conn_busy_timeout_comes_from_config(self, tmp_path):
+        """One key sets one wait on sessions.db (I1).
+
+        The kernel writers read ``daemon.sqlite_busy_timeout_ms``; this
+        connection is opened on the same file, so it must not carry its own
+        number — that split is what the helper exists to remove, and it is the
+        connection running the ``BEGIN IMMEDIATE`` sections.
+        """
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=str(tmp_path / "sessions.db")
+        )
+        wdb = await memory._write_conn()
+        async with wdb.execute("PRAGMA busy_timeout") as cursor:
+            assert (await cursor.fetchone())[0] == 4321
         await stop(memory, db)
 
     async def test_on_start_opens_and_on_stop_closes(self, tmp_path):

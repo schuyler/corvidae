@@ -101,7 +101,7 @@ from corvidae.attribution import (
     reset_attribution,
     set_attribution,
 )
-from corvidae.persistence import busy_timeout_ms_from_config
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS, busy_timeout_ms_from_config
 from corvidae.prompts import resolve_prompt
 from corvidae.context import (
     ContextWindow,
@@ -302,11 +302,12 @@ class RetrievalPool:
     banding_path: str = ""
 
 
-# How long (ms) the dedicated memory write connection waits for SQLite's
-# write lock before failing the write (the range is then retried).
-# shortcut: a module constant, not an agent.yaml key; make it config if a
-# deployment with slow disks or long retention runs needs a longer wait.
-WRITE_BUSY_TIMEOUT_MS = 5000
+# How long the dedicated memory write connection waits for SQLite's write lock
+# before failing the write (the range is then retried) is not a module constant:
+# it is ``daemon.sqlite_busy_timeout_ms``, resolved in on_init, because this
+# connection is opened on the persistence file and two waits on one file is the
+# split that made corvidae#1211 hard to read. A plugin built without on_init
+# falls back to DEFAULT_BUSY_TIMEOUT_MS, the same number the kernel writers get.
 
 # JSON schema for the consolidation reply (#199, #635). Mirrors what
 # _consolidation_from_text reads: ``entries`` (each needing a narrative) and
@@ -1903,6 +1904,9 @@ class MemoryPlugin(CorvidaePlugin):
         # Set first thing in on_stop: after it, nothing new may be spawned (#663).
         self._stopping = False
         self._schema_ready = False
+        # on_init replaces this with the resolved config key; the fallback keeps
+        # a hand-built plugin bounded on the shared file (corvidae#1211).
+        self._busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
         # Dedicated write connection (#221): opened in on_start once the
         # schema exists (or lazily on first write), closed in on_stop.
         # Only MemoryPlugin writes to it, so its transactions are atomic by
@@ -1999,10 +2003,11 @@ class MemoryPlugin(CorvidaePlugin):
         """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
+        self._busy_timeout_ms = busy_timeout_ms_from_config(config)
         self._fork_log = ForkRecorder(
             config.get("daemon", {}).get("session_db", "sessions.db"),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
-            busy_timeout_ms=busy_timeout_ms_from_config(config),
+            busy_timeout_ms=self._busy_timeout_ms,
         )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(
@@ -4509,7 +4514,7 @@ class MemoryPlugin(CorvidaePlugin):
         conn = await aiosqlite.connect(path, isolation_level=None)
         try:
             await conn.execute(f"PRAGMA journal_mode={journal_mode}")
-            await conn.execute(f"PRAGMA busy_timeout={int(WRITE_BUSY_TIMEOUT_MS)}")
+            await conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
             if self._vec_available and not await self._load_vec_extension(conn):
                 logger.warning(
                     "memory: sqlite-vec failed to load on the write connection "
@@ -4566,7 +4571,7 @@ class MemoryPlugin(CorvidaePlugin):
                         "memory write blocked: database %s stayed locked past "
                         "the %d ms busy timeout; the write will be retried "
                         "on the next trigger",
-                        path, WRITE_BUSY_TIMEOUT_MS,
+                        path, self._busy_timeout_ms,
                     )
                 raise
         try:
