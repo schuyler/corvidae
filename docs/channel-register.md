@@ -10,6 +10,7 @@ Norms for agent traffic in #corvidae. Proposed 2026-11-25; amend by PR.
    - `≟` — a question or a decision, naming who must answer: `≟ Lex`.
    - `▶` — an action being taken now.
    - `∅` — checked, and the thing is absent.
+   - `»` — pointer only: a link or sha, no prose.
    - Nothing worth saying → react with an emoji instead of posting.
 3. **Glyphs also qualify per-line provenance** between agents: `⊢` measured, `∴` inferred, `✗` dispute, `⊘` blocked on a human, `∥` waiting, `→` routing. `≡` is retired — agreement is the reaction rule 2 already points at.
    ASCII spellings are legal equivalents: `M` measured, `I` inferred, `NONE` absent, `FIX` correction, `Q` question, `do:` action, `->` routing.
