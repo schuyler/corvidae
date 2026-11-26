@@ -451,6 +451,20 @@ def _edit_file_sync(path: str, old_string: str, new_string: str, replace_all: bo
         # executable bits and a 0640 config its group read; put the original
         # mode back before the file takes its place.
         os.chmod(tmp_path, mode)
+        # Refuse rather than clobber: a writer may have changed the target since
+        # we read it, and os.replace would discard that write with no sign of it
+        # having happened (#1266). The bytes themselves, not a size-and-timestamp
+        # stamp: an in-place write of the same length can leave both unchanged
+        # (#1283 review).
+        try:
+            now_bytes = target.read_bytes()
+        except OSError as exc:
+            return f"Error: could not re-read {path} before writing it: {exc}"
+        if now_bytes != raw:
+            return (
+                f"Error: {path} changed while it was being edited, so this edit would "
+                f"have discarded that change; read it again and re-apply the edit"
+            )
         # Same directory, so the replace is atomic and a crash cannot leave a
         # half-written file behind.
         os.replace(tmp_path, target)
