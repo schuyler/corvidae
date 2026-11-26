@@ -1425,6 +1425,7 @@ class SignalPlugin(TransportPlugin):
         otherwise leave the indicator refreshing until later traffic."""
         await self._release_all(channel)
 
+    @hookimpl
     async def on_agent_response(
         self,
         channel,

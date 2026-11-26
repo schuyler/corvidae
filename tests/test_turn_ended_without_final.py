@@ -68,28 +68,35 @@ async def test_a_turn_that_dies_before_a_final_is_reported():
         await db.close()
 
 
-async def test_a_final_is_not_reported_even_when_the_item_carries_no_annotations():
-    """The marker must exist on an item built without annotations (#424).
+async def test_a_tool_hop_report_is_not_suppressed_by_an_inherited_marker():
+    """A later hop of a tool cycle must still report that it ended with no final.
 
-    Otherwise the final is invisible to the turn-end check, the observation
-    fires anyway, and the transport releases a slot it already released.
+    Tool-result items inherit the turn's annotations through the attribution
+    contextvar, so a marker kept there would silence every hop after the
+    first — exactly where a dying turn is most likely. The marker is a field
+    on the item, so an inherited ``_final_sent`` changes nothing.
     """
     plugin, channel, db = await build_plugin_and_channel()
-    plugin._client = MagicMock()
-    plugin._client.chat = AsyncMock(return_value=_make_text_response("hi"))
     recorder = _Recorder()
     plugin.pm.register(recorder)
     item = QueueItem(
         role=QueueItemRole.USER, content="hello", channel=channel, sender="schuyler",
     )
-    item.annotations = None
+    item.annotations = {"_final_sent": True}
+    original = plugin._process_queue_item_attributed
+
+    async def _boom(item, channel_, absorbed):
+        raise RuntimeError("tool hop died before a final")
+
+    plugin._process_queue_item_attributed = _boom
     try:
         try:
             await plugin._process_queue_item(item)
-        except Exception:
+        except RuntimeError:
             pass
-        assert recorder.calls == [], recorder.calls
+        assert len(recorder.calls) == 1, recorder.calls
     finally:
+        plugin._process_queue_item_attributed = original
         await db.close()
 
 

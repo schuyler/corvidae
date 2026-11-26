@@ -1201,6 +1201,7 @@ class DiscordPlugin(TransportPlugin):
         response leaves the indicator refreshing forever."""
         self._release_all(channel)
 
+    @hookimpl
     async def on_agent_response(
         self,
         channel,
