@@ -43,6 +43,9 @@ def test_guard_skips_the_module_when_the_extra_is_absent():
             raise AssertionError("the guarded import must not run")
 
     assert ABSENT in str(excinfo.value)
+    # Without this flag pytest treats the skip as a test-level one and collection
+    # of the module still dies on the import below the guard.
+    assert excinfo.value.allow_module_level is True
 
 
 def test_guard_lets_the_guarded_import_run_when_present():
@@ -83,6 +86,12 @@ def test_broken_package_error_is_not_swallowed(tmp_path, monkeypatch):
 
     assert guard_excinfo.value.name == "nonexistent_transitive_dep_xyz"
 
+    # The marker path shares the probe, so it must break the same way.
+    with pytest.raises(ModuleNotFoundError) as mark_excinfo:
+        requires_extra("broken_extra_pkg")
+
+    assert mark_excinfo.value.name == "nonexistent_transitive_dep_xyz"
+
 
 def test_namespace_shadow_is_not_reported_as_absent(tmp_path, monkeypatch):
     """An empty directory of the right name imports, so it must not skip.
@@ -108,6 +117,14 @@ def test_namespace_shadow_is_not_reported_as_absent(tmp_path, monkeypatch):
 
     assert "unknown location" in str(excinfo.value)
 
+    # And through the guard itself: the context manager stands aside for the
+    # import it guards, so the shadow failure surfaces rather than skipping.
+    with pytest.raises(ImportError) as guarded:
+        with optional_extra("shadowed_extra_pkg"):
+            from shadowed_extra_pkg import SomethingNotThere  # noqa: F401
+
+    assert "unknown location" in str(guarded.value)
+
 
 def test_each_named_extra_has_a_reason():
     """A skip line should name the extra to install, not just 'skipped'."""
@@ -117,6 +134,8 @@ def test_each_named_extra_has_a_reason():
         "context_panel",
         "webhook_notify",
         "github_webhook",
+        "goals_notify",
     ):
         assert module in _REASONS
-        assert _REASONS[module].endswith("extra not installed")
+        assert module in _REASONS[module], _REASONS[module]
+        assert requires_extra(module).mark.kwargs["reason"].find(module) != -1

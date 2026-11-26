@@ -19,7 +19,9 @@ from corvidae_cognition.goals import GoalsSpec
 with optional_extra("cross_channel_send"):
     from cross_channel_send import CrossChannelSendPlugin
 
-from goals_notify import GoalsNotifyPlugin
+with optional_extra("goals_notify"):
+    from goals_notify import GoalsNotifyPlugin
+
 
 from corvidae.attribution import _attribution
 from corvidae.channel import ChannelConfig, ChannelRegistry
@@ -64,12 +66,26 @@ def _in_turn(channel_id: str, hop_count: int | None = None) -> None:
     )
 
 
-async def _fire(pm, *, kind="status", old="open", new="blocked",
-                origin=ORIGIN, actor=ACTOR, conclusion=None, goal_id=7):
+async def _fire(
+    pm,
+    *,
+    kind="status",
+    old="open",
+    new="blocked",
+    origin=ORIGIN,
+    actor=ACTOR,
+    conclusion=None,
+    goal_id=7,
+):
     """Fire on_goals_state_changed through the plugin manager."""
     await pm.ahook.on_goals_state_changed(
-        goal_id=goal_id, kind=kind, old_status=old, new_status=new,
-        origin_channel=origin, actor_channel=actor, conclusion=conclusion,
+        goal_id=goal_id,
+        kind=kind,
+        old_status=old,
+        new_status=new,
+        origin_channel=origin,
+        actor_channel=actor,
+        conclusion=conclusion,
     )
 
 
@@ -103,8 +119,13 @@ async def test_retirement_notifies_origin_with_conclusion():
     xcs.notify_other_channel = AsyncMock(return_value=f"Queued on {ORIGIN}.")
     _in_turn(ACTOR)
 
-    await _fire(pm, kind="retired", old="in-progress", new="retired",
-                conclusion="Shipped the fix; the bug is gone.")
+    await _fire(
+        pm,
+        kind="retired",
+        old="in-progress",
+        new="retired",
+        conclusion="Shipped the fix; the bug is gone.",
+    )
 
     xcs.notify_other_channel.assert_awaited_once()
     channel_id, text = xcs.notify_other_channel.call_args.args
@@ -167,4 +188,3 @@ def test_declared_dependencies():
     # B5: cross_channel_send is required; goals is optional.
     assert GoalsNotifyPlugin.depends_on == frozenset({"cross_channel_send"})
     assert GoalsNotifyPlugin.optional_depends_on == frozenset({"goals"})
-

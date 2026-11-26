@@ -47,6 +47,7 @@ _REASONS = {
     "context_panel": "optional context_panel extra not installed",
     "webhook_notify": "optional webhook_notify extra not installed",
     "github_webhook": "optional github_webhook extra not installed",
+    "goals_notify": "optional goals_notify extra not installed",
 }
 
 
