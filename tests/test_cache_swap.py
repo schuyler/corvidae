@@ -683,37 +683,48 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
 @pytest.mark.parametrize(
     "target, expect_raise",
     [
-        # (turn cost 1000 + max tail 481) leaves the largest fit these gaps
-        # below the target: inside 1% the guard must accept, outside it must
-        # reject. Both directions are pinned because the guard's contract is a
-        # threshold, not merely "reject something".
-        (1488, False),   # 7 tokens short = 0.47% -> accept
-        (1511, True),    # 30 short = 1.99%       -> reject
-        (1650, True),    # 169 short = 10.2%      -> reject
+        # The injected counter quantizes the largest fit the search can reach at
+        # 1480: one 1000-token turn plus the longest tail it will try, which is
+        # USER_WORDS + ASSISTANT_WORDS + USER_WORDS = 480 words counted at one
+        # token each (the search's upper bound is exclusive). So each target sits
+        # a measured distance from the guard's 1% edge, and `reached_expected`
+        # below re-asserts that landing every run - if the builder or the
+        # constants move, this comment is checked, not trusted.
+        (1488, False),   # 1480 reached: 0.54% short -> accept
+        (1494, False),   # 0.94% short -> accept; a 0.9% guard would reject this
+        (1495, True),    # 1.003% short -> reject; an 1.1% guard would accept it
+        (1650, True),    # 10.3% short -> reject
     ],
 )
 def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_outside(
     target, expect_raise
 ):
-    """The 1% guard in `fit_messages` is a real threshold, not a decoration.
+    """The guard in `fit_messages` is a threshold near 1%, not a decoration.
 
     Silently returning a short prompt would hand a run a conversation that is
     not the size it claims to have measured; rejecting an in-tolerance prompt
     would make the probe unable to size itself at all. `count_tokens` is a
-    parameter, so the test injects a counter coarser than the guard: a turn is
-    worth 1000 "tokens" and a tail word one, which quantizes the shortfall the
-    search can land on. The targets above are derived from that quantization
-    (see the parametrize comment), so each case sits at a known distance from
-    the 1% boundary instead of leaning on arithmetic luck.
+    parameter, so the test injects a counter coarser than the guard allows, which
+    is what makes the shortfall controllable: with a real tokenizer the tail
+    moves by about a token and every target would land inside 1%.
     """
+    reached_expected = 1480
 
     def coarse(msgs):
         turns = (len(msgs) - 2) // 2
         return 1000 * turns + len(msgs[-1]["content"].split())
 
+    def landing_check(got):
+        assert got == reached_expected, (
+            f"the search landed at {got}, not {reached_expected}: the fixture "
+            "moved, so the distances in the parametrize comment are stale"
+        )
+
     if not expect_raise:
         msgs = fit_messages("guard-a", target, coarse)
-        assert abs(coarse(msgs) - target) <= target * 0.01 + 1, coarse(msgs)
+        got = coarse(msgs)
+        landing_check(got)
+        assert abs(got - target) <= target * 0.01 + 1, (got, target)
         return
 
     with pytest.raises(ValueError, match="outside 1%") as exc:
@@ -721,11 +732,9 @@ def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_out
 
     m = re.search(r"reached (\d+) tokens", str(exc.value))
     assert m is not None, f"guard raised the wrong thing: {exc.value!r}"
-    gap = (target - int(m.group(1))) / target
-    assert 0.01 < gap < 0.45, (
-        f"guard fired at {gap:.1%} of {target}: the case no longer sits just "
-        "outside the 1% boundary, revisit the targets above"
-    )
+    reached = int(m.group(1))
+    landing_check(reached)
+    assert 0.01 < (target - reached) / target < 0.45, (reached, target)
 
 
 def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
@@ -738,9 +747,13 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     which catches *fixture* drift (a builder or constant change that stops the
     fixture landing on a user turn) and cannot catch a production change to the
     ratio, rounding, or whether the system turn counts - those leave this local
-    formula untouched. There is no helper to import for it, so the coverage of
-    "the guard still gets exercised" rests on the length assertion at the end,
-    which fails if the step-back stops happening.
+    formula untouched. And the length assertion at the end does not close that
+    hole either: a production change that shifts the kept count by one can land
+    the tail on an assistant turn by itself, so the guard never runs, yet
+    `len(out) - 2` still equals this local `raw_keep - 1`. Guard coverage here
+    therefore rests on the deleted-loop mutation, not on any assertion in the
+    file; if a future change wants that pinned from inside the test, it needs a
+    production helper for the keep computation to compare against.
     """
     messages = build_messages("guard-b", 41, USER_WORDS)
     turns = messages[1:]
@@ -757,6 +770,7 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     assert out[2]["role"] == "assistant", "tail must not start on a user turn"
     roles = [m["role"] for m in out[1:]]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
-    # One step back, no more: the guard gave up exactly the message that broke
-    # alternation. Without this, a guard that dropped the whole tail would pass.
+    # Exactly one step back. This catches over-dropping - a guard that gave up
+    # two or more messages would still alternate and pass the role checks. A
+    # guard that dropped the entire tail would fail earlier, on out[2].
     assert len(out) - 2 == raw_keep - 1, f"kept {len(out) - 2}, expected {raw_keep - 1}"
