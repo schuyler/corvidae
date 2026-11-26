@@ -18,6 +18,7 @@ cache.
 """
 
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
@@ -147,6 +148,7 @@ class MarkdownIndex:
         db_path: Path,
         get_client: Callable[[], Any],
         get_identity: Callable[[], _EncoderIdentity | None],
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     ) -> None:
         # Accept a single root (backward compat) or a list of roots.
         if isinstance(root, list):
@@ -204,6 +206,7 @@ class MarkdownIndex:
         # A folder-level lock: the index is shared across channels, so
         # reconcile and search serialize on it (not the mixin's per-channel
         # single-flight).
+        self._busy_timeout_ms = busy_timeout_ms
         self._lock = asyncio.Lock()
 
     # -- connection + schema ------------------------------------------------
@@ -230,7 +233,9 @@ class MarkdownIndex:
             # The index shares the session database with the conversation
             # writer; the inherited 5.0 s default is what turns a long-held
             # write lock into lost index writes (corvidae#1211).
-            await db.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+            await db.execute(
+                f"PRAGMA busy_timeout={self._busy_timeout_ms}"
+            )
             self._db = db
             return db
         except Exception:

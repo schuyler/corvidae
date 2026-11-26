@@ -101,6 +101,7 @@ from corvidae.attribution import (
     reset_attribution,
     set_attribution,
 )
+from corvidae.persistence import busy_timeout_ms_from_config
 from corvidae.prompts import resolve_prompt
 from corvidae.context import (
     ContextWindow,
@@ -2001,6 +2002,7 @@ class MemoryPlugin(CorvidaePlugin):
         self._fork_log = ForkRecorder(
             config.get("daemon", {}).get("session_db", "sessions.db"),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+            busy_timeout_ms=busy_timeout_ms_from_config(config),
         )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(

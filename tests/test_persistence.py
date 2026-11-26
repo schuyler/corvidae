@@ -1154,3 +1154,27 @@ class TestBusyTimeout:
         await plugin.db.close()
 
         assert actual_ms == 1234
+
+
+def test_busy_timeout_ms_from_config_rejects_unusable_values():
+    """0 or a negative wait disables busy handling -- worse than 5 s.
+
+    The value gates every writer on the session database, so an unusable one is
+    logged and replaced rather than obeyed (corvidae#1211).
+    """
+    from corvidae.persistence import (
+        DEFAULT_BUSY_TIMEOUT_MS,
+        busy_timeout_ms_from_config,
+    )
+
+    for raw in (0, -5, None, "abc", "", [5]):
+        got = busy_timeout_ms_from_config({"daemon": {"sqlite_busy_timeout_ms": raw}})
+        assert got == DEFAULT_BUSY_TIMEOUT_MS, raw
+    assert busy_timeout_ms_from_config({}) == DEFAULT_BUSY_TIMEOUT_MS
+    assert busy_timeout_ms_from_config(
+        {"daemon": {"sqlite_busy_timeout_ms": 1234}}
+    ) == 1234
+    # A string digit is what a YAML scalar yields; it is honoured, not rejected.
+    assert busy_timeout_ms_from_config(
+        {"daemon": {"sqlite_busy_timeout_ms": "45000"}}
+    ) == 45000

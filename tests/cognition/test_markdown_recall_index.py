@@ -684,3 +684,23 @@ async def test_connect_sets_busy_timeout(tmp_path):
         assert row[0] == 30000
     finally:
         await db.close()
+
+
+async def test_busy_timeout_ms_is_configurable_per_writer(tmp_path):
+    """The index writer honours the resolved value, not just the constant."""
+    root = tmp_path / "notes"
+    root.mkdir()
+    index = MarkdownIndex(
+        root=root,
+        db_path=tmp_path / "index.db",
+        get_client=lambda: FakeEmbed(dim=8),
+        get_identity=lambda: IDENTITY,
+        busy_timeout_ms=3333,
+    )
+    db = await index._connect()
+    try:
+        async with db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 3333
+    finally:
+        await db.close()

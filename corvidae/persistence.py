@@ -27,8 +27,42 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
-#: Default write-lock wait for every writer on the session database.
+#: Default write-lock wait for the writers on the session database: the
+#: conversation writer and the writers that share its file (fork log, markdown
+#: index). memory.py and goals.py set their own values.
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
+
+#: A wait outside this window is a mistake, not a policy: 0 or a negative value
+#: disables busy handling entirely (worse than the inherited 5 s), and SQLite
+#: clamps anything past INT_MAX.
+BUSY_TIMEOUT_BOUNDS = (1, 600_000)
+
+
+def busy_timeout_ms_from_config(config: dict) -> int:
+    """Resolve ``daemon.sqlite_busy_timeout_ms``, or the default when unusable.
+
+    Shared by every writer on the session database so one config key sets one
+    wait for all of them, instead of three waits on one file.
+    """
+    raw = (config.get("daemon") or {}).get(
+        "sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS
+    )
+    low, high = BUSY_TIMEOUT_BOUNDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "daemon.sqlite_busy_timeout_ms %r is not an integer; using %d ms",
+            raw, DEFAULT_BUSY_TIMEOUT_MS,
+        )
+        return DEFAULT_BUSY_TIMEOUT_MS
+    if not low <= value <= high:
+        logger.warning(
+            "daemon.sqlite_busy_timeout_ms %d is outside %d..%d ms; using %d ms",
+            value, low, high, DEFAULT_BUSY_TIMEOUT_MS,
+        )
+        return DEFAULT_BUSY_TIMEOUT_MS
+    return value
 
 
 async def add_column_if_missing(
@@ -329,9 +363,7 @@ class PersistencePlugin(CorvidaePlugin):
         # another connection still holds the WAL write lock, and every give-up
         # drops a conversation row (corvidae#1211). The wait is bounded, not
         # removed: a holder that never commits still costs a failed write.
-        busy_ms = int(
-            config.get("daemon", {}).get("sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS)
-        )
+        busy_ms = busy_timeout_ms_from_config(config)
         async with self.db.execute(f"PRAGMA busy_timeout={busy_ms}") as cursor:
             row = await cursor.fetchone()
         logger.info(

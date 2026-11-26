@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Sequence
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
+from corvidae.persistence import busy_timeout_ms_from_config
 from corvidae.tuning import config_value
 from corvidae_cognition.markdown_recall.index import Hit, MarkdownIndex, _EncoderIdentity
 from corvidae_cognition.recall import RecallContext, RecallSourceMixin
@@ -116,6 +117,7 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
             db_path=db_path,
             get_client=self._embedding_client,
             get_identity=self._encoder_identity,
+            busy_timeout_ms=busy_timeout_ms_from_config(config),
         )
 
     @hookimpl
