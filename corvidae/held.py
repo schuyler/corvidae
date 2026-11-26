@@ -86,6 +86,21 @@ class HeldBatch:
     origin: str | None
 
 
+def _trace_second(trace_id: str | None) -> int | None:
+    """The second a trace id was minted, or None if it is not that shape.
+
+    Trace ids are ``<hex-time>-<hex12>`` (#95). Only the time prefix orders
+    turns: the suffix is random, so two ids minted in the same second sort
+    arbitrarily and must not be used to decide which batch is stale (#1218).
+    """
+    if not trace_id or "-" not in trace_id:
+        return None
+    try:
+        return int(trace_id.split("-", 1)[0], 16)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class BatchPlan:
     """Policy's answer for one offered batch; entries it does not list are
@@ -224,8 +239,33 @@ class HeldContext(CorvidaePlugin):
             keys, self._now(), trace_id, True, None,
         )
         held = self._next_turn.setdefault(channel.id, [])
+        same = [b for b in held if b.once and b.source == batch.source]
+        # Which of two batches is stale is a question about the turn that
+        # produced it, not about which arrived first: a slow retrieval from an
+        # earlier turn can land after a newer one and would otherwise evict it
+        # (#1218). Trace ids are minted time-sortable (#95), so they order the
+        # turns that produced the batches; with either id missing, this falls
+        # back to arrival order, which is what it did before.
+        incoming_second = _trace_second(trace_id)
+        if incoming_second is not None and any(
+            (held_second := _trace_second(b.trace_id)) is not None
+            and held_second > incoming_second
+            for b in same
+        ):
+            logger.warning(
+                "held: dropped a stale %s contribution from an earlier turn on "
+                "channel %s (%d entr%s); a newer batch is already held",
+                batch.source, channel.id, len(batch.entries),
+                "y" if len(batch.entries) == 1 else "ies",
+                extra={"channel": channel.id, "source": batch.source},
+            )
+            await self.pm.ahook.on_held_admitted(
+                channel=channel, source=batch.source, trace_id=trace_id,
+                admitted_keys=[], duplicate_keys=[],
+            )
+            return
         # Replace the older once batch of the same source, loudly.
-        for old in [b for b in held if b.once and b.source == batch.source]:
+        for old in same:
             held.remove(old)
             logger.warning(
                 "held: a newer %s contribution replaced %d held entr%s on channel %s "

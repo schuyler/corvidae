@@ -783,3 +783,44 @@ class TestStubTextWins:
         await store.held.turn_ended(store.channel)
 
         assert recorder.texts == ["revise please"]
+
+
+# ---------------------------------------------------------------------------
+# #1218: a late batch from an earlier turn must not evict a newer one
+# ---------------------------------------------------------------------------
+
+
+class TestStaleArrival:
+    async def test_a_late_batch_from_an_earlier_turn_does_not_evict_the_newer(
+        self, store, H, caplog
+    ):
+        """Arrival order is not turn order: the older trace loses."""
+        await store.held.hold_contribution(
+            store.channel,
+            H.Contribution("memory", ["a fact from the later turn"]),
+            trace_id="17a00000-aaaaaaaaaaaa",
+        )
+        with caplog.at_level(logging.WARNING):
+            await store.held.hold_contribution(
+                store.channel,
+                H.Contribution("memory", ["a fact from the earlier turn"]),
+                trace_id="17900000-bbbbbbbbbbbb",
+            )
+
+        held = store.held._next_turn[store.channel.id]
+        assert [b.entries for b in held] == [["a fact from the later turn"]]
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("stale" in w and "memory" in w for w in warnings), warnings
+
+    async def test_without_trace_ids_arrival_still_wins(self, store, H, caplog):
+        """The fallback: no ids, so the later arrival replaces, as before."""
+        await store.held.hold_contribution(
+            store.channel, H.Contribution("memory", ["first"]), trace_id=None
+        )
+        with caplog.at_level(logging.WARNING):
+            await store.held.hold_contribution(
+                store.channel, H.Contribution("memory", ["second"]), trace_id=None
+            )
+
+        held = store.held._next_turn[store.channel.id]
+        assert [b.entries for b in held] == [["second"]]
