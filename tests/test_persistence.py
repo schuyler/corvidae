@@ -1155,6 +1155,36 @@ class TestBusyTimeout:
 
         assert actual_ms == 1234
 
+    async def test_on_start_applies_the_wait_to_an_injected_connection(self, tmp_path):
+        """A connection a test built still gets the daemon's wait.
+
+        The connect/init_db pair is split by an ``opened_here`` flag so the PRAGMA
+        lands here too. Without that, an injected connection -- which is how every
+        plugin-level test opens the file, and how a re-opened DB would be handed
+        over -- would exercise a writer with no bound at all.
+        """
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        pm.register(_make_registry(), name="registry")
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "injected.db")
+        plugin.db = await aiosqlite.connect(db_path)
+        await init_db(plugin.db)
+
+        await plugin.on_start(config={
+            "daemon": {
+                "session_db": db_path,
+                "sqlite_busy_timeout_ms": 2222,
+            }
+        })
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            actual_ms = (await cursor.fetchone())[0]
+        await plugin.db.close()
+
+        assert actual_ms == 2222
+
     async def test_on_start_applies_the_wait_before_the_schema_writes(
         self, tmp_path, monkeypatch
     ):

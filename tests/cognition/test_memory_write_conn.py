@@ -462,6 +462,25 @@ class TestWriteConnectionLifecycle:
         assert stmts, "no PRAGMA was recorded on the write connection"
         assert stmts[0].strip().upper().startswith("PRAGMA BUSY_TIMEOUT"), stmts
 
+    async def test_shared_fallback_reports_the_wait_that_connection_has(self):
+        """The no-file fallback must not claim a timeout it never installed.
+
+        An in-memory persistence DB gets no dedicated write connection, so memory
+        writes on the persistence connection and inherits its wait -- sqlite3's
+        5000 ms here, because a test connection is opened without a PRAGMA. A
+        give-up WARNING naming the configured value instead would report a wait
+        nobody set, which is the drift this whole change exists to remove.
+        """
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=":memory:"
+        )
+        assert memory._busy_timeout_ms == 4321
+        wdb = await memory._write_conn()
+        assert wdb is db, "an in-memory DB must fall back to the shared connection"
+        assert memory._write_busy_ms == 5000, memory._write_busy_ms
+        await stop(memory, db)
+
     async def test_wait_without_on_init_is_the_shared_default(self):
         """A plugin built without on_init still shares the kernel's number."""
         plugin = memory_module.MemoryPlugin()

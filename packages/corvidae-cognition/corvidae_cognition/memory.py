@@ -1907,6 +1907,12 @@ class MemoryPlugin(CorvidaePlugin):
         # on_init replaces this with the resolved config key; the fallback keeps
         # a hand-built plugin bounded on the shared file (corvidae#1211).
         self._busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
+        # The wait in force on the connection a memory write actually ran on.
+        # Equal to the resolved value for the dedicated connection; read back off
+        # the persistence connection in the no-file fallback, where memory does
+        # not get to choose. _log_busy_give_up names this one, so a WARNING can
+        # never report a timeout that was not in effect.
+        self._write_busy_ms: int = DEFAULT_BUSY_TIMEOUT_MS
         # Dedicated write connection (#221): opened in on_start once the
         # schema exists (or lazily on first write), closed in on_stop.
         # Only MemoryPlugin writes to it, so its transactions are atomic by
@@ -4493,7 +4499,8 @@ class MemoryPlugin(CorvidaePlugin):
         (isolation_level=None) so transactions are exactly the explicit
         BEGIN IMMEDIATE .. COMMIT of ``_write_txn``. Returns ``shared`` itself
         for a database with no file (in-memory), which a second connection
-        cannot open.
+        cannot open; that connection's wait is the persistence plugin's, so it is
+        read back here rather than assumed.
         """
         async with shared.execute("PRAGMA database_list") as cursor:
             files = [row[2] for row in await cursor.fetchall() if row[1] == "main"]
@@ -4507,6 +4514,11 @@ class MemoryPlugin(CorvidaePlugin):
                 "share the persistence connection (not atomic against "
                 "other plugins' commits)"
             )
+            async with shared.execute("PRAGMA busy_timeout") as cursor:
+                row = await cursor.fetchone()
+            # This connection's wait is the kernel's, not ours; record the real
+            # number so a give-up here cannot name a timeout nobody set.
+            self._write_busy_ms = int(row[0]) if row else self._busy_timeout_ms
             return shared
         async with shared.execute("PRAGMA journal_mode") as cursor:
             row = await cursor.fetchone()
@@ -4517,6 +4529,7 @@ class MemoryPlugin(CorvidaePlugin):
             # that can meet SQLITE_BUSY, and a wait installed after it is not in
             # force for the statement that needed it (corvidae#1211).
             await conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
+            self._write_busy_ms = int(self._busy_timeout_ms)
             await conn.execute(f"PRAGMA journal_mode={journal_mode}")
             if self._vec_available and not await self._load_vec_extension(conn):
                 logger.warning(
@@ -4551,10 +4564,13 @@ class MemoryPlugin(CorvidaePlugin):
     def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
         """Log once when a write gave up on the lock, whatever the statement.
 
-        ``BEGIN IMMEDIATE`` and ``COMMIT`` both call this, so the same failure
-        cannot be reported twice and cannot go unreported. The number named is
-        the one in force on this connection (``daemon.sqlite_busy_timeout_ms``),
-        not a constant that may have drifted from it. Returns True if it logged.
+        Every statement of a memory write section calls this through
+        ``_write_txn`` -- ``BEGIN IMMEDIATE``, the body, ``COMMIT`` -- so the same
+        failure cannot be reported twice and cannot go unreported. The number
+        named is the wait in force on the connection the write ran on
+        (``_write_busy_ms``): the config value for the dedicated connection, the
+        persistence connection's own for the no-file fallback. Returns True if it
+        logged.
         """
         if not isinstance(exc, sqlite3.OperationalError):
             return False
@@ -4564,7 +4580,7 @@ class MemoryPlugin(CorvidaePlugin):
         logger.warning(
             "memory write blocked: database %s stayed locked past the %d ms "
             "busy timeout; the write will be retried on the next trigger",
-            path, self._busy_timeout_ms,
+            path, self._write_busy_ms,
         )
         return True
 
@@ -4575,8 +4591,9 @@ class MemoryPlugin(CorvidaePlugin):
         ``BEGIN IMMEDIATE`` .. ``COMMIT``; any exception (and cancellation)
         rolls back, logs a failed rollback at WARNING, and propagates for the
         caller to report. A write that gives up on the lock -- at ``BEGIN
-        IMMEDIATE`` or at ``COMMIT`` against a long reader -- logs one WARNING
-        naming the database path and the timeout in force, then propagates.
+        IMMEDIATE``, in the body, or at ``COMMIT`` against a long reader -- logs
+        one WARNING naming the database path and the timeout in force, then
+        propagates; see ``_log_busy_give_up``.
         Callers hold ``_db_lock`` so memory's own writers don't contend.
         """
         conn = await self._write_conn()
