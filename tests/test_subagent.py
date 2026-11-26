@@ -39,19 +39,6 @@ BASE_CONFIG = {
     },
 }
 
-BACKGROUND_CONFIG = {
-    "llm": {
-        "providers": {
-            "main": {"base_url": "http://localhost:8080"},
-            "background": {"base_url": "http://localhost:8081"},
-        },
-        "profiles": {
-            "main": {"model": "test-model"},
-            "background": {"provider": "background", "model": "bg-model"},
-        },
-    },
-}
-
 
 def _make_channel(transport="test", scope="scope1") -> Channel:
     return Channel(transport=transport, scope=scope, config=ChannelConfig())

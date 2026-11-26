@@ -30,17 +30,6 @@ GRAMMAR = HOOK_GRAMMAR
 IMPERATIVE = IMPERATIVE_HOOKS
 
 # Names retired by renames or folds; none may come back as a hookspec.
-RETIRED = {
-    "on_conversation_event",  # -> persist_message
-    "process_tool_result",  # -> transform_tool_result
-    "load_conversation",  # -> resolve_conversation
-    "on_llm_error",  # -> resolve_llm_error
-    "compact_conversation",  # -> resolve_compaction
-    "send_message",  # -> send(event=OutboundMessage)
-    "send_thinking",  # -> send(event=OutboundThinking)
-    "send_tool_status",  # -> send(event=OutboundToolStatus)
-    "send_progress",  # -> send(event=OutboundProgress)
-}
 
 
 def _hookcallers() -> dict[str, HookCaller]:
