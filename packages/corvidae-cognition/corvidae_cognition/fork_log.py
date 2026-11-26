@@ -298,6 +298,66 @@ class ForkLog:
         # row instead of letting an empty chain look like an empty prompt.
         reconstructable = 0 if digests is None else 1
         first, last = (None, None) if window is None else window
+        try:
+            return await self._insert_fork(
+                db,
+                (
+                    time.time(),
+                    stage,
+                    point,
+                    channel_id,
+                    trace_id,
+                    lens_id,
+                    profile,
+                    model,
+                    question_sha256(question),
+                    question,
+                    instruction,
+                    first,
+                    last,
+                    cut,
+                    prompt_sha256(messages),
+                    len(messages),
+                    renderer_sha,
+                    _dumps(list(findings) if findings is not None else None),
+                    verdict,
+                    None,
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    snapshot_sha,
+                    system_sha,
+                    chain_parent,
+                    chain_from,
+                    reconstructable,
+                ),
+                messages=messages,
+                digests=digests,
+                chain_parent=chain_parent,
+                chain_from=chain_from,
+            )
+        except BaseException:
+            # The INSERT opened a write transaction; anything that fails
+            # before the commit (a refused digest chain, a cancelled task)
+            # must end it here. Left open it holds the database's write lock
+            # until this connection's next commit, and every other writer on
+            # the file -- the conversation log included -- fails with
+            # "database is locked" meanwhile (#1211).
+            await db.rollback()
+            raise
+
+    async def _insert_fork(
+        self,
+        db: aiosqlite.Connection,
+        row: tuple,
+        *,
+        messages: Sequence[dict],
+        digests: Sequence[bytes] | None,
+        chain_parent: int | None,
+        chain_from: int,
+    ) -> int:
+        """Insert one fork row and its digests, then commit; returns its id."""
         cur = await db.execute(
             """INSERT INTO fork_log (
                 ts, stage, point, channel_id, trace_id, lens_id, profile, model,
@@ -308,37 +368,7 @@ class ForkLog:
                 snapshot_sha256, system_sha256, chain_parent, chain_from,
                 reconstructable
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                time.time(),
-                stage,
-                point,
-                channel_id,
-                trace_id,
-                lens_id,
-                profile,
-                model,
-                question_sha256(question),
-                question,
-                instruction,
-                first,
-                last,
-                cut,
-                prompt_sha256(messages),
-                len(messages),
-                renderer_sha,
-                _dumps(list(findings) if findings is not None else None),
-                verdict,
-                None,
-                latency_ms,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                snapshot_sha,
-                system_sha,
-                chain_parent,
-                chain_from,
-                reconstructable,
-            ),
+            row,
         )
         fork_id = int(cur.lastrowid)
         if digests:

@@ -410,3 +410,42 @@ async def test_a_table_from_an_older_build_gains_the_new_columns(tmp_path):
         assert row["point"] == "after-send"
     finally:
         await log.close()
+
+
+async def test_a_refused_record_releases_the_write_lock(log, tmp_path):
+    """A record refused after its INSERT rolls back instead of holding the lock (#1211).
+
+    The refusal comes from ``_check_digests``, which runs after the fork row's
+    INSERT has opened a write transaction. Left open, that transaction holds
+    the database's write lock until this connection's next commit, so every
+    other writer on the file -- the conversation log included -- fails with
+    ``database is locked`` in the meantime.
+    """
+    import sqlite3
+
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+    with pytest.raises(ValueError, match="does not resolve"):
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=B[:3],
+            digests=[digest_of(B[2])],
+            chain_parent=first,
+            chain_from=7,
+        )
+    # Another connection can take the write lock at once, without waiting.
+    other = sqlite3.connect(str(tmp_path / "sessions.db"), timeout=0)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.rollback()
+    finally:
+        other.close()
+    # The refused row is gone for good: the next successful record's commit
+    # must not carry it into the table.
+    await _fork(log, B[:2])
+    db = await log._conn()
+    async with db.execute("SELECT count(*) FROM fork_log") as cur:
+        (count,) = await cur.fetchone()
+    assert count == 2

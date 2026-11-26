@@ -541,7 +541,14 @@ class GoalsPlugin(CorvidaePlugin):
                     (status, now, id),
                 ) as cursor:
                     if cursor.rowcount == 0:
-                        # Retired between the read above and this write.
+                        # Retired between the read above and this write. The
+                        # zero-row UPDATE still opened a write transaction,
+                        # and returning with it open holds the write lock
+                        # until some other plugin commits (#1211). Commit,
+                        # not roll back: this connection is shared, so a
+                        # rollback would also discard other plugins' pending
+                        # writes, and this UPDATE changed nothing.
+                        await db.commit()
                         return (
                             f"Error: goal #{id} was retired just now; "
                             "add a new goal instead"
