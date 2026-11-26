@@ -229,13 +229,14 @@ class MarkdownIndex:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             db = await aiosqlite.connect(self._db_path)
             db.row_factory = aiosqlite.Row
-            await db.execute("PRAGMA journal_mode=WAL")
-            # The index shares the session database with the conversation
-            # writer; the inherited 5.0 s default is what turns a long-held
-            # write lock into lost index writes (corvidae#1211).
+            # Before journal_mode: that statement is itself a write on a
+            # database another writer may hold, and until this pragma lands
+            # the connection is on sqlite3's inherited 5 s default
+            # (corvidae#1211).
             await db.execute(
                 f"PRAGMA busy_timeout={self._busy_timeout_ms}"
             )
+            await db.execute("PRAGMA journal_mode=WAL")
             self._db = db
             return db
         except Exception:

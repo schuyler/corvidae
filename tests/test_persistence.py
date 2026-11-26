@@ -1167,7 +1167,8 @@ def test_busy_timeout_ms_from_config_rejects_unusable_values():
         busy_timeout_ms_from_config,
     )
 
-    for raw in (0, -5, None, "abc", "", [5]):
+    for raw in (0, -5, None, "abc", "", [5], True, False, 1.5, 600000.9,
+                float("inf"), float("nan"), 600_001):
         got = busy_timeout_ms_from_config({"daemon": {"sqlite_busy_timeout_ms": raw}})
         assert got == DEFAULT_BUSY_TIMEOUT_MS, raw
     assert busy_timeout_ms_from_config({}) == DEFAULT_BUSY_TIMEOUT_MS

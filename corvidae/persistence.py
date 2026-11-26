@@ -43,23 +43,31 @@ def busy_timeout_ms_from_config(config: dict) -> int:
 
     Shared by every writer on the session database so one config key sets one
     wait for all of them, instead of three waits on one file.
+
+    Types are checked before conversion: ``int()`` would accept ``True`` as 1 ms
+    and truncate ``1.5``, and ``int(float("inf"))`` raises OverflowError, which
+    must not abort startup. A digit string is accepted because that is what a
+    YAML scalar yields. 0 and negatives are rejected: they disable busy
+    handling, which is worse than the 5 s default this replaces.
     """
     raw = (config.get("daemon") or {}).get(
         "sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS
     )
     low, high = BUSY_TIMEOUT_BOUNDS
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
+    value: int | None
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        # bool first: True is an int subclass, and True is not a timeout.
+        value = None
+    elif isinstance(raw, str):
+        text = raw.strip()
+        value = int(text) if text.lstrip("+-").isdigit() else None
+    else:
+        value = raw
+    if value is None or not low <= value <= high:
         logger.warning(
-            "daemon.sqlite_busy_timeout_ms %r is not an integer; using %d ms",
-            raw, DEFAULT_BUSY_TIMEOUT_MS,
-        )
-        return DEFAULT_BUSY_TIMEOUT_MS
-    if not low <= value <= high:
-        logger.warning(
-            "daemon.sqlite_busy_timeout_ms %d is outside %d..%d ms; using %d ms",
-            value, low, high, DEFAULT_BUSY_TIMEOUT_MS,
+            "daemon.sqlite_busy_timeout_ms %r is unusable (want an integer from "
+            "%d to %d ms); using %d ms",
+            raw, low, high, DEFAULT_BUSY_TIMEOUT_MS,
         )
         return DEFAULT_BUSY_TIMEOUT_MS
     return value
@@ -351,14 +359,6 @@ class PersistencePlugin(CorvidaePlugin):
                 f"Invalid sqlite_journal_mode: {journal_mode!r} "
                 f"(accepted values: {allowed})"
             )
-        async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
-            row = await cursor.fetchone()
-        actual_mode = row[0] if row else journal_mode
-        logger.info(
-            "SQLite journal mode set to %s", actual_mode,
-            extra={"journal_mode": actual_mode},
-        )
-
         # A writer that inherits sqlite3.connect's 5.0 s default gives up while
         # another connection still holds the WAL write lock, and every give-up
         # drops a conversation row (corvidae#1211). The wait is bounded, not
@@ -369,6 +369,14 @@ class PersistencePlugin(CorvidaePlugin):
         logger.info(
             "SQLite busy timeout set to %d ms", row[0] if row else busy_ms,
             extra={"busy_timeout_ms": row[0] if row else busy_ms},
+        )
+
+        async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
+            row = await cursor.fetchone()
+        actual_mode = row[0] if row else journal_mode
+        logger.info(
+            "SQLite journal mode set to %s", actual_mode,
+            extra={"journal_mode": actual_mode},
         )
 
         # Seed the idle tracker: every channel with history is quiet since its
