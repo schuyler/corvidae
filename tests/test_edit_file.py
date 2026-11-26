@@ -199,6 +199,30 @@ async def test_a_write_between_the_read_and_the_replace_is_refused(tmp_path, mon
     assert path.read_text() == "alpha\nbeta\ngamma\n"
 
 
+async def test_a_same_length_write_between_the_read_and_the_replace_is_refused(
+    tmp_path, monkeypatch
+):
+    """Same size, same second: only comparing the bytes catches this one (#1283)."""
+    path = tmp_path / "notes.md"
+    path.write_text("alpha\n")
+
+    import corvidae.tools.files as files
+
+    real_chmod = files.os.chmod
+
+    def chmod_after_an_equal_length_write(tmp_path_from_tool, mode):
+        path.write_text("ALPHA\n")
+        real_chmod(tmp_path_from_tool, mode)
+
+    monkeypatch.setattr(files.os, "chmod", chmod_after_an_equal_length_write)
+
+    result = await edit_file(str(path), "alpha", "beta")
+
+    assert result.startswith("Error:"), result
+    assert "changed while it was being edited" in result
+    assert path.read_text() == "ALPHA\n"
+
+
 async def test_parallel_edits_of_one_file_do_not_collide(tmp_path):
     """A fixed ".name.edit-tmp" name lets two edits clobber each other (#1258).
 
