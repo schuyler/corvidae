@@ -1174,6 +1174,11 @@ def test_busy_timeout_ms_from_config_rejects_unusable_values():
         got = busy_timeout_ms_from_config({"daemon": {"sqlite_busy_timeout_ms": raw}})
         assert got == DEFAULT_BUSY_TIMEOUT_MS, raw
     assert busy_timeout_ms_from_config({}) == DEFAULT_BUSY_TIMEOUT_MS
+    # `daemon:` present but empty/null is what a stub agent.yaml yields; the
+    # surrounding pre-existing lookups (config.get("daemon", {})) would raise
+    # AttributeError on a null, so this shape is pinned here rather than inherited.
+    assert busy_timeout_ms_from_config({"daemon": None}) == DEFAULT_BUSY_TIMEOUT_MS
+    assert busy_timeout_ms_from_config({"daemon": {}}) == DEFAULT_BUSY_TIMEOUT_MS
     assert busy_timeout_ms_from_config(
         {"daemon": {"sqlite_busy_timeout_ms": 1234}}
     ) == 1234
