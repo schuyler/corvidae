@@ -153,19 +153,23 @@ class TestHookspecSignatures:
 # ---------------------------------------------------------------------------
 
 
-class TestDeletedSurfaceAbsent:
+class TestReplacementSurfacePresent:
+    """Presence only. Each body asserts that the symbol replacing some surface this
+    suite used to probe for absence is importable; #1238 removed the absence halves,
+    so no claim about roles, uniqueness, or callers is made here."""
 
-    def test_resolve_hook_results_deleted_and_replaced(self):
+    def test_resolve_reject_wins_is_present(self):
         import corvidae.hooks as hooks_module
         assert hasattr(hooks_module, "resolve_reject_wins")
 
 
-    def test_tool_collection_plugin_added_removed_hookimpls_deleted(self):
+    def test_rebuild_registry_is_present_on_tool_collection_plugin(self):
         from corvidae.tool_collection import ToolCollectionPlugin
-        # rebuild_registry itself stays -- on_start still uses it.
+        # The removed hookimpls' absence checks went with #1238; this half stays.
+        # Whether on_start calls it is a behaviour question this test does not make.
         assert hasattr(ToolCollectionPlugin, "rebuild_registry")
 
-    def test_mint_trace_id_replaces_old_minters(self):
+    def test_mint_trace_id_is_present_on_agent(self):
         import corvidae.agent as agent_module
         assert hasattr(agent_module, "mint_trace_id")
 

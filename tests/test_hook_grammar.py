@@ -29,8 +29,6 @@ GRAMMAR = HOOK_GRAMMAR
 # Bare imperative names: broadcast, caller-defined use of the result list.
 IMPERATIVE = IMPERATIVE_HOOKS
 
-# Names retired by renames or folds; none may come back as a hookspec.
-
 
 def _hookcallers() -> dict[str, HookCaller]:
     """Map hook name -> HookCaller for every hookspec on a fresh manager.
@@ -140,9 +138,6 @@ def test_register_llm_stages_is_an_imperative_hookspec() -> None:
     spec = _CALLERS["register_llm_stages"].spec
     assert not spec.opts.get("firstresult")
     assert list(spec.argnames) == ["stages"]
-
-
-# --- Test 5: retired names stay retired ----------------------------------------
 
 
 # --- Test 6: the collect class is retired (#1094) ------------------------------
