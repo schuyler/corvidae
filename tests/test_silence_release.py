@@ -23,15 +23,6 @@ import pytest
 
 from _acp_extra import requires_acp
 
-try:  # the ACP transport needs the optional ``acp`` extra (#1281)
-    import acp as _acp  # noqa: F401
-except ModuleNotFoundError:  # pragma: no cover - exercised by venvs without it
-    _acp = None
-
-_acp_extra = pytest.mark.skipif(
-    _acp is None,
-    reason="optional acp extra not installed; the ACP transport cannot be imported",
-)
 from helpers import build_plugin_and_channel, drain, sent_texts
 from llm_response_fixtures import _make_text_response
 
