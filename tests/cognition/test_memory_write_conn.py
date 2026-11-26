@@ -486,6 +486,33 @@ class TestWriteConnectionLifecycle:
         plugin = memory_module.MemoryPlugin()
         assert plugin._busy_timeout_ms == DEFAULT_BUSY_TIMEOUT_MS
 
+    async def test_a_busy_write_inside_the_section_logs_once(
+        self, tmp_path, caplog
+    ):
+        """A give-up in the body is the same event, and the same log line covers it.
+
+        ``_write_txn``'s rollback clause wraps ``yield conn``, so an
+        ``OperationalError`` raised by one of the caller's own statements reaches
+        the same handler as a blocked COMMIT. Pinned here because a reviewer read
+        the code as reporting only BEGIN and COMMIT.
+        """
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 4321}}
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=config, db_path=str(tmp_path / "sessions.db")
+        )
+        await memory._write_conn()
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            with pytest.raises(sqlite3.OperationalError):
+                async with memory._write_txn():
+                    raise sqlite3.OperationalError("database is locked")
+        texts = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "stayed locked" in r.getMessage()
+        ]
+        assert len(texts) == 1, texts
+        assert "4321" in texts[0], texts[0]
+        await stop(memory, db)
+
     async def test_a_busy_commit_logs_the_give_up_once(
         self, tmp_path, caplog, monkeypatch
     ):
