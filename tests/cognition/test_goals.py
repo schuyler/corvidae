@@ -1055,3 +1055,29 @@ async def test_a_row_retired_before_the_fix_is_still_off_the_board(env):
     assert "already retired" in updated
     (text,) = (await rows(env, "SELECT text FROM goals WHERE id = 1"))[0]
     assert text == "An old goal retired before the fix"
+
+
+async def test_set_goal_status_on_a_just_retired_goal_leaves_no_transaction_open(
+    env, monkeypatch
+):
+    """The retired-between-read-and-write branch closes its transaction (#1211).
+
+    The zero-row UPDATE still opens an implicit write transaction on the
+    shared persistence connection; returning without ending it leaves the
+    write lock held until some other plugin happens to commit.
+    """
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("soon retired", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    # Read the goal while it is open, then retire it underneath the tool.
+    open_goal = await env.goals._get(env.db, gid)
+    await env.db.execute("UPDATE goals SET retired_at = ? WHERE id = ?", ("2026-01-01", gid))
+    await env.db.commit()
+
+    async def stale_get(db, goal_id):
+        return open_goal
+
+    monkeypatch.setattr(env.goals, "_get", stale_get)
+    result = await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
+    assert "was retired just now" in result
+    assert not env.db.in_transaction
