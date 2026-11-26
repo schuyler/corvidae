@@ -1419,6 +1419,12 @@ class SignalPlugin(TransportPlugin):
                 logger.warning("signal: failed to deliver message: %s", exc, exc_info=True)
 
     @hookimpl
+    async def on_turn_ended_without_final(self, channel: Channel, trace_id: str | None) -> None:
+        """Release this channel's typing slots when a turn ends with no final
+        (#424): an admitted message whose turn dies before a response would
+        otherwise leave the indicator refreshing until later traffic."""
+        await self._release_all(channel)
+
     async def on_agent_response(
         self,
         channel,

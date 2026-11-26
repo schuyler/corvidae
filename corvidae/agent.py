@@ -1686,6 +1686,20 @@ class Agent(CorvidaePlugin):
                 reset_attribution(attribution_token)
         finally:
             self._note_settled(channel)
+            # A turn that ends with no final leaves any transport-side
+            # typing indicator owed forever; tell the hooks the turn is
+            # over and nothing will answer it (#424).
+            if item.annotations is None or not item.annotations.get("_final_sent"):
+                try:
+                    await self.pm.ahook.on_turn_ended_without_final(
+                        channel=channel, trace_id=item.trace_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "on_turn_ended_without_final hook failed on channel %s "
+                        "(trace_id %s)", channel.id, item.trace_id, exc_info=True,
+                        extra={"channel": channel.id, "trace_id": item.trace_id},
+                    )
 
     async def _append_and_persist_message(
         self,
@@ -2028,6 +2042,11 @@ class Agent(CorvidaePlugin):
             # 8. Append assistant message and fire persistence event, attaching
             # the resolved rowid to the window copy (same rule as step 4). A
             # vetoed final persists as UNSENT: in the window, never sent.
+            # This turn produced a final, sent or unsent; the response
+            # hooks release the transport's typing slot on it, so the
+            # turn-end observation below must not fire too (#424).
+            if item.annotations is not None:
+                item.annotations["_final_sent"] = True
             message_type = MessageType.UNSENT if unsent else MessageType.MESSAGE
             conv.append(assistant_message, message_type)
             assistant_in_window = conv.messages[-1]
