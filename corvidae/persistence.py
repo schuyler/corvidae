@@ -59,8 +59,13 @@ def busy_timeout_ms_from_config(config: dict) -> int:
         # bool first: True is an int subclass, and True is not a timeout.
         value = None
     elif isinstance(raw, str):
-        text = raw.strip()
-        value = int(text) if text.lstrip("+-").isdigit() else None
+        # Let int() decide: str.isdigit() is true for "²", and lstrip("+-")
+        # accepts "++5"; both then raise ValueError inside us, and this runs
+        # in on_start with no caller to catch it.
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = None
     else:
         value = raw
     if value is None or not low <= value <= high:
