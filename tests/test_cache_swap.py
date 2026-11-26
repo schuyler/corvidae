@@ -687,9 +687,9 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
         # 1480: one 1000-token turn plus the longest tail it will try, which is
         # USER_WORDS + ASSISTANT_WORDS + USER_WORDS = 480 words counted at one
         # token each (the search's upper bound is exclusive). So each target sits
-        # a measured distance from the guard's 1% edge, and `reached_expected`
-        # below re-asserts that landing every run - if the builder or the
-        # constants move, this comment is checked, not trusted.
+        # a measured distance from the guard's 1% edge. What the run checks is the
+        # landing itself, via `reached_expected`; if it ever moves, revisit the
+        # four distances below rather than trusting the arithmetic here.
         (1488, False),   # 1480 reached: 0.54% short -> accept
         (1494, False),   # 0.94% short -> accept; a 0.9% guard would reject this
         (1495, True),    # 1.003% short -> reject; an 1.1% guard would accept it
@@ -705,8 +705,11 @@ def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_out
     not the size it claims to have measured; rejecting an in-tolerance prompt
     would make the probe unable to size itself at all. `count_tokens` is a
     parameter, so the test injects a counter coarser than the guard allows, which
-    is what makes the shortfall controllable: with a real tokenizer the tail
-    moves by about a token and every target would land inside 1%.
+    is what makes the shortfall controllable. Rationale for the injection, not a
+    claim this test measures: the production counter renders the prompt and asks
+    the server to tokenize it, so a one-word tail change moves it by roughly a
+    token and every target above would land inside 1% - there would be no
+    quantization left to place a boundary with.
     """
     reached_expected = 1480
 
@@ -716,8 +719,8 @@ def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_out
 
     def landing_check(got):
         assert got == reached_expected, (
-            f"the search landed at {got}, not {reached_expected}: the fixture "
-            "moved, so the distances in the parametrize comment are stale"
+            f"the search landed at {got}, not {reached_expected}: the fixture or "
+            "the search moved, so the distances in the parametrize comment are stale"
         )
 
     if not expect_raise:
@@ -743,17 +746,18 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     The summary turn is a user message, so a tail beginning on a user message
     puts two user turns adjacent and the server sees a malformed conversation.
     0.32 on this fixture is the variant that reaches the guard. Scope note on the
-    `raw_keep` assertion below: it restates production's keep computation locally,
-    which catches *fixture* drift (a builder or constant change that stops the
-    fixture landing on a user turn) and cannot catch a production change to the
-    ratio, rounding, or whether the system turn counts - those leave this local
-    formula untouched. And the length assertion at the end does not close that
-    hole either: a production change that shifts the kept count by one can land
-    the tail on an assistant turn by itself, so the guard never runs, yet
-    `len(out) - 2` still equals this local `raw_keep - 1`. Guard coverage here
-    therefore rests on the deleted-loop mutation, not on any assertion in the
-    file; if a future change wants that pinned from inside the test, it needs a
-    production helper for the keep computation to compare against.
+    `landed == "user"` assertion below, which uses a local restatement of
+    production's keep computation: it catches *fixture* drift (a builder or
+    constant change that stops the fixture landing on a user turn) and cannot
+    catch production changing its ratio, rounding, or whether the system turn
+    counts - those leave the local formula untouched. The length assertion at the
+    end does not close that hole either: a production change that shifts the kept
+    count by one can land the tail on an assistant turn by itself, so the guard
+    never runs, yet `len(out) - 2` still equals this local `raw_keep - 1`. So no
+    assertion here proves the guard loop ran; the deleted-loop mutation shows this
+    fixture is sensitive to removing it, which is a weaker claim. Pinning "the
+    guard ran" from inside the test would need production to expose its keep
+    computation for comparison.
     """
     messages = build_messages("guard-b", 41, USER_WORDS)
     turns = messages[1:]
@@ -770,7 +774,8 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     assert out[2]["role"] == "assistant", "tail must not start on a user turn"
     roles = [m["role"] for m in out[1:]]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
-    # Exactly one step back. This catches over-dropping - a guard that gave up
-    # two or more messages would still alternate and pass the role checks. A
-    # guard that dropped the entire tail would fail earlier, on out[2].
+    # Exactly one step back. Over-drops that happen to preserve alternation (an
+    # odd number of extra steps) can only be caught here; an even number would
+    # land the tail back on a user turn and fail the role checks above, and
+    # dropping the entire tail fails earlier still, on the out[2] access.
     assert len(out) - 2 == raw_keep - 1, f"kept {len(out) - 2}, expected {raw_keep - 1}"
