@@ -634,6 +634,37 @@ async def test_a_session_open_notification_is_quiet(tmp_path, caplog):
         await sidecar.stop()
 
 
+async def test_a_failed_session_marker_warns_even_though_the_link_is_fine(tmp_path, caplog):
+    """#1256: the sidecar's marker is the durable record, and a failed one is
+    the next start reading the wrong state. It must not be an INFO line."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await plugin._on_notification(
+                "session",
+                {
+                    "linked": True,
+                    "reason": "open",
+                    "marker": "failed",
+                    "marker_error": "EACCES: permission denied",
+                },
+            )
+        [line] = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "session marker" in r.getMessage()
+        ]
+        assert "not written" in line
+        assert "EACCES" in line
+        # The link itself is still recorded as open.
+        assert plugin._session_state == "open"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
 async def test_a_string_error_code_is_not_fatal(tmp_path, caplog):
     """A filesystem error's string code must not end the read loop (#1248 review)."""
     sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
