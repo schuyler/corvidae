@@ -12,7 +12,12 @@ import pytest
 
 try:  # the extra pins agent-client-protocol>=0.12.1,<0.13
     import acp as _acp  # noqa: F401
-except ModuleNotFoundError:  # pragma: no cover - the acp-less venv
+except ModuleNotFoundError as exc:  # pragma: no cover - the acp-less venv
+    # Only a missing ``acp`` means "extra not installed". A present-but-broken
+    # acp raises ModuleNotFoundError for one of *its* imports, and swallowing
+    # that would skip these tests while reporting a reason that is false.
+    if exc.name != "acp":
+        raise
     _acp = None
 
 requires_acp = pytest.mark.skipif(
