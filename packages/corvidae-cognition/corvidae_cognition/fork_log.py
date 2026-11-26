@@ -18,6 +18,7 @@ fixed order and never drops a row.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -153,6 +154,11 @@ class ForkLog:
         #: a hole the queries cannot see, so the caller escalates it.
         self.write_failures = 0
         self._db: aiosqlite.Connection | None = None
+        #: Held by every write from its first statement to its commit or
+        #: rollback. Writers share one connection, so without it one call's
+        #: rollback would discard another call's uncommitted rows, and one
+        #: call's commit would publish another's half-written record (#1211).
+        self._write_lock = asyncio.Lock()
 
     async def open(self) -> None:
         if self._db is not None:
@@ -229,12 +235,19 @@ class ForkLog:
         """Store rendered text once, by content hash; returns the hash."""
         sha = hashlib.sha256(text.encode()).hexdigest()
         db = await self._conn()
-        await db.execute(
-            "INSERT OR IGNORE INTO fork_block (sha256, bytes, created_at, text)"
-            " VALUES (?, ?, ?, ?)",
-            (sha, len(text), time.time(), zlib.compress(text.encode(), 6)),
-        )
-        await db.commit()
+        async with self._write_lock:
+            try:
+                await db.execute(
+                    "INSERT OR IGNORE INTO fork_block (sha256, bytes, created_at, text)"
+                    " VALUES (?, ?, ?, ?)",
+                    (sha, len(text), time.time(), zlib.compress(text.encode(), 6)),
+                )
+                await db.commit()
+            except BaseException:
+                # Same reason as _insert_fork: a cancelled store must not
+                # leave its transaction holding the write lock (#1211).
+                await db.rollback()
+                raise
         return sha
 
     async def read_block(self, sha: str) -> str | None:
@@ -298,54 +311,44 @@ class ForkLog:
         # row instead of letting an empty chain look like an empty prompt.
         reconstructable = 0 if digests is None else 1
         first, last = (None, None) if window is None else window
-        try:
-            return await self._insert_fork(
-                db,
-                (
-                    time.time(),
-                    stage,
-                    point,
-                    channel_id,
-                    trace_id,
-                    lens_id,
-                    profile,
-                    model,
-                    question_sha256(question),
-                    question,
-                    instruction,
-                    first,
-                    last,
-                    cut,
-                    prompt_sha256(messages),
-                    len(messages),
-                    renderer_sha,
-                    _dumps(list(findings) if findings is not None else None),
-                    verdict,
-                    None,
-                    latency_ms,
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    snapshot_sha,
-                    system_sha,
-                    chain_parent,
-                    chain_from,
-                    reconstructable,
-                ),
-                messages=messages,
-                digests=digests,
-                chain_parent=chain_parent,
-                chain_from=chain_from,
-            )
-        except BaseException:
-            # The INSERT opened a write transaction; anything that fails
-            # before the commit (a refused digest chain, a cancelled task)
-            # must end it here. Left open it holds the database's write lock
-            # until this connection's next commit, and every other writer on
-            # the file -- the conversation log included -- fails with
-            # "database is locked" meanwhile (#1211).
-            await db.rollback()
-            raise
+        return await self._insert_fork(
+            db,
+            (
+                time.time(),
+                stage,
+                point,
+                channel_id,
+                trace_id,
+                lens_id,
+                profile,
+                model,
+                question_sha256(question),
+                question,
+                instruction,
+                first,
+                last,
+                cut,
+                prompt_sha256(messages),
+                len(messages),
+                renderer_sha,
+                _dumps(list(findings) if findings is not None else None),
+                verdict,
+                None,
+                latency_ms,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                snapshot_sha,
+                system_sha,
+                chain_parent,
+                chain_from,
+                reconstructable,
+            ),
+            messages=messages,
+            digests=digests,
+            chain_parent=chain_parent,
+            chain_from=chain_from,
+        )
 
     async def _insert_fork(
         self,
@@ -358,30 +361,42 @@ class ForkLog:
         chain_from: int,
     ) -> int:
         """Insert one fork row and its digests, then commit; returns its id."""
-        cur = await db.execute(
-            """INSERT INTO fork_log (
-                ts, stage, point, channel_id, trace_id, lens_id, profile, model,
-                question_sha256, question_text, instruction,
-                window_first_rowid, window_last_rowid, window_cut,
-                prompt_sha256, block_count, renderer_sha, findings_json, verdict, label,
-                latency_ms, prompt_tokens, completion_tokens, cached_tokens,
-                snapshot_sha256, system_sha256, chain_parent, chain_from,
-                reconstructable
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            row,
-        )
-        fork_id = int(cur.lastrowid)
-        if digests:
-            digests = await self._check_digests(
-                messages, digests, chain_parent=chain_parent, chain_from=chain_from
-            )
-            await db.executemany(
-                "INSERT OR REPLACE INTO fork_digest (fork_id, ordinal, digest)"
-                " VALUES (?, ?, ?)",
-                [(fork_id, chain_from + i, d) for i, d in enumerate(digests)],
-            )
-        await db.commit()
-        return fork_id
+        async with self._write_lock:
+            try:
+                cur = await db.execute(
+                    """INSERT INTO fork_log (
+                        ts, stage, point, channel_id, trace_id, lens_id, profile, model,
+                        question_sha256, question_text, instruction,
+                        window_first_rowid, window_last_rowid, window_cut,
+                        prompt_sha256, block_count, renderer_sha, findings_json, verdict, label,
+                        latency_ms, prompt_tokens, completion_tokens, cached_tokens,
+                        snapshot_sha256, system_sha256, chain_parent, chain_from,
+                        reconstructable
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    row,
+                )
+                fork_id = int(cur.lastrowid)
+                if digests:
+                    digests = await self._check_digests(
+                        messages, digests, chain_parent=chain_parent, chain_from=chain_from
+                    )
+                    await db.executemany(
+                        "INSERT OR REPLACE INTO fork_digest (fork_id, ordinal, digest)"
+                        " VALUES (?, ?, ?)",
+                        [(fork_id, chain_from + i, d) for i, d in enumerate(digests)],
+                    )
+                await db.commit()
+                return fork_id
+            except BaseException:
+                # The INSERT opened a write transaction; anything that fails
+                # before the commit (a refused digest chain, a cancelled task)
+                # must end it here. Left open it holds the database's write
+                # lock until this connection's next commit, and every other
+                # writer on the file -- the conversation log included -- fails
+                # with "database is locked" meanwhile (#1211). The write lock
+                # keeps this rollback to this call's own rows.
+                await db.rollback()
+                raise
 
     async def _check_digests(
         self,
@@ -475,11 +490,12 @@ class ForkLog:
 
     async def mark_unreconstructable(self, fork_ids: Iterable[int]) -> None:
         db = await self._conn()
-        await db.executemany(
-            "UPDATE fork_log SET reconstructable = 0 WHERE id = ?",
-            [(i,) for i in fork_ids],
-        )
-        await db.commit()
+        async with self._write_lock:
+            await db.executemany(
+                "UPDATE fork_log SET reconstructable = 0 WHERE id = ?",
+                [(i,) for i in fork_ids],
+            )
+            await db.commit()
 
     async def set_label(
         self, fork_id: int, label: str, *, reason: str | None = None
@@ -490,11 +506,12 @@ class ForkLog:
                 f"fork_log: unknown label {label!r}; one of {sorted(LABELS)}"
             )
         db = await self._conn()
-        await db.execute(
-            "UPDATE fork_log SET label = ?, label_reason = ? WHERE id = ?",
-            (label, reason, fork_id),
-        )
-        await db.commit()
+        async with self._write_lock:
+            await db.execute(
+                "UPDATE fork_log SET label = ?, label_reason = ? WHERE id = ?",
+                (label, reason, fork_id),
+            )
+            await db.commit()
 
     async def counts(self, since: float | None = None) -> list[aiosqlite.Row]:
         """Rows per stage and label, with the oldest unlabeled row's age."""
@@ -533,50 +550,54 @@ class ForkLog:
         the remaining block text oldest-first. Labels, hashes, findings and
         question text stay.
         """
-        db = await self._conn()
-        used = await self.bytes_used()
-        if used <= max_bytes:
-            return 0
-        freed = 0
-        async with db.execute(
-            "SELECT id, snapshot_sha256 FROM fork_log"
-            " WHERE snapshot_sha256 IS NOT NULL ORDER BY ts"
-        ) as cur:
-            snapshots = list(await cur.fetchall())
-        for row in snapshots:
+        # One lock for the whole pass: _drop_block writes on the shared
+        # connection too and must not interleave with a record's rollback.
+        async with self._write_lock:
+            db = await self._conn()
+            used = await self.bytes_used()
             if used <= max_bytes:
-                break
-            dropped = await self._drop_block(row["snapshot_sha256"])
-            await db.execute(
-                "UPDATE fork_log SET snapshot_sha256 = NULL WHERE id = ?",
-                (row["id"],),
-            )
-            await db.commit()
-            used -= dropped
-            freed += dropped
-        if used > max_bytes:
+                return 0
+            freed = 0
             async with db.execute(
-                "SELECT sha256 FROM fork_block ORDER BY created_at"
+                "SELECT id, snapshot_sha256 FROM fork_log"
+                " WHERE snapshot_sha256 IS NOT NULL ORDER BY ts"
             ) as cur:
-                blocks = list(await cur.fetchall())
-            for row in blocks:
+                snapshots = list(await cur.fetchall())
+            for row in snapshots:
                 if used <= max_bytes:
                     break
-                dropped = await self._drop_block(row["sha256"])
-                if not dropped:
-                    continue
-                used -= dropped
-                freed += dropped
-                # Only the rows that named this text lose reconstructability.
+                dropped = await self._drop_block(row["snapshot_sha256"])
                 await db.execute(
-                    "UPDATE fork_log SET reconstructable = 0"
-                    " WHERE system_sha256 = ?",
-                    (row["sha256"],),
+                    "UPDATE fork_log SET snapshot_sha256 = NULL WHERE id = ?",
+                    (row["id"],),
                 )
                 await db.commit()
-        return freed
+                used -= dropped
+                freed += dropped
+            if used > max_bytes:
+                async with db.execute(
+                    "SELECT sha256 FROM fork_block ORDER BY created_at"
+                ) as cur:
+                    blocks = list(await cur.fetchall())
+                for row in blocks:
+                    if used <= max_bytes:
+                        break
+                    dropped = await self._drop_block(row["sha256"])
+                    if not dropped:
+                        continue
+                    used -= dropped
+                    freed += dropped
+                    # Only the rows that named this text lose reconstructability.
+                    await db.execute(
+                        "UPDATE fork_log SET reconstructable = 0"
+                        " WHERE system_sha256 = ?",
+                        (row["sha256"],),
+                    )
+                    await db.commit()
+            return freed
 
     async def _drop_block(self, sha: str) -> int:
+        """Delete one stored block; the caller holds ``_write_lock``."""
         db = await self._conn()
         async with db.execute(
             "SELECT bytes, text FROM fork_block WHERE sha256 = ?", (sha,)
