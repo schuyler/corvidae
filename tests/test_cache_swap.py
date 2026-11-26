@@ -683,19 +683,30 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
 def test_fit_messages_refuses_a_prompt_it_cannot_size_within_one_percent():
     """`fit_messages` must raise rather than return a mis-sized prompt.
 
-    `count_tokens` is a parameter, so the test supplies one coarser than 1% of
-    the target: a turn is worth 1000 tokens and the tail one token per word, so
-    the largest fit lands ~19 tokens short of 1500 - outside 1%, inside a wider
-    tolerance. Silently returning that would hand a run a prompt that is not the
-    size it claims to have measured.
+    Silently returning a short prompt would hand a run a conversation that is
+    not the size it claims to have measured. `count_tokens` is a parameter, so
+    the test supplies a counter coarser than the guard allows: a turn is worth
+    1000 "tokens" and a tail word one, which leaves the largest fit roughly 10%
+    short of the target. That margin is asserted below, not assumed - the gap
+    must stay wide of the 1% boundary (or fixture drift fails this test with the
+    guard working) and narrow of 50% (or widening the tolerance would still
+    raise, and the test would stop detecting that mutation).
     """
+    target = 1650
 
     def coarse(msgs):
         turns = (len(msgs) - 2) // 2
         return 1000 * turns + len(msgs[-1]["content"].split())
 
-    with pytest.raises(ValueError, match="outside 1%"):
-        fit_messages("guard-a", 1500, coarse)
+    with pytest.raises(ValueError, match="outside 1%") as exc:
+        fit_messages("guard-a", target, coarse)
+
+    reached = int(re.search(r"reached (\d+) tokens", str(exc.value)).group(1))
+    gap = (target - reached) / target
+    assert 0.05 < gap < 0.45, (
+        f"guard fired at {gap:.1%} of {target}: either the 1% boundary or the "
+        "wider-tolerance mutation no longer separates, revisit the fixture"
+    )
 
 
 def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
@@ -703,8 +714,11 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
 
     The summary turn is a user message, so a tail beginning on a user message
     puts two user turns adjacent and the server sees a malformed conversation.
-    0.32 on this fixture is the variant that reaches the guard; the assert below
-    fails loudly if the fixture stops doing so, rather than quietly passing.
+    0.32 on this fixture is the variant that reaches the guard. `raw_keep` below
+    deliberately restates production's keep computation instead of calling it: a
+    shared helper would make the assert tautological, so if production changes
+    its ratio, rounding, or whether the system turn counts, this assert trips and
+    says so instead of the test quietly checking the wrong index.
     """
     messages = build_messages("guard-b", 41, USER_WORDS)
     turns = messages[1:]
