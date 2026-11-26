@@ -824,3 +824,25 @@ class TestStaleArrival:
 
         held = store.held._next_turn[store.channel.id]
         assert [b.entries for b in held] == [["second"]]
+
+    async def test_a_newer_turn_replacing_an_older_one_says_it_is_newer(
+        self, store, H, caplog
+    ):
+        """The ordered case must not report "cannot be ordered" (#1292 review)."""
+        await store.held.hold_contribution(
+            store.channel,
+            H.Contribution("memory", ["the earlier turn's fact"]),
+            trace_id="17900000-aaaaaaaaaaaa",
+        )
+        with caplog.at_level(logging.WARNING):
+            await store.held.hold_contribution(
+                store.channel,
+                H.Contribution("memory", ["the later turn's fact"]),
+                trace_id="17a00000-bbbbbbbbbbbb",
+            )
+
+        held = store.held._next_turn[store.channel.id]
+        assert [b.entries for b in held] == [["the later turn's fact"]]
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("later turn" in w for w in warnings), warnings
+        assert not any("cannot be ordered" in w for w in warnings), warnings

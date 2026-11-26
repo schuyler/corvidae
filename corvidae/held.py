@@ -270,8 +270,19 @@ class HeldContext(CorvidaePlugin):
         # calling either batch stale (#1218 review).
         for old in same:
             held.remove(old)
+            # Two cases reach here, and the message must not blur them: the
+            # trace seconds ordered the turns and the incoming batch is the
+            # later one, or they could not be ordered at all (#1292 review).
+            ordered = (
+                incoming_second is not None
+                and (old_second := _trace_second(old.trace_id)) is not None
+                and incoming_second > old_second
+            )
             logger.warning(
-                "held: a %s contribution replaced %d held entr%s on channel %s "
+                "held: a newer %s contribution replaced %d held entr%s on channel %s "
+                "(it comes from a later turn); no action needed"
+                if ordered
+                else "held: a %s contribution replaced %d held entr%s on channel %s "
                 "(the two turns cannot be ordered, so the later arrival wins); "
                 "no action needed",
                 old.source, len(old.entries), "y" if len(old.entries) == 1 else "ies",
