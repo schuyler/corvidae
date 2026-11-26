@@ -619,3 +619,19 @@ async def test_the_failure_lines_name_the_channel(caplog, call, tool_fn, prefix)
     assert records[0].channel == "irc:#home"
 
 
+async def test_a_call_with_no_channel_omits_the_field_rather_than_logging_none(caplog):
+    """#397 R6: the degrade path leaves the key off, so "unattributed" is not
+    confused with a channel whose id is the string "None"."""
+    tool_fn = AsyncMock(return_value="ok")
+    call = _make_call("call_none", "my_tool", {})
+
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await dispatch_tool_call(call, {"my_tool": tool_fn}, channel=None)
+
+    dispatched = _tool_records(caplog, "tool call dispatched")[0]
+    # Not a name-is-gone check (#1238): `channel` is written by _attributed on
+    # the attributed path (corvidae/tool.py:511), so this pins the omit-vs-"None"
+    # contract on the unattributed one. Restored after the sweep deleted it.
+    assert not hasattr(dispatched, "channel")
+
+
