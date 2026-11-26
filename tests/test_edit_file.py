@@ -173,12 +173,63 @@ async def test_no_temporary_file_is_left_behind(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["notes.md"]
 
 
+async def test_a_write_between_the_read_and_the_replace_is_refused(tmp_path, monkeypatch):
+    """A writer landing after the read must not be silently overwritten (#1266)."""
+    path = tmp_path / "notes.md"
+    path.write_text("alpha\nbeta\n")
+
+    import corvidae.tools.files as files
+
+    real_chmod = files.os.chmod
+
+    def chmod_after_a_concurrent_write(tmp_path_from_tool, mode):
+        # Stands in for another writer: the file changes after edit_file read it
+        # and before it replaces it. chmod is the last step before the replace.
+        path.write_text("alpha\nbeta\ngamma\n")
+        real_chmod(tmp_path_from_tool, mode)
+
+    monkeypatch.setattr(files.os, "chmod", chmod_after_a_concurrent_write)
+
+    result = await edit_file(str(path), "alpha", "ALPHA")
+
+    assert result.startswith("Error:"), result
+    assert "changed while it was being edited" in result
+    assert str(path) in result
+    # The concurrent write is what survives, not the clamped edit.
+    assert path.read_text() == "alpha\nbeta\ngamma\n"
+
+
+async def test_a_same_length_write_between_the_read_and_the_replace_is_refused(
+    tmp_path, monkeypatch
+):
+    """Same size, same second: only comparing the bytes catches this one (#1283)."""
+    path = tmp_path / "notes.md"
+    path.write_text("alpha\n")
+
+    import corvidae.tools.files as files
+
+    real_chmod = files.os.chmod
+
+    def chmod_after_an_equal_length_write(tmp_path_from_tool, mode):
+        path.write_text("ALPHA\n")
+        real_chmod(tmp_path_from_tool, mode)
+
+    monkeypatch.setattr(files.os, "chmod", chmod_after_an_equal_length_write)
+
+    result = await edit_file(str(path), "alpha", "beta")
+
+    assert result.startswith("Error:"), result
+    assert "changed while it was being edited" in result
+    assert path.read_text() == "ALPHA\n"
+
+
 async def test_parallel_edits_of_one_file_do_not_collide(tmp_path):
     """A fixed ".name.edit-tmp" name lets two edits clobber each other (#1258).
 
-    Each edit may lose the race and report the passage as gone, which is
-    honest: what must not happen is a crash, a leftover temp file, or a file
-    that is not one of the outcomes of the edits that succeeded.
+    Each edit may lose the race and report the passage as gone, or be refused
+    because the file changed under it (#1266), which is honest: what must not
+    happen is a crash, a leftover temp file, or a file that is not one of the
+    outcomes of the edits that succeeded.
     """
     path = tmp_path / "notes.md"
     path.write_text("a\nb\nc\n")
@@ -189,7 +240,11 @@ async def test_parallel_edits_of_one_file_do_not_collide(tmp_path):
         edit_file(str(path), "c", "C"),
     )
 
-    assert all(r.startswith(("Edited", "Error: old_string was not found")) for r in results)
+    assert all(
+        r.startswith(("Edited", "Error: old_string was not found"))
+        or "changed while it was being edited" in r
+        for r in results
+    )
     assert [p.name for p in tmp_path.iterdir()] == ["notes.md"]
     final = path.read_text()
     assert final.count("a") <= 1 and final.count("b") <= 1 and final.count("c") <= 1

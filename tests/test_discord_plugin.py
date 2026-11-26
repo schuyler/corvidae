@@ -743,6 +743,9 @@ class TestInboundFiltering:
             assert "does not mention the bot" in drop.getMessage()
             assert getattr(drop, "channel") == f"discord:{CHAN_ID}"
             assert getattr(drop, "sender") == str(AUTH_ID)
+            # Not a name-is-gone check (#1238): discord.py:814 adds
+            # parent_channel only when the channel has a parent_id, so this
+            # pins the drop path's record shape. Restored after the sweep.
             assert not hasattr(drop, "parent_channel")
             # Nothing about this drop is announced: an INFO line per message
             # would swamp a busy channel, which is the whole point.

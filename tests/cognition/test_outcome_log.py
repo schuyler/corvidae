@@ -102,12 +102,6 @@ class TestRecords:
         ) as cursor:
             assert await cursor.fetchone() is None
 
-    def test_writer_api_is_gone(self):
-        from corvidae_cognition.outcome_log import OutcomeLogPlugin
-
-        for name in ("record_exchange", "update_exchange", "upsert_exchange"):
-            assert not hasattr(OutcomeLogPlugin, name), name
-
 
 class TestOwnRecords:
     async def test_admitted_then_persisted(self, file_db):

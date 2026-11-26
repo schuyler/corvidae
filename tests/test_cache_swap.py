@@ -8,6 +8,7 @@ import pytest
 
 from harness.cache_swap import (
     UNIT_GROUPS,
+    USER_WORDS,
     build_messages,
     check_single_slot,
     compacted_messages,
@@ -672,3 +673,112 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
     with pytest.raises(ValueError) as exc:
         parse_cache_ram(["--cache-ram"])
     assert "preset" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Guard coverage (#1275): the two branches that survived deletion in review
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target, expect_raise",
+    [
+        # The injected counter quantizes the largest fit the search can reach at
+        # 1480: one 1000-token turn plus the longest tail it will try, which is
+        # USER_WORDS + ASSISTANT_WORDS + USER_WORDS = 480 words counted at one
+        # token each (the search's upper bound is exclusive). So each target sits
+        # a measured distance from the guard's 1% edge. What the run checks is the
+        # landing itself, via `reached_expected`; if it ever moves, revisit the
+        # four distances below rather than trusting the arithmetic here.
+        (1488, False),   # 1480 reached: 0.54% short -> accept
+        (1494, False),   # 0.94% short -> accept; a 0.9% guard would reject this
+        (1495, True),    # 1.003% short -> reject; an 1.1% guard would accept it
+        (1650, True),    # 10.3% short -> reject
+    ],
+)
+def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_outside(
+    target, expect_raise
+):
+    """The guard in `fit_messages` is a threshold near 1%, not a decoration.
+
+    Silently returning a short prompt would hand a run a conversation that is
+    not the size it claims to have measured; rejecting an in-tolerance prompt
+    would make the probe unable to size itself at all. `count_tokens` is a
+    parameter, so the test injects a counter coarser than the guard allows, which
+    is what makes the shortfall controllable. Rationale for the injection, not a
+    claim this test measures: the production counter renders the prompt and asks
+    the server to tokenize it, so a one-word tail change moves it by roughly a
+    token and every target above would land inside 1% - there would be no
+    quantization left to place a boundary with.
+    """
+    reached_expected = 1480
+
+    def coarse(msgs):
+        turns = (len(msgs) - 2) // 2
+        return 1000 * turns + len(msgs[-1]["content"].split())
+
+    def landing_check(got):
+        assert got == reached_expected, (
+            f"the search landed at {got}, not {reached_expected}: the fixture or "
+            "the search moved, so the distances in the parametrize comment are stale"
+        )
+
+    if not expect_raise:
+        msgs = fit_messages("guard-a", target, coarse)
+        got = coarse(msgs)
+        landing_check(got)
+        assert abs(got - target) <= target * 0.01 + 1, (got, target)
+        return
+
+    with pytest.raises(ValueError, match="outside 1%") as exc:
+        fit_messages("guard-a", target, coarse)
+
+    m = re.search(r"reached (\d+) tokens", str(exc.value))
+    assert m is not None, f"guard raised the wrong thing: {exc.value!r}"
+    reached = int(m.group(1))
+    landing_check(reached)
+    assert 0.01 < (target - reached) / target < 0.45, (reached, target)
+
+
+def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
+    """A retention that lands the tail on a user turn must be stepped back.
+
+    The summary turn is a user message, so a tail beginning on a user message
+    puts two user turns adjacent and the server sees a malformed conversation.
+    0.32 on this fixture is the variant that reaches the guard. Scope note on the
+    `landed == "user"` assertion below, which uses a local restatement of
+    production's keep computation: it catches *fixture* drift (a builder or
+    constant change that stops the fixture landing on a user turn) and cannot
+    catch production changing its ratio, rounding, or whether the system turn
+    counts - those leave the local formula untouched. The length assertion at the
+    end does not close that hole either: a production change that shifts the kept
+    count by one can land the tail on an assistant turn by itself, so the guard
+    never runs, yet `len(out) - 2` still equals this local `raw_keep - 1`. So no
+    assertion here proves the guard loop ran; the deleted-loop mutation shows this
+    fixture is sensitive to removing it, which is a weaker claim. Pinning "the
+    guard ran" from inside the test would need production to expose its keep
+    computation for comparison.
+    """
+    messages = build_messages("guard-b", 41, USER_WORDS)
+    turns = messages[1:]
+    raw_keep = round(0.32 * len(turns))
+    landed = turns[len(turns) - raw_keep]["role"]
+    assert landed == "user", (
+        f"fixture no longer exercises the guard: raw keep {raw_keep} lands on "
+        f"a {landed} turn"
+    )
+
+    out = compacted_messages(messages, 0.32, 40, "guard-b")
+
+    assert out[1]["role"] == "user" and out[1]["content"].startswith("Summary")
+    assert out[2]["role"] == "assistant", "tail must not start on a user turn"
+    roles = [m["role"] for m in out[1:]]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    # Exactly one step back. Over-dropping by an even number of EXTRA messages
+    # lands the tail back on an assistant turn, so alternation still holds and
+    # only this length check catches it; an odd number of extra messages lands it
+    # on a user turn, which the role checks above already fail. Dropping the whole
+    # tail fails earlier still, on the out[2] access. Verified by mutating the
+    # step: `keep -= 3` reaches here as a length failure, `keep -= 2` walks to an
+    # empty tail and dies on out[2].
+    assert len(out) - 2 == raw_keep - 1, f"kept {len(out) - 2}, expected {raw_keep - 1}"

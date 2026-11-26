@@ -68,12 +68,10 @@ class TestVeto:
         from corvidae_cognition.silence import (
             NO_REPLY,
             REGISTER_FRAGMENT,
-            SilencePlugin,
         )
 
         assert NO_REPLY == "NO_REPLY"
         assert NO_REPLY in REGISTER_FRAGMENT
-        assert not hasattr(SilencePlugin, "register_fragment")
 
     @pytest.mark.parametrize(
         "text",
