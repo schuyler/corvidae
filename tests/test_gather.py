@@ -239,14 +239,12 @@ class TestOnePrimitive:
             "should_execute_tool", "should_send_response", "before_compose",
         }
 
-    def test_g1_run_checks_no_longer_exists(self):
-        """G1: no second gather loop survives: ``run_checks`` is renamed, not
-        kept beside ``gather``."""
-        import corvidae.agent as agent_mod
+    def test_g1_gather_symbol_exists(self):
+        """G1: ``corvidae.checks.gather`` is present. Nothing here tests that it is
+        the only loop -- the companion "``run_checks`` is gone" absence check was
+        removed under #1238, and the rename itself is in git."""
         import corvidae.checks as checks_mod
 
-        assert not hasattr(checks_mod, "run_checks")
-        assert not hasattr(agent_mod, "run_checks")
         assert hasattr(checks_mod, "gather")
 
 

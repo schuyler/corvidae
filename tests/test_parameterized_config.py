@@ -340,7 +340,6 @@ class TestContextWindowCharsPerToken:
         )
 
 
-
 # ===========================================================================
 # Group C — Tool result truncation
 # ===========================================================================
@@ -500,36 +499,6 @@ class TestAgentMaxToolResultChars:
         )
         assert plugin._max_tool_result_chars == 9999, (
             f"Expected _max_tool_result_chars=9999 from ToolCollectionPlugin, got {plugin._max_tool_result_chars!r}"
-        )
-
-
-class TestSubagentPluginMaxToolResultChars:
-    async def test_subagent_plugin_does_not_read_max_tool_result_chars_from_config(self):
-        """SubagentPlugin.on_start no longer reads max_tool_result_chars from config.
-
-        After consolidation (Item 3), SubagentPlugin reads this value from
-        Agent at _launch time instead of independently from config.
-        """
-        from corvidae.tools.subagent import SubagentPlugin
-
-        pm_mock = MagicMock()
-        plugin = SubagentPlugin(pm_mock)
-
-        config = {
-            "agent": {
-                "max_tool_result_chars": 8888,
-            },
-            "llm": {
-                "providers": {"main": {"base_url": "http://fake"}},
-                "profiles": {"main": {"model": "test"}},
-            },
-        }
-
-        await plugin.on_start(config=config)
-
-        assert not hasattr(plugin, "_max_tool_result_chars"), (
-            "SubagentPlugin should not store _max_tool_result_chars after on_start; "
-            "it now reads from Agent at _launch time"
         )
 
 

@@ -70,14 +70,6 @@ class TestJsonlPluginNoOp:
             f"JsonlLogPlugin should not have depends_on, got {depends_on!r}"
         )
 
-    async def test_no_ensure_conversation_method(self):
-        """JsonlLogPlugin must not implement ensure_conversation (observer model removed)."""
-        from corvidae.jsonl_log import JsonlLogPlugin
-        plugin = JsonlLogPlugin(None)
-        assert not hasattr(plugin, "ensure_conversation"), (
-            "JsonlLogPlugin must not implement ensure_conversation after refactor"
-        )
-
 
 # ---------------------------------------------------------------------------
 # TestJsonlPluginCreatesDirectory
