@@ -13,14 +13,17 @@ from importlib.metadata import entry_points
 from unittest.mock import AsyncMock
 
 import pytest
+from _optional_extras import optional_extra
 from corvidae_cognition.goals import GoalsSpec
-from cross_channel_send import CrossChannelSendPlugin
+
+with optional_extra("cross_channel_send"):
+    from cross_channel_send import CrossChannelSendPlugin
+
+from goals_notify import GoalsNotifyPlugin
 
 from corvidae.attribution import _attribution
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
-
-from goals_notify import GoalsNotifyPlugin
 
 ORIGIN = "signal:alice"
 ACTOR = "irc:#ops"

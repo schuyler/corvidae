@@ -14,12 +14,14 @@ import json
 import logging
 
 import pytest
+from _optional_extras import optional_extra
 
 from corvidae.channel import ChannelRegistry
-from corvidae.hooks import hookimpl
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
-from corvidae.hooks import create_plugin_manager
-from corvidae_whatsapp import WhatsAppPlugin
+
+with optional_extra("corvidae_whatsapp"):
+    from corvidae_whatsapp import WhatsAppPlugin
 
 pytestmark = pytest.mark.timeout(30)
 

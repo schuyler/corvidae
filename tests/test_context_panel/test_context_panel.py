@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from context_panel import ContextPanelPlugin
+from _optional_extras import optional_extra
+
+with optional_extra("context_panel"):
+    from context_panel import ContextPanelPlugin
 
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, ReasoningHistory
@@ -20,7 +23,13 @@ from corvidae.hooks import TransportPlugin, create_plugin_manager, install_plugi
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.thinking import apply_reasoning_history
 from corvidae.tool_policy import ToolView
-from tests.test_web_plugin import TOKEN, AgentStub, _no_env_token, make_env, parse_side_body  # noqa: F401
+from tests.test_web_plugin import (  # noqa: F401
+    TOKEN,
+    AgentStub,
+    _no_env_token,
+    make_env,
+    parse_side_body,
+)
 
 PANEL = "/panel/context_panel"
 ENABLED = {"context_panel": {}}

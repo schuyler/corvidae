@@ -1,0 +1,97 @@
+"""Skip markers for tests that need an optional extra (#1287).
+
+The acp case (#1281, `tests/_acp_extra.py`) established the discipline; this
+module names it once so the extras whose *own plugin package* is the optional
+import get the same care instead of a marker that swallows whatever import error
+happens to arrive.
+
+Why the shape differs from `tests/_acp_extra.py`. The acp tests import the
+third-party `acp` inside functions, so a module-level `pytestmark =
+requires_acp` is enough to stand them down. The modules here import the plugin
+package at module scope (`from context_panel import ContextPanelPlugin`), which
+runs during collection, before any mark on the module can be consulted. A skip
+therefore has to happen *before that import line executes*, hence the guard:
+
+    from _optional_extras import optional_extra
+
+    with optional_extra("context_panel"):
+        from context_panel import ContextPanelPlugin
+
+`with` is not decoration: a `with` (or `try`) block is what keeps the guarded
+import legal under ruff's E402 while a bare statement before it would not be.
+The name binds at module scope as usual, so the rest of the file is unchanged.
+
+The distinction the whole module exists to keep: an extra that is **not
+installed** versus a package that is **present but broken or shadowed**. Skipping
+the first is correct — an environment gap is not a code regression. Skipping the
+second hides a real failure behind a green line, which is worse than the
+collection error it replaced. So the probe acts only on a `ModuleNotFoundError`
+naming the probed module; a missing transitive dependency propagates with its own
+`name`, and so does `ImportError: cannot import name … (unknown location)`, the
+signature of a directory on `pythonpath` shadowing the real package as a
+namespace package.
+"""
+
+from __future__ import annotations
+
+import importlib
+from contextlib import contextmanager
+from typing import Iterator
+
+import pytest
+
+#: Skip lines name the extra to install, so a green skip stays actionable.
+_REASONS = {
+    "cross_channel_send": "optional cross_channel_send extra not installed",
+    "corvidae_whatsapp": "optional corvidae_whatsapp extra not installed",
+    "context_panel": "optional context_panel extra not installed",
+    "webhook_notify": "optional webhook_notify extra not installed",
+    "github_webhook": "optional github_webhook extra not installed",
+}
+
+
+def _reason(module: str) -> str:
+    return (
+        f"{_REASONS.get(module, f'optional {module} extra not installed')}; "
+        "the plugin cannot be imported"
+    )
+
+
+def extra_importable(module: str) -> bool:
+    """True when ``module`` imports, False only when it is genuinely absent.
+
+    Raises whatever the import raises for every other failure, because a
+    half-installed or shadowed package must not be reported as "not installed".
+    """
+    try:
+        importlib.import_module(module)
+    except ModuleNotFoundError as exc:
+        # Only the module named in the probe means "extra not installed". A
+        # present-but-broken package raises ModuleNotFoundError for one of *its*
+        # imports, and swallowing that would skip these tests for a false reason.
+        if exc.name != module:
+            raise
+        return False
+    return True
+
+
+@contextmanager
+def optional_extra(module: str) -> Iterator[None]:
+    """Guard the module-scope import of ``module``; skip the module if absent.
+
+    The skip is raised before the guarded import runs, which is the only moment
+    that matters for a module-scope import. Any import failure other than a
+    missing ``module`` propagates from the import itself, untouched.
+    """
+    if not extra_importable(module):
+        pytest.skip(_reason(module), allow_module_level=True)
+    yield
+
+
+def requires_extra(module: str):
+    """A ``skipif`` marker for tests whose extra is imported inside a function.
+
+    Use `optional_extra` instead when the plugin package is imported at module
+    scope; a mark cannot stand down an import that already failed.
+    """
+    return pytest.mark.skipif(not extra_importable(module), reason=_reason(module))

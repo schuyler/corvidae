@@ -12,8 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from _optional_extras import optional_extra
 from helpers import add_kernel_held
-from cross_channel_send import CrossChannelSendPlugin
+
+with optional_extra("cross_channel_send"):
+    from cross_channel_send import CrossChannelSendPlugin
 from llm_response_fixtures import _make_text_response
 
 from corvidae.agent import Agent
@@ -567,8 +570,9 @@ class TestSameChannelGuard:
 
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
 
-        from corvidae.attribution import _attribution
         from unittest.mock import patch
+
+        from corvidae.attribution import _attribution
 
         _attribution.set(
             {
