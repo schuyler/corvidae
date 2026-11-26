@@ -774,8 +774,11 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     assert out[2]["role"] == "assistant", "tail must not start on a user turn"
     roles = [m["role"] for m in out[1:]]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
-    # Exactly one step back. Over-drops that happen to preserve alternation (an
-    # odd number of extra steps) can only be caught here; an even number would
-    # land the tail back on a user turn and fail the role checks above, and
-    # dropping the entire tail fails earlier still, on the out[2] access.
+    # Exactly one step back. Over-dropping by an even number of EXTRA messages
+    # lands the tail back on an assistant turn, so alternation still holds and
+    # only this length check catches it; an odd number of extra messages lands it
+    # on a user turn, which the role checks above already fail. Dropping the whole
+    # tail fails earlier still, on the out[2] access. Verified by mutating the
+    # step: `keep -= 3` reaches here as a length failure, `keep -= 2` walks to an
+    # empty tail and dies on out[2].
     assert len(out) - 2 == raw_keep - 1, f"kept {len(out) - 2}, expected {raw_keep - 1}"
