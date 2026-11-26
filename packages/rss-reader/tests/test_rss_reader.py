@@ -179,13 +179,13 @@ def test_load_seen_existing(tmp_path: Path):
     }))
     plugin._state_path = state_file
     seen = plugin._load_seen()
-    assert seen == {"https://example.com/feed": ["guid1", "guid2"]}
+    assert seen == {"https://example.com/feed": {"seen": ["guid1", "guid2"], "watermark": None}}
 
 
 def test_save_and_load_roundtrip(tmp_path: Path):
     plugin = _make_plugin({})
     plugin._state_path = tmp_path / "seen.json"
-    seen = {"https://example.com/feed": ["guid1", "guid2", "guid3"]}
+    seen = {"https://example.com/feed": {"seen": ["guid1", "guid2", "guid3"], "watermark": None}}
     plugin._save_seen(seen)
     loaded = plugin._load_seen()
     assert loaded == seen
@@ -194,7 +194,7 @@ def test_save_and_load_roundtrip(tmp_path: Path):
 def test_save_seen_creates_parent_dir(tmp_path: Path):
     plugin = _make_plugin({})
     plugin._state_path = tmp_path / "nested" / "dir" / "seen.json"
-    plugin._save_seen({"url": {"guid"}})
+    plugin._save_seen({"url": {"seen": ["guid"], "watermark": None}})
     assert plugin._state_path.exists()
 
 
@@ -351,8 +351,8 @@ class TestSecondPoll:
 
         # State file should now have all 3 guids (2 old + 1 new).
         saved = json.loads(plugin._state_path.read_text())
-        assert "guid-3" in saved["https://example.com/feed.xml"]
-        assert "guid-1" in saved["https://example.com/feed.xml"]
+        assert "guid-3" in saved["https://example.com/feed.xml"]["seen"]
+        assert "guid-1" in saved["https://example.com/feed.xml"]["seen"]
 
 
 # --- Config validation tests (call on_init, assert message names key/value/form) ---
@@ -606,13 +606,13 @@ async def test_second_poll_delivers_new_items(tmp_path: Path):
             # First poll
             await plugin._poll_once()
             seen_after_first = plugin._load_seen()
-            total_first = sum(len(v) for v in seen_after_first.values())
+            total_first = sum(len(v["seen"]) for v in seen_after_first.values())
             assert total_first == 2
 
             # Second poll: should deliver only the new item
             await plugin._poll_once()
             seen_after_second = plugin._load_seen()
-            total_second = sum(len(v) for v in seen_after_second.values())
+            total_second = sum(len(v["seen"]) for v in seen_after_second.values())
             assert total_second == 3
 
 
@@ -644,13 +644,13 @@ async def test_items_beyond_cap_arrive_next_cycle(tmp_path: Path):
             # First poll: should deliver only 2 (cap)
             await plugin._poll_once()
             seen_after_first = plugin._load_seen()
-            total_first = sum(len(v) for v in seen_after_first.values())
+            total_first = sum(len(v["seen"]) for v in seen_after_first.values())
             assert total_first == 2
 
             # Second poll: should deliver the remaining 2
             await plugin._poll_once()
             seen_after_second = plugin._load_seen()
-            total_second = sum(len(v) for v in seen_after_second.values())
+            total_second = sum(len(v["seen"]) for v in seen_after_second.values())
             assert total_second == 4
 
 
@@ -764,4 +764,247 @@ async def test_poll_once_does_not_mark_seen_when_an_on_notify_impl_raises(tmp_pa
 
     # Neither item was delivered, so neither guid may be recorded as seen.
     seen = plugin._load_seen()
-    assert seen.get("https://example.com/feed", []) == []
+    assert seen.get("https://example.com/feed", {"seen": []})["seen"] == []
+
+
+# --- Watermark tests (#1280): never deliver an item older than the newest delivered item ---
+
+from rss_reader import _parse_item_date
+
+
+def _dated_feed(entries):
+    """entries: list of (num, pubdate_or_None) -> RSS bytes, order preserved."""
+    items = []
+    for num, pub in entries:
+        p = f"<pubDate>{pub}</pubDate>" if pub else ""
+        items.append(
+            '<item><title>Post %d</title><link>https://example.com/%d</link>'
+            '<guid>https://example.com/%d</guid>%s<description>s</description></item>'
+            % (num, num, num, p)
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+        '<title>T</title><link>https://example.com</link>' + ''.join(items) +
+        '</channel></rss>'
+    ).encode()
+
+
+def _mock_http(content):
+    mock_resp = MagicMock()
+    mock_resp.content = content
+    mock_resp.raise_for_status = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client
+
+
+def _watermark_plugin(tmp_path, state=None, max_items=10):
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1555123457",)
+    plugin._max_items = max_items
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 60
+    if state is not None:
+        (tmp_path / "seen.json").write_text(json.dumps(state))
+    return plugin
+
+
+def test_parse_item_date_rfc2822_iso_and_none():
+    d1 = _parse_item_date("Tue, 25 Nov 2026 20:00:00 GMT")
+    d2 = _parse_item_date("2026-11-25T20:00:00Z")
+    d3 = _parse_item_date("2026-11-25T20:00:00+00:00")
+    assert d1 is not None and d1 == d2 == d3
+    assert d1.tzinfo is not None
+    assert _parse_item_date("garbage") is None
+    assert _parse_item_date("") is None
+
+
+@pytest.mark.asyncio
+async def test_watermark_skips_older_dated_items_even_when_unseen(tmp_path):
+    plugin = _watermark_plugin(tmp_path, state={
+        "https://example.com/feed": {
+            "seen": ["https://example.com/2"],
+            "watermark": "2026-11-20T00:00:00+00:00",
+        }
+    })
+    content = _dated_feed([(3, "Mon, 10 Nov 2026 09:00:00 GMT")])  # unseen, older
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    assert not plugin._spill.notify.called
+
+
+@pytest.mark.asyncio
+async def test_watermark_advances_only_after_delivery(tmp_path):
+    feed = _dated_feed([
+        (3, "Wed, 18 Nov 2026 00:00:00 GMT"),
+        (2, "Mon, 16 Nov 2026 00:00:00 GMT"),
+        (1, "Sat, 14 Nov 2026 00:00:00 GMT"),
+    ])
+    plugin = _watermark_plugin(tmp_path, max_items=1)
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(feed)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.call_count == 1
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    st = saved["https://example.com/feed"]
+    assert st["watermark"] == "2026-11-18T00:00:00+00:00"
+    plugin._spill.notify.reset_mock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(feed)):
+        await plugin._poll_once()
+    assert not plugin._spill.notify.called  # post #2,3 are older than the watermark
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    assert saved["https://example.com/feed"]["watermark"] == "2026-11-18T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_undated_items_stay_governed_by_seen_ledger(tmp_path):
+    plugin = _watermark_plugin(tmp_path, state={
+        "https://example.com/feed": {
+            "seen": [], "watermark": "2026-11-20T00:00:00+00:00",
+        }
+    })
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(RSS_SAMPLE)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.call_count == 2
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    assert saved["https://example.com/feed"]["watermark"] == "2026-11-20T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_legacy_list_state_loads_and_migrates(tmp_path):
+    plugin = _watermark_plugin(tmp_path, state={
+        "https://example.com/feed": ["https://example.com/1", "https://example.com/2"]
+    })
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(RSS_SAMPLE)):
+        await plugin._poll_once()
+    assert not plugin._spill.notify.called  # ledger semantics preserved
+    # deliver an undated NEW item to force a save, then check format
+    plugin2 = _watermark_plugin(tmp_path, state=json.loads((tmp_path / "seen.json").read_text()))
+    fresh = (b'<rss><channel><title>t</title>'
+             b'<item><title>Fresh</title><link>https://example.com/9</link>'
+             b'<guid>https://example.com/9</guid></item></channel></rss>')
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(fresh)):
+        await plugin2._poll_once()
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    st = saved["https://example.com/feed"]
+    assert isinstance(st, dict) and set(st) == {"seen", "watermark"}
+    assert "https://example.com/9" in st["seen"]
+    assert "https://example.com/1" in st["seen"] and "https://example.com/2" in st["seen"]
+    assert st["watermark"] is None  # undated feed: never invented
+
+
+# --- Review-loop coverage additions (part-2 findings, #1280) ---
+
+@pytest.mark.asyncio
+async def test_watermark_boundary_same_instant_delivers_once_then_ledger(tmp_path):
+    # strictly-older rule: an item at exactly the watermark date is a candidate
+    # (cap-split same-date batches must not be lost); the seen-list stops it after.
+    state = {"https://example.com/feed": {"seen": [], "watermark": "2026-11-10T09:00:00+00:00"}}
+    plugin = _watermark_plugin(tmp_path, state=state)
+    content = _dated_feed([(3, "Mon, 10 Nov 2026 09:00:00 GMT")])
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.call_count == 1
+    plugin2 = _watermark_plugin(tmp_path, state=json.loads((tmp_path / "seen.json").read_text()))
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin2._poll_once()
+    assert plugin2._spill.notify.call_count == 0  # deduped by ledger now
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_does_not_advance_watermark(tmp_path):
+    plugin = _watermark_plugin(tmp_path)
+    plugin._spill.notify = AsyncMock(side_effect=RuntimeError("boom"))
+    content = _dated_feed([(1, "Wed, 18 Nov 2026 00:00:00 GMT")])
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.called  # attempted, and failed
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    st = saved["https://example.com/feed"]
+    assert st["watermark"] is None
+    assert st["seen"] == []
+
+
+@pytest.mark.asyncio
+async def test_watermark_is_newest_not_last_among_delivered(tmp_path):
+    # feed order: 16th, 18th, 14th — newest is in the middle
+    content = _dated_feed([
+        (2, "Mon, 16 Nov 2026 00:00:00 GMT"),
+        (3, "Wed, 18 Nov 2026 00:00:00 GMT"),
+        (1, "Sat, 14 Nov 2026 00:00:00 GMT"),
+    ])
+    plugin = _watermark_plugin(tmp_path)  # max_items=10 → all three delivered
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.call_count == 3
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    assert saved["https://example.com/feed"]["watermark"] == "2026-11-18T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_watermark_from_delivered_only_newest_beyond_cap(tmp_path):
+    # ascending dates, cap 1: the OLDEST is delivered; watermark must follow it,
+    # not the newest candidate in the feed.
+    content = _dated_feed([
+        (1, "Sat, 14 Nov 2026 00:00:00 GMT"),
+        (2, "Mon, 16 Nov 2026 00:00:00 GMT"),
+        (3, "Wed, 18 Nov 2026 00:00:00 GMT"),
+    ])
+    plugin = _watermark_plugin(tmp_path, max_items=1)
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    assert plugin._spill.notify.call_count == 1
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    assert saved["https://example.com/feed"]["watermark"] == "2026-11-14T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_watermark_from_successful_only(tmp_path):
+    # first delivery succeeds, second raises: watermark = the SUCCESSFUL item's date only.
+    content = _dated_feed([
+        (1, "Sat, 14 Nov 2026 00:00:00 GMT"),
+        (2, "Tue, 24 Nov 2026 00:00:00 GMT"),
+    ])
+    plugin = _watermark_plugin(tmp_path)
+    plugin._spill.notify = AsyncMock(side_effect=[None, RuntimeError("boom")])
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    st = saved["https://example.com/feed"]
+    assert st["watermark"] == "2026-11-14T00:00:00+00:00"
+    assert "https://example.com/1" in st["seen"] and "https://example.com/2" not in st["seen"]
+
+
+@pytest.mark.asyncio
+async def test_seen_trim_preserves_watermark(tmp_path):
+    plugin = _watermark_plugin(tmp_path, state={
+        "https://example.com/feed": {
+            "seen": [f"old-{i}" for i in range(500)],
+            "watermark": "2026-11-01T00:00:00+00:00",
+        }
+    })
+    content = _dated_feed([(9, "Wed, 25 Nov 2026 12:00:00 GMT")])
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())), \
+         patch("httpx.AsyncClient", return_value=_mock_http(content)):
+        await plugin._poll_once()
+    saved = json.loads((tmp_path / "seen.json").read_text())
+    st = saved["https://example.com/feed"]
+    assert len(st["seen"]) == 500          # 501 trimmed back to the cap
+    assert st["seen"][0] == "old-1"        # oldest evicted from the front
+    assert "https://example.com/9" in st["seen"]
+    assert st["watermark"] == "2026-11-25T12:00:00+00:00"

@@ -17,6 +17,19 @@ Config (agent.yaml)::
       state_file: state/rss/seen.json
       prompt: "Summarise each item in two sentences."
 
+Freshness: per feed the plugin stores a *watermark* — the newest publication
+date among delivered items. Items published at or before the watermark are
+never delivered, even if their guid is missing from the seen list (the seen
+list is capped at 500 entries per feed and trimmed from the front; without a
+watermark, trimmed archive items replay forever — #1280). Items with no
+publication date fall back to seen-list dedup. State per feed:
+``{"seen": [...], "watermark": iso-or-null}``; a legacy bare list migrates on
+the next save. Feeds that publish no publication date fall back to
+``updated``/``pubdate``-less entries stay ledger-governed); an edited post can
+therefore advance the watermark past its own publication date — acceptable for
+archive-replay suppression, lossy for backlog delivery on rarely-edited feeds. A brand-new feed has no watermark: its first poll delivers
+normally, capped by max_items_per_poll.
+
 prompt (optional string) is prepended to each item's notification text,
 followed by a blank line. The prompt is cut against max_payload_chars
 along with the item content, so a long prompt reduces the space available
@@ -40,6 +53,8 @@ import json
 import logging
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +113,30 @@ def _parse_duration(text: str) -> float:
     return total
 
 
+def _parse_item_date(text: str) -> datetime | None:
+    """Parse an RSS pubDate (RFC 2822) or Atom date (ISO 8601) to an aware UTC datetime.
+
+    Returns None for missing, unparseable, or empty values — callers treat
+    undated items as 'no date known' (seen-list governs), never as ancient.
+    """
+    if not text:
+        return None
+    cleaned = text.strip()
+    try:
+        dt = parsedate_to_datetime(cleaned)
+    except (TypeError, ValueError):
+        iso = cleaned[:-1] + "+00:00" if cleaned.endswith("Z") else cleaned
+        try:
+            dt = datetime.fromisoformat(iso)
+        except ValueError:
+            return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = "30m"
@@ -129,7 +168,8 @@ def _parse_feed(xml_bytes: bytes) -> list[dict[str, str]]:
             continue
         item: dict[str, str] = {}
         for child in elem:
-            ctag = _localname(child.tag)
+            # lowercased: RSS uses <pubDate>; Atom tags are already lowercase
+            ctag = _localname(child.tag).lower()
             if ctag == "title":
                 item["title"] = (child.text or "").strip()
             elif ctag == "link":
@@ -139,6 +179,14 @@ def _parse_feed(xml_bytes: bytes) -> list[dict[str, str]]:
                 item["link"] = href or text
             elif ctag in ("guid", "id"):
                 item["guid"] = (child.text or "").strip() or item.get("link", "")
+            elif ctag == "published":
+                text = (child.text or "").strip()
+                if text:
+                    item["published"] = text
+            elif ctag in ("pubdate", "updated", "date"):
+                text = (child.text or "").strip()
+                if text and "published" not in item:
+                    item["published"] = text
             elif ctag in ("description", "summary", "content"):
                 if "summary" not in item:
                     item["summary"] = (child.text or "").strip()[:500]
@@ -265,10 +313,16 @@ class RSSPlugin(CorvidaePlugin):
                     logger.warning("rss: fetch failed for %s", url)
                     continue
                 items = _parse_feed(resp.content)
+                state = seen.setdefault(url, {"seen": [], "watermark": None})
+                wm_dt = _parse_item_date(state["watermark"] or "")
                 for item in items:
                     guid = item.get("guid", "")
-                    if guid and guid not in seen.get(url, []):
-                        new_items.append((url, item))
+                    if not guid or guid in state["seen"]:
+                        continue
+                    item_dt = _parse_item_date(item.get("published", ""))
+                    if item_dt and wm_dt and item_dt < wm_dt:
+                        continue
+                    new_items.append((url, item))
 
         if not new_items:
             return
@@ -295,7 +349,7 @@ class RSSPlugin(CorvidaePlugin):
             # they are delivered on the next poll.
             return
 
-        delivered: list[tuple[str, str]] = []
+        delivered: list[tuple[str, str, str]] = []
         for feed_url, item in new_items:
             title = item.get("title", "(untitled)")
             link = item.get("link", "")
@@ -312,35 +366,61 @@ class RSSPlugin(CorvidaePlugin):
                     channels, source=origin, text=text,
                     annotations={"origin": origin}, limit=self._max_chars,
                 )
-                delivered.append((feed_url, item.get("guid", "")))
+                delivered.append((feed_url, item.get("guid", ""), item.get("published", "")))
             except Exception as exc:
                 logger.warning("rss: delivery failed for %s: %s", feed_url, exc)
 
-        # Mark items seen only after delivery succeeds.
-        for url, guid in delivered:
+        # Mark items seen and advance the watermark only after delivery succeeds.
+        for url, guid, published in delivered:
+            state = seen.setdefault(url, {"seen": [], "watermark": None})
             if guid:
-                seen.setdefault(url, []).append(guid)
+                state["seen"].append(guid)
+        for url in {u for u, _, _ in delivered}:
+            state = seen[url]
+            delivered_dates = [
+                d for u, _, pub in delivered if u == url
+                and (d := _parse_item_date(pub)) is not None
+            ]
+            if delivered_dates:
+                new_wm = max(delivered_dates)
+                cur = _parse_item_date(state["watermark"] or "")
+                if cur is None or new_wm > cur:
+                    state["watermark"] = new_wm.isoformat()
 
         # Trim seen lists to prevent unbounded growth (keep last 500 per feed).
+        # The watermark makes this eviction safe for dated items: anything older
+        # than the newest delivered item is never a delivery candidate again.
         for url in seen:
-            if len(seen[url]) > 500:
-                seen[url] = seen[url][-500:]
+            if len(seen[url]["seen"]) > 500:
+                seen[url]["seen"] = seen[url]["seen"][-500:]
         self._save_seen(seen)
         logger.info("rss: delivered %d new items", len(new_items))
 
-    def _load_seen(self) -> dict[str, list[str]]:
+    def _load_seen(self) -> dict[str, dict[str, object]]:
+        """Per-feed state: {"seen": [guids], "watermark": iso-or-None}.
+
+        A legacy value that is a bare guid list migrates to the dict form
+        (watermark None: no history known, seen-list governs) on the next save.
+        """
         if not self._state_path.exists():
             return {}
         try:
             raw = json.loads(self._state_path.read_text())
-            # JSON has list values; preserve insertion order.
-            return {k: list(v) for k, v in raw.items()}
         except (json.JSONDecodeError, OSError):
             logger.warning("rss: could not read state file %s, starting fresh", self._state_path)
             return {}
+        state: dict[str, dict[str, object]] = {}
+        for url, val in raw.items():
+            if isinstance(val, dict):
+                state[url] = {"seen": list(val.get("seen", [])), "watermark": val.get("watermark")}
+            else:
+                state[url] = {"seen": list(val), "watermark": None}
+        return state
 
-    def _save_seen(self, seen: dict[str, list[str]]) -> None:
+    def _save_seen(self, seen: dict[str, dict[str, object]]) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        # Lists → JSON (order preserved for the [-500:] trim).
-        raw = {k: list(v) for k, v in seen.items()}
+        raw = {
+            u: {"seen": list(v["seen"]), "watermark": v.get("watermark")}
+            for u, v in seen.items()
+        }
         self._state_path.write_text(json.dumps(raw, indent=2))
