@@ -18,7 +18,6 @@ cache.
 """
 
 from __future__ import annotations
-
 import asyncio
 import hashlib
 import logging
@@ -28,6 +27,7 @@ from typing import Any, Callable
 
 import aiosqlite
 
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 from corvidae_cognition.fts import (
     TOKENIZE_CLAUSE,
     create_fts_table,
@@ -227,6 +227,10 @@ class MarkdownIndex:
             db = await aiosqlite.connect(self._db_path)
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
+            # The index shares the session database with the conversation
+            # writer; the inherited 5.0 s default is what turns a long-held
+            # write lock into lost index writes (corvidae#1211).
+            await db.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
             self._db = db
             return db
         except Exception:

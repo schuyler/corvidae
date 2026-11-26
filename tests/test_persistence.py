@@ -1093,3 +1093,64 @@ def test_decode_message_row_returns_dict_for_valid_input():
     raw = json.dumps({"role": "user", "content": "hi"})
     assert decode_message_row(1, raw.encode(), "c") == {"role": "user", "content": "hi"}
     assert decode_message_row(1, raw, "c") == {"role": "user", "content": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# TestBusyTimeout
+# ---------------------------------------------------------------------------
+
+
+class TestBusyTimeout:
+    async def test_on_start_sets_busy_timeout_by_default(self, tmp_path):
+        """A held write lock must cost a bounded wait, not a 5 s default.
+
+        aiosqlite forwards sqlite3.connect's timeout=, whose Python default is
+        5.0 s; every writer on this file otherwise gives up after ~5 s while
+        another connection holds the write lock (corvidae#1211).
+        """
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "busy_default.db")
+        config = {"daemon": {"session_db": db_path}}
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        actual_ms = row[0]
+
+        await plugin.db.close()
+
+        assert actual_ms == 30000
+
+    async def test_on_start_respects_sqlite_busy_timeout_config_override(self, tmp_path):
+        """daemon.sqlite_busy_timeout_ms override is applied by on_start."""
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "busy_override.db")
+        config = {
+            "daemon": {
+                "session_db": db_path,
+                "sqlite_busy_timeout_ms": 1234,
+            }
+        }
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        actual_ms = row[0]
+
+        await plugin.db.close()
+
+        assert actual_ms == 1234

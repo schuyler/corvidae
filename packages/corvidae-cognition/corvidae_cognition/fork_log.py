@@ -17,7 +17,6 @@ fixed order and never drops a row.
 """
 
 from __future__ import annotations
-
 import hashlib
 import json
 import logging
@@ -26,6 +25,8 @@ import zlib
 from typing import Any, Iterable, Sequence
 
 import aiosqlite
+
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 
 logger = logging.getLogger("corvidae.fork_log")
 
@@ -159,6 +160,11 @@ class ForkLog:
             return
         db = await aiosqlite.connect(self._db_path)
         db.row_factory = aiosqlite.Row
+        # Shares the session database with the conversation writer; without a
+        # bound of its own this writer waits sqlite3's 5.0 s default and drops
+        # fork rows whenever another connection holds the write lock
+        # (corvidae#1211).
+        await db.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         await db.executescript(SCHEMA)
         await self._migrate(db)
         await db.executescript(INDEXES)

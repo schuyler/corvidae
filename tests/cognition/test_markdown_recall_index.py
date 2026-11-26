@@ -667,3 +667,20 @@ async def test_rebuild_keeps_existing_chunks_readable(tmp_path):
         f"a reader saw the index partly or fully wiped mid-rebuild: "
         f"{seen} (pass-1 probes={before})"
     )
+
+
+async def test_connect_sets_busy_timeout(tmp_path):
+    """The index connection waits out a held write lock instead of failing.
+
+    It writes the same sessions.db the conversation writer does; aiosqlite's
+    inherited 5.0 s default is what turns a consolidation's open transaction
+    into lost index writes (corvidae#1211).
+    """
+    index, _, _ = await make_index(tmp_path, {"a.md": "# A\n\nhello\n"})
+    db = await index._connect()
+    try:
+        async with db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 30000
+    finally:
+        await db.close()

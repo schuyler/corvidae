@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
+#: Default write-lock wait for every writer on the session database.
+DEFAULT_BUSY_TIMEOUT_MS = 30_000
+
 
 async def add_column_if_missing(
     db: aiosqlite.Connection, table: str, column: str, decl: str
@@ -320,6 +323,20 @@ class PersistencePlugin(CorvidaePlugin):
         logger.info(
             "SQLite journal mode set to %s", actual_mode,
             extra={"journal_mode": actual_mode},
+        )
+
+        # A writer that inherits sqlite3.connect's 5.0 s default gives up while
+        # another connection still holds the WAL write lock, and every give-up
+        # drops a conversation row (corvidae#1211). The wait is bounded, not
+        # removed: a holder that never commits still costs a failed write.
+        busy_ms = int(
+            config.get("daemon", {}).get("sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS)
+        )
+        async with self.db.execute(f"PRAGMA busy_timeout={busy_ms}") as cursor:
+            row = await cursor.fetchone()
+        logger.info(
+            "SQLite busy timeout set to %d ms", row[0] if row else busy_ms,
+            extra={"busy_timeout_ms": row[0] if row else busy_ms},
         )
 
         # Seed the idle tracker: every channel with history is quiet since its
