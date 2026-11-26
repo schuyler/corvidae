@@ -24,7 +24,10 @@ list is capped at 500 entries per feed and trimmed from the front; without a
 watermark, trimmed archive items replay forever — #1280). Items with no
 publication date fall back to seen-list dedup. State per feed:
 ``{"seen": [...], "watermark": iso-or-null}``; a legacy bare list migrates on
-the next save. A brand-new feed has no watermark: its first poll delivers
+the next save. Feeds that publish no publication date fall back to
+``updated``/``pubdate``-less entries stay ledger-governed); an edited post can
+therefore advance the watermark past its own publication date — acceptable for
+archive-replay suppression, lossy for backlog delivery on rarely-edited feeds. A brand-new feed has no watermark: its first poll delivers
 normally, capped by max_items_per_poll.
 
 prompt (optional string) is prepended to each item's notification text,
@@ -177,10 +180,13 @@ def _parse_feed(xml_bytes: bytes) -> list[dict[str, str]]:
             elif ctag in ("guid", "id"):
                 item["guid"] = (child.text or "").strip() or item.get("link", "")
             elif ctag == "published":
-                item["published"] = (child.text or "").strip()
+                text = (child.text or "").strip()
+                if text:
+                    item["published"] = text
             elif ctag in ("pubdate", "updated", "date"):
-                if "published" not in item:
-                    item["published"] = (child.text or "").strip()
+                text = (child.text or "").strip()
+                if text and "published" not in item:
+                    item["published"] = text
             elif ctag in ("description", "summary", "content"):
                 if "summary" not in item:
                     item["summary"] = (child.text or "").strip()[:500]
@@ -314,7 +320,7 @@ class RSSPlugin(CorvidaePlugin):
                     if not guid or guid in state["seen"]:
                         continue
                     item_dt = _parse_item_date(item.get("published", ""))
-                    if item_dt and wm_dt and item_dt <= wm_dt:
+                    if item_dt and wm_dt and item_dt < wm_dt:
                         continue
                     new_items.append((url, item))
 
