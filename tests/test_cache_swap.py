@@ -680,32 +680,51 @@ def test_dangling_only_message_still_never_offers_the_preset_remedy():
 # ---------------------------------------------------------------------------
 
 
-def test_fit_messages_refuses_a_prompt_it_cannot_size_within_one_percent():
-    """`fit_messages` must raise rather than return a mis-sized prompt.
+@pytest.mark.parametrize(
+    "target, expect_raise",
+    [
+        # (turn cost 1000 + max tail 481) leaves the largest fit these gaps
+        # below the target: inside 1% the guard must accept, outside it must
+        # reject. Both directions are pinned because the guard's contract is a
+        # threshold, not merely "reject something".
+        (1488, False),   # 7 tokens short = 0.47% -> accept
+        (1511, True),    # 30 short = 1.99%       -> reject
+        (1650, True),    # 169 short = 10.2%      -> reject
+    ],
+)
+def test_fit_messages_tolerance_guard_accepts_within_one_percent_and_rejects_outside(
+    target, expect_raise
+):
+    """The 1% guard in `fit_messages` is a real threshold, not a decoration.
 
     Silently returning a short prompt would hand a run a conversation that is
-    not the size it claims to have measured. `count_tokens` is a parameter, so
-    the test supplies a counter coarser than the guard allows: a turn is worth
-    1000 "tokens" and a tail word one, which leaves the largest fit roughly 10%
-    short of the target. That margin is asserted below, not assumed - the gap
-    must stay wide of the 1% boundary (or fixture drift fails this test with the
-    guard working) and narrow of 50% (or widening the tolerance would still
-    raise, and the test would stop detecting that mutation).
+    not the size it claims to have measured; rejecting an in-tolerance prompt
+    would make the probe unable to size itself at all. `count_tokens` is a
+    parameter, so the test injects a counter coarser than the guard: a turn is
+    worth 1000 "tokens" and a tail word one, which quantizes the shortfall the
+    search can land on. The targets above are derived from that quantization
+    (see the parametrize comment), so each case sits at a known distance from
+    the 1% boundary instead of leaning on arithmetic luck.
     """
-    target = 1650
 
     def coarse(msgs):
         turns = (len(msgs) - 2) // 2
         return 1000 * turns + len(msgs[-1]["content"].split())
 
+    if not expect_raise:
+        msgs = fit_messages("guard-a", target, coarse)
+        assert abs(coarse(msgs) - target) <= target * 0.01 + 1, coarse(msgs)
+        return
+
     with pytest.raises(ValueError, match="outside 1%") as exc:
         fit_messages("guard-a", target, coarse)
 
-    reached = int(re.search(r"reached (\d+) tokens", str(exc.value)).group(1))
-    gap = (target - reached) / target
-    assert 0.05 < gap < 0.45, (
-        f"guard fired at {gap:.1%} of {target}: either the 1% boundary or the "
-        "wider-tolerance mutation no longer separates, revisit the fixture"
+    m = re.search(r"reached (\d+) tokens", str(exc.value))
+    assert m is not None, f"guard raised the wrong thing: {exc.value!r}"
+    gap = (target - int(m.group(1))) / target
+    assert 0.01 < gap < 0.45, (
+        f"guard fired at {gap:.1%} of {target}: the case no longer sits just "
+        "outside the 1% boundary, revisit the targets above"
     )
 
 
@@ -714,11 +733,14 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
 
     The summary turn is a user message, so a tail beginning on a user message
     puts two user turns adjacent and the server sees a malformed conversation.
-    0.32 on this fixture is the variant that reaches the guard. `raw_keep` below
-    deliberately restates production's keep computation instead of calling it: a
-    shared helper would make the assert tautological, so if production changes
-    its ratio, rounding, or whether the system turn counts, this assert trips and
-    says so instead of the test quietly checking the wrong index.
+    0.32 on this fixture is the variant that reaches the guard. Scope note on the
+    `raw_keep` assertion below: it restates production's keep computation locally,
+    which catches *fixture* drift (a builder or constant change that stops the
+    fixture landing on a user turn) and cannot catch a production change to the
+    ratio, rounding, or whether the system turn counts - those leave this local
+    formula untouched. There is no helper to import for it, so the coverage of
+    "the guard still gets exercised" rests on the length assertion at the end,
+    which fails if the step-back stops happening.
     """
     messages = build_messages("guard-b", 41, USER_WORDS)
     turns = messages[1:]
@@ -735,3 +757,6 @@ def test_compacted_messages_drops_a_tail_that_would_break_role_alternation():
     assert out[2]["role"] == "assistant", "tail must not start on a user turn"
     roles = [m["role"] for m in out[1:]]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    # One step back, no more: the guard gave up exactly the message that broke
+    # alternation. Without this, a guard that dropped the whole tail would pass.
+    assert len(out) - 2 == raw_keep - 1, f"kept {len(out) - 2}, expected {raw_keep - 1}"
