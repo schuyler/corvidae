@@ -264,12 +264,16 @@ class HeldContext(CorvidaePlugin):
                 admitted_keys=[], duplicate_keys=[],
             )
             return
-        # Replace the older once batch of the same source, loudly.
+        # Replace the held once batch of the same source, loudly. Reached only
+        # when the two turns cannot be ordered by trace second (same second, or
+        # an id that is not that shape), so the message says that rather than
+        # calling either batch stale (#1218 review).
         for old in same:
             held.remove(old)
             logger.warning(
-                "held: a newer %s contribution replaced %d held entr%s on channel %s "
-                "(the older one would be stale); no action needed",
+                "held: a %s contribution replaced %d held entr%s on channel %s "
+                "(the two turns cannot be ordered, so the later arrival wins); "
+                "no action needed",
                 old.source, len(old.entries), "y" if len(old.entries) == 1 else "ies",
                 channel.id,
                 extra={"channel": channel.id, "source": old.source},
