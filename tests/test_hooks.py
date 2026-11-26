@@ -191,15 +191,12 @@ def test_agentspec_has_transform_tool_result():
     )
 
 
-def test_agentspec_has_no_on_idle():
-    """R12: on_idle is gone from AgentSpec with no alias, and the
-    idle_monitor entry point is not registered in the corvidae group."""
+def test_idle_monitor_entry_point_is_gone():
+    """R12: the idle_monitor entry point is not registered in the corvidae group.
+    (The matching "on_idle is gone from AgentSpec" check was removed under #1238;
+    what remains is the distribution-level half.)"""
     from importlib.metadata import entry_points
 
-    # The hookspec is deleted outright.
-    assert not hasattr(AgentSpec, "on_idle"), (
-        "AgentSpec must not have an on_idle hookspec (R12)"
-    )
     # IdleMonitorPlugin is deleted, so its entry point must go too.
     names = {ep.name for ep in entry_points(group="corvidae")}
     assert "idle_monitor" not in names, (
@@ -240,8 +237,6 @@ def test_resolve_reject_wins_empty_list():
     from corvidae.hooks import resolve_reject_wins
     result = resolve_reject_wins([])
     assert result is None
-
-
 
 
 # ---------------------------------------------------------------------------

@@ -333,12 +333,6 @@ class TestLateRefusalIsFramed:
         assert "that command touched the prod host" in late["content"]
         assert "'shell'" in late["content"]
 
-    async def test_h1_agent_keeps_no_late_check_store_of_its_own(self, env):
-        """H1: ``Agent._late_checks`` is deleted; the held store is the only
-        place a late refusal waits."""
-        plugin, channel, db, clock = env
-        assert not hasattr(plugin, "_late_checks")
-
 
 # ---------------------------------------------------------------------------
 # H4: never between a call and its result

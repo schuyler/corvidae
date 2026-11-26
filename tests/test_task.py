@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from corvidae.channel import Channel, ChannelConfig
-from corvidae.hooks import AgentSpec, create_plugin_manager
+from corvidae.hooks import create_plugin_manager
 
 from corvidae.task import Task, TaskPlugin, TaskQueue
 
@@ -711,19 +711,6 @@ class TestTaskPlugin:
 # ---------------------------------------------------------------------------
 # Item 7 red-phase: on_task_complete must NOT be in AgentSpec (dead hook)
 # ---------------------------------------------------------------------------
-
-
-class TestOnTaskCompleteRemoved:
-    def test_agent_spec_does_not_define_on_task_complete(self):
-        """AgentSpec must not define on_task_complete after the dead hook is removed.
-
-        RED phase: this test fails while on_task_complete still exists in AgentSpec.
-        It passes once the hookspec and call site are deleted.
-        """
-        assert not hasattr(AgentSpec, "on_task_complete"), (
-            "on_task_complete is a dead hook with no implementations; "
-            "it should be removed from AgentSpec"
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -251,6 +251,11 @@ class QueueItem:
     #: only by kernel code, never from a hook argument. None only for items
     #: tests build by hand.
     metadata: ItemMetadata | None = None
+    #: Whether this item's turn produced a final, sent or unsent. Kernel-owned
+    #: and per item: an annotation would be inherited by every tool-result
+    #: notification of the cycle through the attribution contextvar, so the
+    #: later hops would never report that they ended with no final (#424).
+    final_sent: bool = False
 
 
 #: Backoff for re-running a turn the backend could not answer (#281): the
@@ -1686,6 +1691,20 @@ class Agent(CorvidaePlugin):
                 reset_attribution(attribution_token)
         finally:
             self._note_settled(channel)
+            # A turn that ends with no final leaves any transport-side
+            # typing indicator owed forever; tell the hooks the turn is
+            # over and nothing will answer it (#424).
+            if not item.final_sent:
+                try:
+                    await self.pm.ahook.on_turn_ended_without_final(
+                        channel=channel, trace_id=item.trace_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "on_turn_ended_without_final hook failed on channel %s "
+                        "(trace_id %s)", channel.id, item.trace_id, exc_info=True,
+                        extra={"channel": channel.id, "trace_id": item.trace_id},
+                    )
 
     async def _append_and_persist_message(
         self,
@@ -2028,6 +2047,10 @@ class Agent(CorvidaePlugin):
             # 8. Append assistant message and fire persistence event, attaching
             # the resolved rowid to the window copy (same rule as step 4). A
             # vetoed final persists as UNSENT: in the window, never sent.
+            # This turn produced a final, sent or unsent; the response
+            # hooks release the transport's typing slot on it, so the
+            # turn-end observation below must not fire too (#424).
+            item.final_sent = True
             message_type = MessageType.UNSENT if unsent else MessageType.MESSAGE
             conv.append(assistant_message, message_type)
             assistant_in_window = conv.messages[-1]

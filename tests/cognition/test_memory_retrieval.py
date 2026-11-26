@@ -290,13 +290,6 @@ class TestWholeMemory:
         ]
         await db.close()
 
-    async def test_scope_machinery_is_gone(self):
-        # No ChannelScope, no resolver, no group state to resurrect.
-        import corvidae_cognition.memory as memory_module
-        assert not hasattr(memory_module, "ChannelScope")
-        assert not hasattr(memory_module, "_validate_channel_groups")
-        assert not hasattr(MemoryPlugin, "_channel_scope")
-
 
 class TestDedupeAndStats:
     async def test_reasking_does_not_duplicate_context(self):

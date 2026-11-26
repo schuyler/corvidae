@@ -43,37 +43,17 @@ def test_thinking_plugin_depends_on_includes_registry():
 
 
 # ---------------------------------------------------------------------------
-# 4. turn must NOT re-export tool-related symbols (single-LLM-turn module).
-#    tools.subagent owns run_agent_loop and MUST expose MAX_TOOL_RESULT_CHARS
+# 4. tools.subagent owns run_agent_loop and MUST expose MAX_TOOL_RESULT_CHARS
 #    and dispatch_tool_call (used by run_agent_loop).
+#    (#1238 removed the matching "turn must not re-export tool symbols" checks and
+#    this file's turn_module fixture with them: they pinned an attribute list on a
+#    live module, not behaviour. If that boundary should hold, the guard belongs on
+#    the import graph -- see the PR body.)
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def turn_module():
-    return importlib.import_module("corvidae.turn")
-
 
 @pytest.fixture(scope="module")
 def subagent_module():
     return importlib.import_module("corvidae.tools.subagent")
-
-
-def test_turn_does_not_export_ToolContext(turn_module):
-    assert not hasattr(turn_module, "ToolContext"), (
-        "corvidae.turn should not re-export ToolContext"
-    )
-
-
-def test_turn_does_not_export_execute_tool_call(turn_module):
-    assert not hasattr(turn_module, "execute_tool_call"), (
-        "corvidae.turn should not re-export execute_tool_call"
-    )
-
-
-def test_turn_does_not_export_tool_to_schema(turn_module):
-    assert not hasattr(turn_module, "tool_to_schema"), (
-        "corvidae.turn should not re-export tool_to_schema"
-    )
 
 
 def test_subagent_still_exports_MAX_TOOL_RESULT_CHARS(subagent_module):

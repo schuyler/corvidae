@@ -1937,6 +1937,28 @@ class AgentSpec:
                 conversation log. Mutations affect subsequent prompt builds only.
         """
 
+    @hookspec
+    async def on_turn_ended_without_final(
+        self, channel: "Channel", trace_id: str | None
+    ) -> None:
+        """A turn ended without producing a final reply (#424).
+
+        Grammar class: observe (broadcast; return value ignored).
+
+        Fires once for the item that owned the turn, after the turn is done
+        and no final was produced -- the input gate refused it, the turn raised,
+        or it returned before step 7. A transport that holds a typing indicator
+        while a reply is owed releases it here, so an admitted message whose
+        turn dies cannot leave the indicator refreshing with no owner.
+
+        Not fired for a turn that produced a final, sent or unsent: the
+        response hooks already release on those.
+
+        Args:
+            channel: The Channel the turn ran for.
+            trace_id: The turn's trace id, or None when it never resolved one.
+        """
+
     @hookspec(firstresult=True)
     async def transform_display_text(
         self, channel: "Channel", text: str, result_message: dict

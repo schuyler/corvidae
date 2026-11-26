@@ -1195,6 +1195,13 @@ class DiscordPlugin(TransportPlugin):
                 logger.warning("discord: failed to deliver message: %s", exc, exc_info=True)
 
     @hookimpl
+    async def on_turn_ended_without_final(self, channel: Channel, trace_id: str | None) -> None:
+        """Release this channel's typing slots when a turn ends with no final
+        (#424). Without this, an admitted message whose turn dies before a
+        response leaves the indicator refreshing forever."""
+        self._release_all(channel)
+
+    @hookimpl
     async def on_agent_response(
         self,
         channel,

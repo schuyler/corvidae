@@ -351,15 +351,6 @@ async def test_critique_keeps_the_originating_text_from_its_own_hook(tmp_path):
         await _teardown(env)
 
 
-def test_appraisal_has_no_listener_or_offer_seam_left():
-    """Item 14: the add_stage2_listener / set_lens_offer / get_originating_text
-    seams are gone from AppraisalPlugin."""
-    from corvidae_cognition.appraisal import AppraisalPlugin
-
-    for name in ("add_stage2_listener", "set_lens_offer", "get_originating_text"):
-        assert not hasattr(AppraisalPlugin, name), name
-
-
 # ---------------------------------------------------------------------------
 # Item 15: Lens.before_send is validated
 # ---------------------------------------------------------------------------
