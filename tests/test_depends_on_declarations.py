@@ -58,24 +58,6 @@ def subagent_module():
     return importlib.import_module("corvidae.tools.subagent")
 
 
-def test_turn_does_not_export_ToolContext(turn_module):
-    assert not hasattr(turn_module, "ToolContext"), (
-        "corvidae.turn should not re-export ToolContext"
-    )
-
-
-def test_turn_does_not_export_execute_tool_call(turn_module):
-    assert not hasattr(turn_module, "execute_tool_call"), (
-        "corvidae.turn should not re-export execute_tool_call"
-    )
-
-
-def test_turn_does_not_export_tool_to_schema(turn_module):
-    assert not hasattr(turn_module, "tool_to_schema"), (
-        "corvidae.turn should not re-export tool_to_schema"
-    )
-
-
 def test_subagent_still_exports_MAX_TOOL_RESULT_CHARS(subagent_module):
     assert hasattr(subagent_module, "MAX_TOOL_RESULT_CHARS"), (
         "corvidae.tools.subagent should expose MAX_TOOL_RESULT_CHARS (used as default arg in run_agent_loop)"

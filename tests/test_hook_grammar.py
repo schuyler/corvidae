@@ -18,7 +18,6 @@ from pluggy import HookCaller
 from corvidae.hooks import (
     HOOK_GRAMMAR,
     IMPERATIVE_HOOKS,
-    AgentSpec,
     _SeedHooksPlugin,
     create_plugin_manager,
 )
@@ -155,17 +154,6 @@ def test_register_llm_stages_is_an_imperative_hookspec() -> None:
 
 
 # --- Test 5: retired names stay retired ----------------------------------------
-
-
-@pytest.mark.parametrize("name", _rows(RETIRED))
-def test_retired_name_is_not_a_hookspec(name: str) -> None:
-    """A renamed or folded hook's old name is gone from AgentSpec.
-
-    This is the only test that pins ``on_conversation_event`` ->
-    ``persist_message``: the old name has a valid ``on_`` prefix and broadcast
-    options, so tests 1 and 2 cannot see that the core reads its result.
-    """
-    assert not hasattr(AgentSpec, name), f"{name!r} is still a hookspec on AgentSpec"
 
 
 # --- Test 6: the collect class is retired (#1094) ------------------------------

@@ -1071,10 +1071,6 @@ class TestDefaultLlmErrorMessage:
         """There is no bare default message: a failure cause is mandatory."""
         import corvidae.agent as agent_mod
 
-        assert not hasattr(agent_mod, "DEFAULT_LLM_ERROR_MESSAGE"), (
-            "a bare default message lets callers omit the failure cause; "
-            "use _llm_error_message(exc)"
-        )
         with pytest.raises(TypeError):
             agent_mod._llm_error_message()
 

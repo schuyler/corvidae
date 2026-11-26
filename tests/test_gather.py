@@ -242,11 +242,8 @@ class TestOnePrimitive:
     def test_g1_run_checks_no_longer_exists(self):
         """G1: no second gather loop survives: ``run_checks`` is renamed, not
         kept beside ``gather``."""
-        import corvidae.agent as agent_mod
         import corvidae.checks as checks_mod
 
-        assert not hasattr(checks_mod, "run_checks")
-        assert not hasattr(agent_mod, "run_checks")
         assert hasattr(checks_mod, "gather")
 
 

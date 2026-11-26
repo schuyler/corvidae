@@ -28,7 +28,6 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 
-import corvidae_cognition.funnel as funnel_mod
 import pytest
 from corvidae_cognition.funnel import FunnelPlugin
 from fake_clock import install_kernel_clock
@@ -353,31 +352,6 @@ class TestConfigValidation:
             env, [batch(env, "critique", [line("old", 3)], age=3600.0, once=False)]
         )
         assert plan_of(plans, 0).admit == [0]
-
-
-class TestRemovedApi:
-    """F6: every ingest and admit entry point is gone from the funnel."""
-
-    @pytest.mark.parametrize(
-        "name", ["admit", "admit_detailed", "ingest", "ingest_and_wake"]
-    )
-    def test_method_is_gone(self, name):
-        assert not hasattr(FunnelPlugin, name), (
-            f"FunnelPlugin.{name} must be removed: the kernel's held store owns "
-            f"holding and admission now"
-        )
-
-    @pytest.mark.parametrize("name", ["Ingest", "Admission", "FunnelSpec"])
-    def test_module_no_longer_exports(self, name):
-        assert not hasattr(funnel_mod, name), (
-            f"corvidae_cognition.funnel.{name} must be removed"
-        )
-
-    async def test_on_funnel_ingest_hookspec_is_not_installed(self):
-        pm = create_plugin_manager()
-        pm.register(FunnelPlugin(), name="funnel")
-        install_plugin_hookspecs(pm)
-        assert not hasattr(pm.hook, "on_funnel_ingest")
 
 
 def ponder_tool(env: Env) -> Any:

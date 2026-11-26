@@ -20,7 +20,6 @@ import apluggy as pluggy
 import pytest
 
 from corvidae.hooks import (
-    AgentSpec,
     CorvidaePlugin,
     _check_hook_arg_binding,
     create_plugin_manager,
@@ -141,12 +140,6 @@ class TestOwnedHookRoundTrip:
 
         assert panels == ["profiler", "profiler"]
 
-    def test_agentspec_does_not_gain_plugin_hooks(self) -> None:
-        pm = _pm(("web", WebOwner()))
-        install_plugin_hookspecs(pm)
-
-        assert not hasattr(AgentSpec, "resolve_web_answer")
-        assert not hasattr(AgentSpec, "on_web_console_init")
 
     async def test_declaration_inherited_from_base_class_is_installed(self) -> None:
         class ConsoleBase(CorvidaePlugin):

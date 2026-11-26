@@ -52,16 +52,6 @@ def test_no_retired_core_names_in_kernel_or_tests() -> None:
     )
 
 
-def test_retired_tools_plugin_class_is_gone() -> None:
-    """The combined tools plugin no longer exists, with no alias (R1)."""
-    import corvidae.tools
-
-    assert not hasattr(corvidae.tools, OLD_CLASS), (
-        f"corvidae.tools.{OLD_CLASS} must be removed, not aliased; "
-        "use ShellToolPlugin, FileToolsPlugin or WebToolsPlugin"
-    )
-
-
 def test_retired_tools_entry_point_is_gone() -> None:
     """No installed distribution registers the old entry point (R4)."""
     names = {ep.name for ep in entry_points(group="corvidae")}

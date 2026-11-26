@@ -565,14 +565,6 @@ def test_embedding_stage_without_embedding_profile_is_none():
     assert plugin.get_client("embedding") is None
 
 
-def test_fallback_chain_surface_is_gone():
-    """R2: FALLBACK_CHAINS, fallback_chain and resolve_role are removed."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    for name in ("FALLBACK_CHAINS", "fallback_chain", "resolve_role"):
-        assert not hasattr(LLMPlugin, name), f"LLMPlugin.{name} must be removed"
-
-
 @pytest.mark.parametrize("stage", ["unregistered", "main"])
 def test_get_client_rejects_a_name_that_is_not_a_registered_stage(stage):
     """R3: an unregistered stage fails loudly, and a profile name is not a

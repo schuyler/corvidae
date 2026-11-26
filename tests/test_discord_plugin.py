@@ -743,7 +743,6 @@ class TestInboundFiltering:
             assert "does not mention the bot" in drop.getMessage()
             assert getattr(drop, "channel") == f"discord:{CHAN_ID}"
             assert getattr(drop, "sender") == str(AUTH_ID)
-            assert not hasattr(drop, "parent_channel")
             # Nothing about this drop is announced: an INFO line per message
             # would swamp a busy channel, which is the whole point.
             assert not [

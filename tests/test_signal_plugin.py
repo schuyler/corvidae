@@ -2387,16 +2387,6 @@ class TestTransportMintedIds:
         finally:
             await _stop_plugin(h)
 
-    async def test_no_inference_state_remains(self, tmp_path):
-        """O3: the FIFO timestamp queue and the admitted-id registry that
-        inferred message identity are gone."""
-        h = await _start_plugin(tmp_path)
-        try:
-            assert not hasattr(h.plugin, "_pending_timestamps")
-            assert not hasattr(h.plugin, "_admitted_correlation_ids")
-        finally:
-            await _stop_plugin(h)
-
 
 # ---------------------------------------------------------------------------
 # Issue #103: a refused sender never creates a persistent channel

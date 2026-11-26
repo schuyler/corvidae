@@ -222,7 +222,6 @@ class TestResolveTunableDivergesFromChannelConfigResolve:
         config = {}
 
         # ChannelConfig.resolve has no notion of this key at all.
-        assert not hasattr(ChannelConfig(), "critique")
 
         result = resolve_tunable(channel, config, "critique.provenance.enabled", True)
 

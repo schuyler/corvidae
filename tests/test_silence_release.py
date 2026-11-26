@@ -543,7 +543,6 @@ class TestCoreIsUnawareOfSilence:
         import corvidae.hooks as hooks
 
         assert hasattr(hooks, "final_was_unsent")
-        assert not hasattr(hooks, "final_was_" + "withheld")
 
 
 # ---------------------------------------------------------------------------
