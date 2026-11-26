@@ -84,6 +84,7 @@ import math
 import re
 import logging
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
@@ -133,6 +134,10 @@ FALLBACK_RATE_DEFAULT = 0.25
 # agent can't raise its own cap or deadline (#1190 I4).
 MAX_TOOL_CALLS_DEFAULT = 3
 FORK_TIMEOUT_DEFAULT = 120.0
+# A fork that finishes but spends more than this share of its deadline warns
+# before it becomes a timeout miss (#1272). Static, not a tunable: an agent
+# under load must not be able to quiet its own early-warning signal.
+SLOW_FORK_FRACTION = 0.5
 # Seconds between looks at the channel's waiting-message count while an idle
 # fork waits for the channel to clear (#1190 R5.3).
 YIELD_POLL_SECONDS = 1.0
@@ -2229,6 +2234,11 @@ class CritiquePlugin(CorvidaePlugin):
         forking = False
         try:
             async with asyncio.timeout(timeout) as deadline:
+                # Wall time from here, because this is what the deadline bounds:
+                # the quiet wait plus every request. A warning that says only
+                # "exceeded the timeout" cannot tell a slow fork from a hung
+                # one (#1272).
+                started = time.monotonic()
                 if idle:
                     await self._wait_quiet(agent, channel)
                 forking = True
@@ -2289,9 +2299,12 @@ class CritiquePlugin(CorvidaePlugin):
             # Only the deadline's own expiry is a timeout miss; a TimeoutError
             # from inside the request is a fork failure like any other.
             if isinstance(exc, TimeoutError) and deadline.expired():
+                waited = time.monotonic() - started
                 reason = (
-                    f"the fork exceeded critique.fork_timeout ({timeout} s)" if forking
-                    else f"the channel stayed busy past critique.fork_timeout ({timeout} s)")
+                    f"the fork exceeded critique.fork_timeout ({timeout} s) "
+                    f"after {waited:.1f}s" if forking
+                    else f"the channel stayed busy past critique.fork_timeout "
+                         f"({timeout} s) after {waited:.1f}s")
                 for lens in lenses:
                     self._skip_lens(channel, lens, trace_id, reason)
                 return None
@@ -2302,6 +2315,17 @@ class CritiquePlugin(CorvidaePlugin):
                     exc_info=True,
                 )
             return None
+        elapsed = time.monotonic() - started
+        if elapsed > timeout * SLOW_FORK_FRACTION:
+            # The fork still counted; this is the early signal, so the line says
+            # what the allowance was instead of leaving that to be known.
+            logger.warning(
+                "critique lens fork %s for trace %s on channel %s was slow: %.1fs of"
+                " the %s s allowed by critique.fork_timeout",
+                "+".join(lenses), trace_id, channel.id, elapsed, timeout,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+
         # Per lens: its key in the reply; a lens the reply left out skips alone.
         found: dict[str, list[dict]] = {}
         for lens in lenses:

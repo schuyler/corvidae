@@ -2446,8 +2446,13 @@ the fork makes no tool calls and does not wait. After the exchange:
   reply is parsed from text; with none it does.
 - `critique.fork_timeout` (default 120 s) bounds the whole fork, wall clock,
   pauses included. Past it, or a channel busy past it before the fork starts,
-  every lens is skipped with a warning naming lens, channel and trace; nothing is
-  recorded. The provenance fork has no deadline.
+  every lens is skipped with a warning naming lens, channel and trace and
+  reporting the elapsed wait before the miss — the fork's own run, or the
+  busy-channel stretch that held it off; nothing is recorded. The provenance fork
+  has no deadline. A fork that finishes inside the limit but past more than half
+  of it logs a slow-fork warning naming the lens set, trace, channel, elapsed
+  seconds and the allowance, and its objections still count — that line is the
+  early signal.
 
 A lens that ran reports, in a critique record,
 
