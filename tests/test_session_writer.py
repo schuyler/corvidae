@@ -335,3 +335,63 @@ async def test_close_is_bounded_when_the_route_lock_itself_is_held(
     assert "write route was still held" in errors[0].getMessage()
     assert still_open
     assert writer._closed is True
+
+
+def test_outcome_does_not_block_when_the_unit_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    """#1315 critical: ``_outcome`` must not acquire the lock on the loop.
+
+    After a revocation that gave up, the worker holds the unit's lock inside a C
+    call. ``_outcome`` runs on the event loop; a plain ``with unit.lock`` there
+    wedges the loop, which also disarms shutdown's force-exit.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("wedged-owner", 0.2)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        unit.lock.acquire()
+        holding.set()
+        release.wait(5.0)
+        unit.lock.release()
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(2.0)
+        started = time.monotonic()
+        with pytest.raises(WriteRevoked):
+            writer._outcome(unit)
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        holder.join(2.0)
+        writer._conn.close()
+
+
+def test_the_revoke_bound_fits_inside_the_configured_budget(tmp_path: Path) -> None:
+    """#1315: the bound is derived per writer, not a constant above the budget.
+
+    A bound longer than the graceful phase never elapses inside it, so the
+    diagnostic is dead and the force-exit lands mid-wait.
+    """
+    import corvidae.session_writer as sw
+    from corvidae.shutdown import (
+        DEFAULT_SHUTDOWN_TIMEOUTS,
+        parse_shutdown_timeouts,
+        stop_bound_seconds,
+    )
+
+    assert sw.REVOKE_BOUND_S < DEFAULT_SHUTDOWN_TIMEOUTS.graceful
+
+    small = parse_shutdown_timeouts({"shutdown_timeout": 1}).graceful
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=small)
+    try:
+        assert writer._revoke_bound_s == stop_bound_seconds(small)
+        assert writer._revoke_bound_s < small
+    finally:
+        writer._conn.close()

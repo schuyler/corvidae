@@ -28,6 +28,7 @@ import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.provenance import PROVENANCE_KEY, decode as decode_provenance
+from corvidae.shutdown import parse_shutdown_timeouts
 from corvidae.session_writer import (
     DEFAULT_WRITE_DEADLINE_S,
     SessionWriter,
@@ -447,10 +448,16 @@ class PersistencePlugin(CorvidaePlugin):
             # and open_session_store sets it before journal_mode and the
             # schema, both of which are writes.
             busy_ms = busy_timeout_ms_from_config(config)
+            # The writer's revoke bound is derived from the configured graceful
+            # phase, so it always fits inside the shutdown it sits in (#1315).
+            graceful_s = parse_shutdown_timeouts(
+                config.get("daemon")
+            ).graceful
             self.db, self.writer = await open_session_store(
                 Path(base_dir) / db_path,
                 journal_mode=journal_mode,
                 busy_timeout_ms=busy_ms,
+                graceful_s=graceful_s,
             )
             logger.info(
                 "SQLite busy timeout set to %d ms", busy_ms,

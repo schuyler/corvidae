@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import quote
 
-from corvidae.shutdown import DEFAULT_SHUTDOWN_TIMEOUTS
+from corvidae.shutdown import DEFAULT_SHUTDOWN_TIMEOUTS, stop_bound_seconds
 
 import aiosqlite
 
@@ -42,10 +42,7 @@ MAX_WRITE_DEADLINE_S: float = 30.0
 #: waits with it. Derived from the graceful shutdown budget less a reserve, the
 #: way ``mcp_client`` derives its stop bound: a constant above that budget would
 #: never elapse inside it, and the diagnostic below would never reach the log.
-CLOSE_RESERVE_SECONDS: float = 0.5
-REVOKE_BOUND_S: float = max(
-    0.1, DEFAULT_SHUTDOWN_TIMEOUTS.graceful - CLOSE_RESERVE_SECONDS
-)
+REVOKE_BOUND_S: float = stop_bound_seconds(DEFAULT_SHUTDOWN_TIMEOUTS.graceful)
 
 # Unit lifecycle states, written only under the unit's lock.
 _RUNNING = "running"
@@ -202,10 +199,20 @@ class WriteCursor:
 class SessionWriter:
     """The one read-write connection to ``sessions.db``."""
 
-    def __init__(self, conn: sqlite3.Connection, path: str | Path = "sessions.db") -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        path: str | Path = "sessions.db",
+        *,
+        revoke_bound_s: float = REVOKE_BOUND_S,
+    ) -> None:
         self._conn = conn
         # Named in the revocation ERRORs, where the issue asks for the path.
         self._path = str(path)
+        #: How long a revocation may take for this writer. Derived from the
+        #: configured ``daemon.shutdown_timeout`` at open time, so the bound
+        #: always fits inside the phase it sits in (#1315).
+        self._revoke_bound_s = revoke_bound_s
         # Serializes units FIFO on the loop; created lazily on first use so
         # the writer can be opened from synchronous code (R6 test).
         self._alock: asyncio.Lock | None = None
@@ -215,7 +222,11 @@ class SessionWriter:
 
     @classmethod
     def open(
-        cls, path: str | Path, *, busy_timeout_ms: int | None = None
+        cls,
+        path: str | Path,
+        *,
+        busy_timeout_ms: int | None = None,
+        graceful_s: float | None = None,
     ) -> "SessionWriter":
         """Open the writer connection, refusing a non-serialized SQLite (R6).
 
@@ -233,6 +244,9 @@ class SessionWriter:
                 "sqlite3 module is built with SQLITE_THREADSAFE=1"
             )
         # Local import: persistence imports this module at load time.
+        revoke_bound_s = (
+            REVOKE_BOUND_S if graceful_s is None else stop_bound_seconds(graceful_s)
+        )
         if busy_timeout_ms is None:
             from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 
@@ -250,7 +264,7 @@ class SessionWriter:
         except BaseException:
             conn.close()
             raise
-        return cls(conn, path)
+        return cls(conn, path, revoke_bound_s=revoke_bound_s)
 
     def _lock(self) -> asyncio.Lock:
         """The asyncio lock, created on first use inside a running loop."""
@@ -355,9 +369,21 @@ class SessionWriter:
         return self._outcome(unit)
 
     def _outcome(self, unit: _Unit) -> T:
-        """Return the unit's recorded result or raise its recorded outcome."""
-        with unit.lock:
+        """Return the unit's recorded result or raise its recorded outcome.
+
+        Never blocks the loop: after a revocation that gave up, the worker holds
+        this lock inside a C call, and a plain ``with unit.lock`` here would wedge
+        the event loop — which also disarms shutdown's force-exit, turning a
+        bounded ugly exit into an unbounded hang (#1315).
+        """
+        if not unit.lock.acquire(blocking=False):
+            # The unit is already known dead: revocation returned None, which
+            # means the worker held this lock for the whole bound.
+            raise WriteRevoked(unit.owner, unit.deadline_s)
+        try:
             state, exc, result = unit.state, unit.exc, unit.result
+        finally:
+            unit.lock.release()
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
         if exc is not None:
@@ -468,7 +494,7 @@ class SessionWriter:
 
     def _revoke(self, unit: _Unit) -> None:
         """Revoke an overrun unit and log the R3 ERROR (daemon thread)."""
-        outcome = self._end_transaction(unit, bound_s=REVOKE_BOUND_S)
+        outcome = self._end_transaction(unit, bound_s=self._revoke_bound_s)
         if outcome is None:
             # The statement is not reaching interrupt(); the loop would hold the
             # write route forever, which is what made shutdown hang (#1315).
@@ -477,7 +503,7 @@ class SessionWriter:
                 "%s; its statement ignores interrupt(), so it is abandoned and "
                 "the route released — the connection is left to process exit "
                 "rather than closed under a running worker",
-                unit.owner, REVOKE_BOUND_S, self._path,
+                unit.owner, self._revoke_bound_s, self._path,
                 extra={"owner": unit.owner},
             )
             unit.state, unit.exc = _REVOKED, None
@@ -564,14 +590,16 @@ class SessionWriter:
         """
         lock = self._lock()
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=REVOKE_BOUND_S)
+            await asyncio.wait_for(lock.acquire(), timeout=self._revoke_bound_s)
         except (asyncio.TimeoutError, TimeoutError):
             self._closed = True
+            owner = self._last_unit.owner if self._last_unit else "unknown"
             logger.error(
-                "the write route was still held %g s into shutdown on %s; the "
-                "unit holding it is not yielding to interrupt(), so the "
-                "connection is left open for process exit",
-                REVOKE_BOUND_S, self._path,
+                "the write route was still held %g s into shutdown on %s by a "
+                "unit from %r; that unit is not yielding to interrupt(), so the "
+                "connection is left open for process exit — if this recurs, add "
+                "the plugin to plugins.disabled and report it",
+                self._revoke_bound_s, self._path, owner, extra={"owner": owner},
             )
             return
         try:
@@ -584,7 +612,7 @@ class SessionWriter:
             unit = self._last_unit
             if unit is not None and unit.state == _RUNNING:
                 outcome = await self._blocking(
-                    lambda: self._end_transaction(unit, bound_s=REVOKE_BOUND_S)
+                    lambda: self._end_transaction(unit, bound_s=self._revoke_bound_s)
                 )
                 if outcome is None:
                     # The statement ignores interrupt(); waiting cannot end it.
@@ -595,7 +623,7 @@ class SessionWriter:
                         "%g s at shutdown on %s; its statement ignores "
                         "interrupt(), so the connection is left open for process "
                         "exit instead of being closed under a running worker",
-                        unit.owner, REVOKE_BOUND_S, self._path,
+                        unit.owner, self._revoke_bound_s, self._path,
                         extra={"owner": unit.owner},
                     )
                     return
@@ -614,6 +642,7 @@ async def open_session_store(
     *,
     journal_mode: str = "wal",
     busy_timeout_ms: int | None = None,
+    graceful_s: float | None = None,
 ) -> tuple[aiosqlite.Connection, SessionWriter]:
     """Open writer, apply journal mode, run schema, then open the reader.
 
@@ -624,7 +653,9 @@ async def open_session_store(
     # Local import: persistence imports this module for its constants.
     from corvidae.persistence import MESSAGE_LOG_SCHEMA
 
-    writer = SessionWriter.open(path, busy_timeout_ms=busy_timeout_ms)
+    writer = SessionWriter.open(
+        path, busy_timeout_ms=busy_timeout_ms, graceful_s=graceful_s
+    )
     try:
         await writer.set_journal_mode(journal_mode)
 
