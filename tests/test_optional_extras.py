@@ -245,7 +245,12 @@ def _importorskip_name(node: ast.stmt) -> str | None:
 
 
 def _import_time_imports(tree: ast.Module):
-    """Yield ``(lineno, top_level_name, guarded_names)`` for import-time imports.
+    """Yield ``(lineno, top_level, guarded_names, target)`` per import-time import.
+
+    ``target`` is the dotted module the statement imports — ``corvidae_cognition
+    .fork_log`` for ``from corvidae_cognition.fork_log import ForkLog`` — which
+    is what the ledger records, so a grant for one module of a package does not
+    pre-approve a different module of the same package (#1321).
 
     Descent is generic on purpose: whatever runs when a module is imported counts
     — module scope, class bodies, and compound statements such as ``with``,
@@ -282,10 +287,10 @@ def _import_time_imports(tree: ast.Module):
                     continue
                 for alias in node.names:
                     if isinstance(node, ast.Import):
-                        top = alias.name.split(".")[0]
+                        target = alias.name
                     else:
-                        top = (node.module or "").split(".")[0]
-                    yield node.lineno, top, frozenset(scope)
+                        target = node.module or ""
+                    yield node.lineno, target.split(".")[0], frozenset(scope), target
                 continue
             yield from walk(list(ast.iter_child_nodes(node)), frozenset(scope))
 
@@ -387,75 +392,106 @@ def _scanned_files() -> list[pathlib.Path]:
 
 _UNGUARDED_DEBT = frozenset({
     # cognition — 68
-    "tests/cognition/test_appraisal_fork.py:corvidae_cognition",
-    "tests/cognition/test_appraisal_no_vector.py:corvidae_cognition",
-    "tests/cognition/test_appraisal_stage2.py:corvidae_cognition",
-    "tests/cognition/test_catchup_late_results.py:corvidae_cognition",
-    "tests/cognition/test_catchup_oversized_tool_call.py:corvidae_cognition",
-    "tests/cognition/test_catchup_segmentation_linear.py:corvidae_cognition",
-    "tests/cognition/test_critique.py:corvidae_cognition",
-    "tests/cognition/test_critique_fork.py:corvidae_cognition",
-    "tests/cognition/test_critique_lenses.py:corvidae_cognition",
+    "tests/cognition/test_appraisal_fork.py:corvidae_cognition.appraisal",
+    "tests/cognition/test_appraisal_no_vector.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_appraisal_stage2.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_catchup_late_results.py:corvidae_cognition.memory",
+    "tests/cognition/test_catchup_oversized_tool_call.py:corvidae_cognition.memory",
+    "tests/cognition/test_catchup_segmentation_linear.py:corvidae_cognition.memory",
+    "tests/cognition/test_critique.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_critique_fork.py:corvidae_cognition.critique",
+    "tests/cognition/test_critique_lenses.py:corvidae_cognition.critique",
     "tests/cognition/test_critique_one_fork.py:corvidae_cognition",
-    "tests/cognition/test_critique_proactivity.py:corvidae_cognition",
-    "tests/cognition/test_critique_vector.py:corvidae_cognition",
-    "tests/cognition/test_default_prompts.py:corvidae_cognition",
-    "tests/cognition/test_driver_memory_role.py:corvidae_cognition",
-    "tests/cognition/test_embed_width.py:corvidae_cognition",
-    "tests/cognition/test_entry_size_target.py:corvidae_cognition",
-    "tests/cognition/test_fork_log.py:corvidae_cognition",
-    "tests/cognition/test_fork_log_digest_granularity.py:corvidae_cognition",
-    "tests/cognition/test_fork_log_read_guard.py:corvidae_cognition",
-    "tests/cognition/test_fork_log_snapshot_capture.py:corvidae_cognition",
-    "tests/cognition/test_funnel_policy.py:corvidae_cognition",
-    "tests/cognition/test_funnel_ponder_and_reload.py:corvidae_cognition",
-    "tests/cognition/test_goals.py:corvidae_cognition",
-    "tests/cognition/test_goals_repair.py:corvidae_cognition",
+    "tests/cognition/test_critique_one_fork.py:corvidae_cognition.critique",
+    "tests/cognition/test_critique_proactivity.py:corvidae_cognition.critique",
+    "tests/cognition/test_critique_proactivity.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_critique_vector.py:corvidae_cognition.critique",
+    "tests/cognition/test_default_prompts.py:corvidae_cognition.critique",
+    "tests/cognition/test_default_prompts.py:corvidae_cognition.memory",
+    "tests/cognition/test_driver_memory_role.py:corvidae_cognition.funnel",
+    "tests/cognition/test_driver_memory_role.py:corvidae_cognition.memory",
+    "tests/cognition/test_embed_width.py:corvidae_cognition.memory",
+    "tests/cognition/test_embed_width.py:corvidae_cognition.retention",
+    "tests/cognition/test_entry_size_target.py:corvidae_cognition.memory",
+    "tests/cognition/test_fork_log.py:corvidae_cognition.fork_log",
+    "tests/cognition/test_fork_log_digest_granularity.py:corvidae_cognition.fork_log",
+    "tests/cognition/test_fork_log_read_guard.py:corvidae_cognition.fork_log",
+    "tests/cognition/test_fork_log_snapshot_capture.py:corvidae_cognition.fork_log",
+    "tests/cognition/test_funnel_policy.py:corvidae_cognition.funnel",
+    "tests/cognition/test_funnel_ponder_and_reload.py:corvidae_cognition.funnel",
+    "tests/cognition/test_goals.py:corvidae_cognition.goals",
+    "tests/cognition/test_goals.py:corvidae_cognition.memory",
+    "tests/cognition/test_goals_repair.py:corvidae_cognition.goals",
     "tests/cognition/test_heartbeat.py:corvidae_cognition",
+    "tests/cognition/test_heartbeat.py:corvidae_cognition.heartbeat",
+    "tests/cognition/test_heartbeat.py:corvidae_cognition.memory",
     "tests/cognition/test_heartbeat_goals.py:corvidae_cognition",
-    "tests/cognition/test_heartbeat_key_aliases.py:corvidae_cognition",
-    "tests/cognition/test_heartbeat_window.py:corvidae_cognition",
-    "tests/cognition/test_lease_scopes.py:corvidae_cognition",
-    "tests/cognition/test_markdown_recall_chunking.py:corvidae_cognition",
-    "tests/cognition/test_markdown_recall_frontmatter.py:corvidae_cognition",
-    "tests/cognition/test_markdown_recall_index.py:corvidae_cognition",
-    "tests/cognition/test_markdown_recall_plugin.py:corvidae_cognition",
-    "tests/cognition/test_markdown_recall_search_hook.py:corvidae_cognition",
-    "tests/cognition/test_memory_catchup.py:corvidae_cognition",
-    "tests/cognition/test_memory_consolidation.py:corvidae_cognition",
-    "tests/cognition/test_memory_contribution.py:corvidae_cognition",
-    "tests/cognition/test_memory_dedup.py:corvidae_cognition",
-    "tests/cognition/test_memory_fork.py:corvidae_cognition",
-    "tests/cognition/test_memory_hybrid_retrieval.py:corvidae_cognition",
+    "tests/cognition/test_heartbeat_goals.py:corvidae_cognition.goals",
+    "tests/cognition/test_heartbeat_goals.py:corvidae_cognition.heartbeat",
+    "tests/cognition/test_heartbeat_goals.py:corvidae_cognition.memory",
+    "tests/cognition/test_heartbeat_key_aliases.py:corvidae_cognition.goals",
+    "tests/cognition/test_heartbeat_key_aliases.py:corvidae_cognition.memory",
+    "tests/cognition/test_heartbeat_window.py:corvidae_cognition.heartbeat",
+    "tests/cognition/test_heartbeat_window.py:corvidae_cognition.memory",
+    "tests/cognition/test_lease_scopes.py:corvidae_cognition.appraisal",
+    "tests/cognition/test_lease_scopes.py:corvidae_cognition.critique",
+    "tests/cognition/test_lease_scopes.py:corvidae_cognition.memory",
+    "tests/cognition/test_lease_scopes.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_markdown_recall_chunking.py:corvidae_cognition.markdown_recall.chunking",
+    "tests/cognition/test_markdown_recall_frontmatter.py:corvidae_cognition.markdown_recall.frontmatter",
+    "tests/cognition/test_markdown_recall_index.py:corvidae_cognition.markdown_recall.index",
+    "tests/cognition/test_markdown_recall_plugin.py:corvidae_cognition.markdown_recall",
+    "tests/cognition/test_markdown_recall_plugin.py:corvidae_cognition.markdown_recall.index",
+    "tests/cognition/test_markdown_recall_search_hook.py:corvidae_cognition.markdown_recall",
+    "tests/cognition/test_memory_catchup.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_consolidation.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_contribution.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_dedup.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_fork.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_hybrid_retrieval.py:corvidae_cognition.memory",
     "tests/cognition/test_memory_idle_clock.py:corvidae_cognition",
-    "tests/cognition/test_memory_integration.py:corvidae_cognition",
-    "tests/cognition/test_memory_line_ids.py:corvidae_cognition",
-    "tests/cognition/test_memory_query_context.py:corvidae_cognition",
-    "tests/cognition/test_memory_raw_fallback.py:corvidae_cognition",
-    "tests/cognition/test_memory_recall_identity.py:corvidae_cognition",
-    "tests/cognition/test_memory_relative_gate.py:corvidae_cognition",
-    "tests/cognition/test_memory_retention.py:corvidae_cognition",
-    "tests/cognition/test_memory_retrieval.py:corvidae_cognition",
-    "tests/cognition/test_memory_schema.py:corvidae_cognition",
-    "tests/cognition/test_memory_stamps.py:corvidae_cognition",
-    "tests/cognition/test_memory_tools.py:corvidae_cognition",
-    "tests/cognition/test_memory_turn_backoff.py:corvidae_cognition",
-    "tests/cognition/test_memory_turn_trigger.py:corvidae_cognition",
-    "tests/cognition/test_memory_window_exclusion.py:corvidae_cognition",
-    "tests/cognition/fork_log_store.py:corvidae_cognition",
-    "tests/cognition/test_plugin_shutdown_wired.py:corvidae_cognition",
-    "tests/cognition/test_prompt_routing.py:corvidae_cognition",
-    "tests/cognition/test_recall_contribution.py:corvidae_cognition",
+    "tests/cognition/test_memory_idle_clock.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_integration.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_line_ids.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_query_context.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_raw_fallback.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_recall_identity.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_relative_gate.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_retention.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_retention.py:corvidae_cognition.memory_tools",
+    "tests/cognition/test_memory_retention.py:corvidae_cognition.retention",
+    "tests/cognition/test_memory_retrieval.py:corvidae_cognition.funnel",
+    "tests/cognition/test_memory_retrieval.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_schema.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_stamps.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_tools.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_tools.py:corvidae_cognition.memory_tools",
+    "tests/cognition/test_memory_turn_backoff.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_turn_trigger.py:corvidae_cognition.memory",
+    "tests/cognition/test_memory_window_exclusion.py:corvidae_cognition.memory",
+    "tests/cognition/fork_log_store.py:corvidae_cognition.fork_log",
+    "tests/cognition/test_plugin_shutdown_wired.py:corvidae_cognition.critique",
+    "tests/cognition/test_plugin_shutdown_wired.py:corvidae_cognition.memory",
+    "tests/cognition/test_prompt_routing.py:corvidae_cognition.appraisal",
+    "tests/cognition/test_prompt_routing.py:corvidae_cognition.critique",
+    "tests/cognition/test_prompt_routing.py:corvidae_cognition.goals",
+    "tests/cognition/test_prompt_routing.py:corvidae_cognition.heartbeat",
+    "tests/cognition/test_prompt_routing.py:corvidae_cognition.memory",
+    "tests/cognition/test_recall_contribution.py:corvidae_cognition.markdown_recall",
+    "tests/cognition/test_recall_contribution.py:corvidae_cognition.recall",
     "tests/cognition/test_reconsolidate.py:corvidae_cognition",
-    "tests/cognition/test_redact_cascade.py:corvidae_cognition",
-    "tests/cognition/test_redact_exchange_log.py:corvidae_cognition",
-    "tests/cognition/test_retention_write_txn.py:corvidae_cognition",
-    "tests/cognition/test_retrieval_benchmark.py:corvidae_cognition",
-    "tests/cognition/test_retrieval_candidates.py:corvidae_cognition",
-    "tests/cognition/test_retrieval_log_prune.py:corvidae_cognition",
-    "tests/cognition/test_skills.py:corvidae_cognition",
+    "tests/cognition/test_reconsolidate.py:corvidae_cognition.memory",
+    "tests/cognition/test_redact_cascade.py:corvidae_cognition.memory",
+    "tests/cognition/test_redact_exchange_log.py:corvidae_cognition.outcome_log",
+    "tests/cognition/test_retention_write_txn.py:corvidae_cognition.retention",
+    "tests/cognition/test_retrieval_benchmark.py:corvidae_cognition.memory",
+    "tests/cognition/test_retrieval_candidates.py:corvidae_cognition.memory",
+    "tests/cognition/test_retrieval_log_prune.py:corvidae_cognition.retention",
+    "tests/cognition/test_skills.py:corvidae_cognition.skills",
     # test_planning — 2
-    "tests/test_planning/test_planning_lens.py:corvidae_cognition",
+    "tests/test_planning/test_planning_lens.py:corvidae_cognition.goals",
+    "tests/test_planning/test_planning_lens.py:corvidae_planning",
+    "tests/test_planning/test_planning_lens.py:corvidae_cognition.goals",
     "tests/test_planning/test_planning_lens.py:corvidae_planning",
     # corvidae_restart — 1
     "tests/corvidae_restart/test_restart.py:corvidae_restart",
@@ -465,7 +501,7 @@ _UNGUARDED_DEBT = frozenset({
     # test_alignment — 1
     "tests/test_alignment/test_alignment_lens.py:corvidae_alignment",
     # test_goals_notify — 1
-    "tests/test_goals_notify/test_goals_notify.py:corvidae_cognition",
+    "tests/test_goals_notify/test_goals_notify.py:corvidae_cognition.goals",
     # test_inotify — 1
     "tests/test_inotify/test_inotify_ping.py:corvidae_inotify",
     # test_outbound_cap — 1
@@ -481,15 +517,15 @@ _UNGUARDED_DEBT = frozenset({
 
 
 def _tree_unguarded_pairs() -> set[str]:
-    """Every ``relative/path.py:package`` pair the tree imports unguarded."""
+    """Every ``relative/path.py:dotted.module`` pair the tree imports unguarded."""
     extra_names = _extra_import_names()
     found = set()
     for path in _scanned_files():
         tree = ast.parse(path.read_text(), filename=str(path))
         relative = path.relative_to(_REPO_ROOT).as_posix()
-        for _lineno, top, guarded in _import_time_imports(tree):
+        for _lineno, top, guarded, target in _import_time_imports(tree):
             if top in extra_names and top not in guarded:
-                found.add(f"{relative}:{top}")
+                found.add(f"{relative}:{target}")
     return found
 
 
@@ -621,7 +657,7 @@ def test_module_scope_importorskip_vouches_for_its_package():
         "pytest.importorskip('corvidae_vision')\n"
         "from corvidae_vision import Vision\n"
     )
-    [(lineno, _name, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    [(lineno, _name, guarded, _target)] = [e for e in entries if e[1] == "corvidae_vision"]
     assert lineno == 3
     assert "corvidae_vision" in guarded
 
@@ -633,7 +669,7 @@ def test_importorskip_for_a_different_package_vouches_for_nothing():
         "pytest.importorskip('playwright.async_api')\n"
         "from corvidae_vision import Vision\n"
     )
-    [(_, _, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    [(_, _, guarded, _target)] = [e for e in entries if e[1] == "corvidae_vision"]
     assert "corvidae_vision" not in guarded
 
 
@@ -644,5 +680,5 @@ def test_importorskip_vouches_only_for_the_imports_below_it():
         "import pytest\n"
         "pytest.importorskip('corvidae_vision')\n"
     )
-    [(_, _, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    [(_, _, guarded, _target)] = [e for e in entries if e[1] == "corvidae_vision"]
     assert "corvidae_vision" not in guarded
