@@ -827,3 +827,27 @@ def test_the_ledger_literal_has_no_duplicate_lines():
         raise AssertionError("_UNGUARDED_DEBT literal not found")
     duplicates = sorted({e for e in entries if entries.count(e) > 1})
     assert not duplicates, f"duplicate _UNGUARDED_DEBT lines: {duplicates}"
+
+
+def test_a_second_site_of_a_granted_key_needs_its_count(monkeypatch):
+    """The ``#N`` count is what a repeated key relies on (#1321).
+
+    Without ``#N`` a ledger line grants exactly one site, so a second unguarded
+    import of the same dotted module in the same file has to show up as new
+    debt. This drives the arithmetic directly so the branch is pinned by a test
+    rather than by a manual run in a dirty worktree.
+    """
+    key = "tests/cognition/example.py:corvidae_cognition.goals"
+    monkeypatch.setattr(sys.modules[__name__], "_tree_unguarded_sites", lambda: {key: 2})
+    monkeypatch.setattr(sys.modules[__name__], "_UNGUARDED_DEBT", frozenset({key}))
+    with pytest.raises(AssertionError) as excinfo:
+        test_no_new_unguarded_extra_imports()
+    assert f"{key} (x2)" in str(excinfo.value)
+
+    monkeypatch.setattr(sys.modules[__name__], "_UNGUARDED_DEBT", frozenset({f"{key}#2"}))
+    test_no_new_unguarded_extra_imports()  # granted at that count: no failure
+
+    monkeypatch.setattr(sys.modules[__name__], "_tree_unguarded_sites", lambda: {key: 1})
+    with pytest.raises(AssertionError) as excinfo:
+        test_ledger_has_no_stale_entries()
+    assert "granted x2, found x1" in str(excinfo.value)
