@@ -131,7 +131,16 @@ def _dispatched_prompt_sha(channel) -> bytes | None:
     a miss, never a false match.
     """
     blocks = _window_blocks(channel)
-    return prompt_sha256(blocks) if blocks else None
+    if not blocks:
+        return None
+    try:
+        return prompt_sha256(blocks)
+    except Exception:
+        # A window that cannot be hashed is a key this line does not have. The
+        # write-off still says everything else it said, and the miss stays out of
+        # the caller: #1333 is the catalogue of row shapes that make serializing
+        # raise.
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -2261,6 +2270,7 @@ class CritiquePlugin(CorvidaePlugin):
         # Set once the pre-render wait is over: tells a deadline that hit
         # while the channel was still busy from one that hit after it.
         forking = False
+        dispatched_sha: bytes | None = None
         try:
             # The two warnings below report a span measured on the event loop's
             # own clock, read *before* the timer is armed. Not a
@@ -2309,6 +2319,12 @@ class CritiquePlugin(CorvidaePlugin):
                 agent, cut = target if idle else (target, None)
                 epoch = self._compactions.get(channel.id, 0)
 
+                # The key of the prompt about to be dispatched, read here and not
+                # in a handler: after a compaction the window holds something other
+                # than what the fork was sent, and hashing that would name a row
+                # belonging to a different fork.
+                dispatched_sha = _dispatched_prompt_sha(channel)
+
                 async def stay_quiet() -> None:
                     """Between rounds: wait out a waiting message, then stop
                     the fork if the channel compacted since it started."""
@@ -2334,11 +2350,10 @@ class CritiquePlugin(CorvidaePlugin):
                 )
                 parsed = _parse_json_block(result.text)
         except _ForkStale:
-            sha = _dispatched_prompt_sha(channel) if forking else None
             for lens in lenses:
                 self._skip_lens(
                     channel, lens, trace_id, "the channel compacted while the fork ran",
-                    fork_sha=sha)
+                    fork_sha=dispatched_sha)
             return None
         except Exception as exc:
             # Only the deadline's own expiry is a timeout miss; a TimeoutError
@@ -2351,16 +2366,14 @@ class CritiquePlugin(CorvidaePlugin):
                     else f"the channel stayed busy past critique.fork_timeout "
                          f"({timeout} s) after {waited:.3f}s")
                 # A busy-wait miss dispatched nothing, so it names no prompt.
-                sha = _dispatched_prompt_sha(channel) if forking else None
                 for lens in lenses:
-                    self._skip_lens(channel, lens, trace_id, reason, fork_sha=sha)
+                    self._skip_lens(channel, lens, trace_id, reason, fork_sha=dispatched_sha)
                 return None
-            sha = _dispatched_prompt_sha(channel) if forking else None
             for lens in lenses:
                 self._skip_lens(
                     channel, lens, trace_id,
                     f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                    fork_sha=sha,
+                    fork_sha=dispatched_sha,
                     exc_info=True,
                 )
             return None

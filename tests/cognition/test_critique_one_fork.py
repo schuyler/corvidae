@@ -33,7 +33,6 @@ import pytest
 
 from corvidae_cognition import critique as critique_module
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
-from corvidae_cognition.fork_log import prompt_sha256
 
 from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
@@ -713,7 +712,7 @@ async def test_r5_5_the_deadline_warning_names_the_abandoned_prompt(tmp_path, ca
     try:
         await _judged_turn(env, "k337a", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
-        expected = prompt_sha256(critique_module._window_blocks(env.channel)).hex()
+        expected = critique_module.prompt_sha256(critique_module._window_blocks(env.channel)).hex()
         assert f"fork prompt_sha256={expected}" in text, text
     finally:
         await _teardown(env)
@@ -780,6 +779,81 @@ async def test_the_prompt_key_joins_a_write_off_to_the_row_of_the_same_window(
         assert f"fork prompt_sha256={row_sha}" not in moved[1], moved[1]
     finally:
         await _teardown(env)
+
+
+async def test_the_compaction_miss_names_the_prompt_that_was_dispatched(
+    tmp_path, caplog
+):
+    """#1337: the key names the abandoned prompt, not whatever the window holds by
+    the time the miss is logged. The window moves while the fork is in flight, so
+    hashing it in the handler would name a different fork's row.
+    """
+
+    async def compacts_and_moves(i, channel):
+        if i:
+            return
+        msgs = channel.conversation.messages
+        msgs.append(
+            {"role": "user", "content": "the compaction's cut", "_db_id": 88,
+             "_message_type": msgs[-1]["_message_type"]}
+        )
+        await env.plugin.before_compaction(
+            channel=channel, compacted_ids=[], cut=0
+        )
+
+    agent = RoundsForkAgent(
+        {"critique"}, text=KEYED_PREDICTIVE, on_request=compacts_and_moves
+    )
+    env = await _env_with(tmp_path, agent, with_held=True)
+    _watch_held(env)
+    dispatched = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337f", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "compacted while the fork ran")
+        assert f"fork prompt_sha256={dispatched}" in text, text
+    finally:
+        await _teardown(env)
+
+
+async def test_a_fork_that_fails_mid_flight_is_written_off_with_its_prompt(
+    tmp_path, caplog
+):
+    """#1337: the key is not timeout-specific. A fork that raises was dispatched,
+    and its write-off names the prompt it was sent with."""
+
+    class Boom(RoundsForkAgent):
+        async def fork(self, channel, instruction, **kwargs):
+            raise RuntimeError("provider exploded")
+
+    agent = Boom({"critique"}, text=KEYED_PREDICTIVE)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 5}})
+    dispatched = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337g", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "the fork failed or its reply was unusable")
+        assert f"fork prompt_sha256={dispatched}" in text, text
+    finally:
+        await _teardown(env)
+
+
+def test_a_window_that_cannot_be_hashed_yields_no_key_rather_than_a_raise():
+    """#1337: the key is computed on the way out of an exception handler, so it
+    must not raise there -- a hash failure would replace the caught exception and
+    swallow the skip line it was meant to decorate.
+    """
+    unhashable = type("C", (), {"conversation": type("V", (), {"messages": [
+        {"role": "user", "content": object()}]})})()
+    assert critique_module._dispatched_prompt_sha(unhashable) is None
+    # Positive control: the same call on a window that can be serialized keys it.
+    hashable = type("C", (), {"conversation": type("V", (), {"messages": [
+        {"role": "user", "content": "m1"}]})})()
+    assert critique_module._dispatched_prompt_sha(hashable) is not None
 
 # ---------------------------------------------------------------------------
 # The two config keys: startup, reload, fork time
