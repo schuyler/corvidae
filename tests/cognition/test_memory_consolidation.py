@@ -18,6 +18,7 @@ import pytest
 
 from fake_clock import install_kernel_clock
 from helpers import add_kernel_registry, open_test_store
+from .vec_seed import load_vec_for_seed
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
@@ -94,6 +95,10 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     config = with_chat_llm(config or EMBED_CONFIG)
     # A file-backed store (a fresh temp file for ":memory:", which the write
     # route refuses): ``db`` seeds, the reader/writer pair is what plugins see.
+    # A config that names its session DB (the fork_log tests read that file)
+    # is honoured when no path is given.
+    if db_path == ":memory:":
+        db_path = config.get("daemon", {}).get("session_db")
     db, reader, writer = await open_test_store(db_path)
 
     pm = create_plugin_manager()
@@ -126,6 +131,8 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     prior.score = AsyncMock(return_value=0.7)
     memory.importance_prior = prior
 
+    # Tests read memory_vec through the seeding connection.
+    await load_vec_for_seed(db)
     channel = Channel(transport="irc", scope="#test")
     return memory, persistence, stub, channel, db
 

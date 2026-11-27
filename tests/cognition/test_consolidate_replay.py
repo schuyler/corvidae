@@ -369,7 +369,13 @@ async def test_catch_up_asks_for_the_consolidation_stage(tmp_path):
     plugin._llm = lambda: llm
 
     db = await _seed_db(tmp_path / "t.db", [_row(1, "user", "hi")])
-    plugin._resolve_db = lambda: db
+
+    # The schema belongs to the write route, which this hand-seeded database
+    # has no part in; the test only needs _catch_up to read from ``db``.
+    async def _schema_ready() -> aiosqlite.Connection:
+        return db
+
+    plugin._ensure_schema = _schema_ready
 
     class _FakeAgent:
         async def view_inputs(self, channel_id):

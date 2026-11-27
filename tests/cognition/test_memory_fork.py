@@ -117,9 +117,10 @@ async def test_stash_from_a_different_watermark_is_discarded(env):
     await memory.before_compaction(channel=channel, compacted_ids=ids[:3], cut=3)
     # Let the background fork (#628) read the watermark and finish first.
     await memory.wait_for_background_tasks()
-    mem_db = await memory._ensure_schema()
-    await memory._set_watermark(mem_db, channel.id, ids[0])
-    await mem_db.commit()
+    await memory._ensure_schema()
+    await memory._persistence().write(
+        lambda cur: memory._set_watermark(cur, channel.id, ids[0]), owner="test"
+    )
     await memory.on_compaction(channel=channel, summary_msg={}, retain_count=1, compacted_ids=ids[:3])
     await memory.wait_for_background_tasks()
     assert len(_view_requests(stub)) == 1
@@ -270,9 +271,11 @@ async def test_range_boundary_sentence(env, summary, watermark_index, expected):
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     channel.conversation = window_of(channel.id, ids, summary=summary, contents=[c for _, c in DIALOG])
     if watermark_index is not None:
-        mem_db = await memory._ensure_schema()
-        await memory._set_watermark(mem_db, channel.id, ids[watermark_index])
-        await mem_db.commit()
+        await memory._ensure_schema()
+        await memory._persistence().write(
+            lambda cur: memory._set_watermark(cur, channel.id, ids[watermark_index]),
+            owner="test",
+        )
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     assert expected in agent.calls[0]["instruction"]
 

@@ -35,6 +35,7 @@ import pytest
 from corvidae_cognition.memory import WORST_MEMORY_LINE_PREFIX, MemoryPlugin
 from fake_clock import install_kernel_clock
 from helpers import attach_store, fresh_session_db_path, stub_llm_config, with_chat_llm
+from .vec_seed import load_vec_for_seed
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType, count_tokens
@@ -92,6 +93,8 @@ async def build_env(config: dict | None = None, *, with_spy_funnel: bool = False
     pm.register(memory, name="memory")
     await memory.on_init(pm=pm, config=config)
     await memory.on_start(config=config)
+    # Seed rows are written through the seeding connection, so it needs vec0.
+    await load_vec_for_seed(db)
     channel = Channel(transport="irc", scope="#electronics")
     conv = ContextWindow(channel.id)
     channel.conversation = conv

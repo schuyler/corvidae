@@ -674,10 +674,14 @@ class TestRetrievalLogSimilarity:
         # shape and rerun the schema pass twice at once, as two first
         # retrievals after a deferred start would.
         memory._schema_ready = False
-        await db.execute("ALTER TABLE retrieval_log DROP COLUMN top_similarity")
-        await db.commit()
+        await memory._persistence().write(
+            lambda cur: cur.execute(
+                "ALTER TABLE retrieval_log DROP COLUMN top_similarity"
+            ),
+            owner="test",
+        )
         results = await asyncio.gather(memory._ensure_schema(), memory._ensure_schema())
-        assert all(r is db for r in results)
+        assert all(r is memory._resolve_db() for r in results)
         async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
             cols = {row[1] for row in await cursor.fetchall()}
         assert "top_similarity" in cols

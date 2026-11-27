@@ -10,7 +10,6 @@ Only passive retrieval logs: a direct ``retrieve()`` call writes nothing.
 """
 
 import logging
-import sqlite3
 
 import pytest
 from corvidae_cognition.memory import FTS_SIMILARITY_PROXY
@@ -284,25 +283,18 @@ class TestFailSoft:
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed(db, channel.id, QUERY, 1, 2)
 
-        def wrap(original):
-            """Fail any statement that writes retrieval_candidate."""
-            def guarded(sql, *args, **kwargs):
-                # Sync on purpose: aiosqlite's execute() returns an object
-                # usable with both await and async with.
-                lowered = sql.lower()
-                if "retrieval_candidate" in lowered and "insert" in lowered:
-                    raise sqlite3.OperationalError("disk I/O error (test)")
-                return original(sql, *args, **kwargs)
-            return guarded
-
-        db.execute = wrap(db.execute)
-        db.executemany = wrap(db.executemany)
+        # Fail any statement that writes retrieval_candidate: a trigger
+        # aborts the insert inside the write unit, as a disk error would.
+        await db.execute(
+            "CREATE TRIGGER fail_candidate BEFORE INSERT ON retrieval_candidate "
+            "BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END"
+        )
         with caplog.at_level(logging.WARNING):
             await ask_plain(memory, channel, conv, QUERY)
 
         assert len(context_messages(conv)) == 1
-        # The retrieval_log row was committed, not left in an open transaction.
-        assert not db.in_transaction
+        # The retrieval_log row was committed (visible to this other
+        # connection), not left in an open transaction.
         ids = await retrieval_ids(db)
         assert len(ids) == 1
         async with db.execute(
