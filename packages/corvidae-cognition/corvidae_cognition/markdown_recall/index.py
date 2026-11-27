@@ -542,7 +542,38 @@ class MarkdownIndex:
                         continue
                 await self._delete_file(db, path)
             await db.commit()
-            await self._warn_missing_vectors(db)
+            await self._repair_missing_vectors(db, files)
+
+    async def _repair_missing_vectors(
+        self, db: aiosqlite.Connection, files: dict[str, tuple[int, int]]
+    ) -> None:
+        """Re-embed the files whose chunks have no vector, then report (#1203).
+
+        The sentinel this module writes only marks batches that fail from now
+        on. Rows written before it carry their real hash and their walk stat, so
+        they satisfy the shortcut in ``reconcile`` and would never be retried --
+        which is exactly the state the issue was filed from (707 chunks, five
+        paths, real hashes). Keyed on the vector row, not on the hash, so those
+        hosts heal on their next reconcile.
+        """
+        if not self._vec_available:
+            return
+        try:
+            async with db.execute(
+                "SELECT DISTINCT c.path FROM chunks c LEFT JOIN chunks_vec v "
+                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
+            ) as cursor:
+                paths = [r["path"] for r in await cursor.fetchall()]
+        except Exception:  # no vector table is not a reconcile failure
+            return
+        for path in paths:
+            stat = files.get(path)
+            if stat is None:
+                continue  # not in this walk: the prune already removed it
+            # prev None forces a re-chunk and a re-embed; a failure writes the
+            # sentinel again, so the retry continues next time.
+            await self._reconcile_file(db, path, stat[0], stat[1], None)
+        await self._warn_missing_vectors(db)
 
     async def _warn_missing_vectors(self, db: aiosqlite.Connection) -> None:
         """Say how many chunks have no vector; say they are being retried (#1203).

@@ -380,3 +380,50 @@ async def test_a_healthy_reconcile_retries_a_file_whose_batch_failed(
         "an unchanged file with an empty hash must still be re-embedded"
     )
     assert calls["hash"][-1] != "", "the successful batch settles the file"
+
+
+async def test_a_host_with_pre_existing_unembedded_chunks_heals(
+    build, tmp_path, monkeypatch
+):
+    """#1203 review: rows written before the sentinel carry a real hash.
+
+    They satisfy the size/mtime shortcut, so the empty-hash marker cannot find
+    them. The sweep keys on the missing vector row instead, which is the only
+    thing those hosts have in common with a fresh failure.
+    """
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha beta gamma content"})
+    config = {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    env = await build(config, root)
+    await env.source.on_start(config)
+    await env.source._startup_task
+    index = env.source._index
+    db = index._db
+
+    calls = {"embed": 0}
+
+    async def capture(db_, path, size, mtime_ns, content_hash, chunks, vectors):
+        await db_.execute(
+            "INSERT OR REPLACE INTO manifest (path, size, mtime_ns, content_hash, "
+            "chunk_count) VALUES (?, ?, ?, ?, ?)",
+            (path, size, mtime_ns, content_hash, len(chunks)),
+        )
+        await db_.commit()
+
+    async def healthy(texts, kind):
+        calls["embed"] += 1
+        return [[0.1, 0.2] for _ in texts]
+
+    monkeypatch.setattr(index, "_vec_available", True)
+    monkeypatch.setattr(index, "_replace_file_chunks", capture)
+    monkeypatch.setattr(index, "_embed", healthy)
+    # The vector table the old host has, with none of this file's rows in it:
+    # the manifest still carries the real hash written before #1203.
+    await db.execute("CREATE TABLE IF NOT EXISTS chunks_vec (rowid INTEGER PRIMARY KEY, embedding BLOB)")
+    await db.commit()
+    async with db.execute("SELECT content_hash FROM manifest") as c:
+        [(real_hash,)] = await c.fetchall()
+    assert real_hash, "the pre-existing row must look settled, as the issue's host does"
+
+    await index.reconcile()
+    assert calls["embed"] >= 1, "a settled hash must not protect a chunk with no vector"
