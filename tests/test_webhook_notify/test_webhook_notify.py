@@ -527,3 +527,82 @@ async def test_a_channel_listed_twice_is_notified_once(tmp_path):
     await plugin._deliver(delivery({"n": 1}))
 
     assert [c["channel"] for c in rec.calls] == ["irc:#a"]
+
+
+# ---------------------------------------------------------------------------
+# #853: a failed flush keeps its digest, and on_stop stops a running one
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_flush_keeps_its_deliveries_and_does_not_spend_the_slot(
+    tmp_path, caplog
+):
+    """AC: a flush whose send raises restores its deliveries and the cap slot."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": {"channels": ["irc:#a"], "max_notifications": 1,
+                                 "per_seconds": 30}},
+    })
+    real_notify = plugin._notify
+
+    async def refusing(endpoint, deliveries, dropped):
+        raise RuntimeError("the spill service is down")
+
+    plugin._notify = refusing
+    with caplog.at_level(logging.WARNING, logger="webhook_notify"):
+        await plugin._deliver(delivery({"n": 1}))
+        await settle()
+
+    state = plugin._state["github"]
+    assert [d.payload for d in state.buffer] == [{"n": 1}], "the digest was lost"
+    assert list(state.flushes) == [], "a failed send must not spend a cap slot"
+    assert any("did not accept a digest" in r.getMessage() for r in caplog.records)
+
+    # With the service back, the next window sends what was kept.
+    plugin._notify = real_notify
+    await plugin._deliver(delivery({"n": 2}))
+    await settle()
+    text = rec.calls[-1]["text"]
+    assert '"n":1' in text and '"n":2' in text
+
+
+async def test_on_stop_cancels_a_flush_that_is_already_running(tmp_path):
+    """AC: a flush in flight at shutdown is stopped, not finished."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def gated(endpoint, deliveries, dropped):
+        started.set()
+        await gate.wait()
+
+    plugin._notify = gated
+    await plugin._deliver(delivery({"n": 1}))
+    await asyncio.wait_for(started.wait(), 2)
+    await plugin.on_stop()
+    gate.set()
+    await settle()
+
+    assert rec.calls == [], "nothing may be sent after on_stop returns"
+    assert [d.payload for d in plugin._state["github"].buffer] == [{"n": 1}], (
+        "a cancelled flush puts its deliveries back rather than losing them"
+    )
+
+
+async def test_a_delivery_after_on_stop_is_buffered_and_never_armed(tmp_path):
+    """AC: a late delivery does not arm a timer into a stopped plugin."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    await plugin.on_stop()
+    await plugin._deliver(delivery({"n": 1}))
+    await settle()
+
+    state = plugin._state["github"]
+    assert rec.calls == []
+    assert state.window is None
+    assert [d.payload for d in state.buffer] == [{"n": 1}]
