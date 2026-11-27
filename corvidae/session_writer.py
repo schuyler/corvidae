@@ -413,10 +413,17 @@ class SessionWriter:
         bounded ugly exit into an unbounded hang (#1315).
         """
         if not unit.lock.acquire(blocking=False):
-            # The unit is already known dead: revocation returned None, which
-            # means the worker held this lock for the whole bound. Its outcome is
-            # unknown, not rolled back — the worker's own COMMIT may still land.
-            raise WriteAbandoned(unit.owner, self._path)
+            if not self._abandoned:
+                # A healthy writer reaches here when the worker signalled `done`
+                # from inside the lock (a failed BEGIN) and has not released it
+                # yet: wait for that release and report the worker's real error,
+                # not "this writer refuses writes until restart" (#1328).
+                unit.lock.acquire()
+            else:
+                # Abandoned: the worker holds this lock inside a C call, so the
+                # wait would be unbounded. Its outcome is unknown, not rolled
+                # back — its own COMMIT may still land.
+                raise WriteAbandoned(unit.owner, self._path)
         try:
             state, exc, result = unit.state, unit.exc, unit.result
         finally:
@@ -425,10 +432,14 @@ class SessionWriter:
         # branch writes none, so this unit can read _RUNNING, _COMMITTED if the
         # worker's own COMMIT later landed, or _REVOKED from an earlier unit on
         # the same writer. None of those may hand the caller a result or tell it
-        # the write was rolled back (#1315). No identity test: `write()` refuses
-        # once abandoned, so a unit reaching here on an abandoned writer is one
-        # that was abandoned, and a condition that can only be true is one more
-        # place to be wrong.
+        # the write was rolled back (#1315). No identity test, and this is why it
+        # is safe to drop rather than because it could never matter: `_outcome`
+        # is reachable only from `_run_unit`, which assigns `_last_unit` while it
+        # holds the route lock, so no other unit can be `_last_unit` here. A unit
+        # queued behind the one that was abandoned does reach this method on a
+        # writer that was healthy when it called `write()` — the refusal check at
+        # entry runs before the route lock — and for that unit the flag is still
+        # the right answer: its own answer is unknown too.
         if self._abandoned:
             raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
