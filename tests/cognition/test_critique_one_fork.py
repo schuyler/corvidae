@@ -551,17 +551,21 @@ class _StallingAsyncio:
         return getattr(asyncio, name)
 
 
-async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(tmp_path, caplog, monkeypatch):
+@pytest.mark.parametrize("stall,lo,hi", [(0.02, 0.016, 0.05), (0.10, 0.08, 0.15)])
+async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(
+    tmp_path, caplog, monkeypatch, stall, lo, hi
+):
     """The reported wait covers the whole span the deadline bounded (#1304).
 
     A stall between arming and the fork's first statement is injected here
     rather than hoped for. A stopwatch started inside the block — on either
     clock — reports a wait near zero for a fork that never ran: below the
-    allowance and far below the 0.08 s of wall time the loop really lost. The
-    window the assertion checks — at least the 0.02 s allowance plus half the
-    injected stall, at most 0.20 s — sits between those two readings, so it
-    separates them without needing the stall to land exactly. A report of the
-    allowance alone, or a number scaled by a unit mistake, falls outside it.
+    allowance and far below the wall time the loop really lost.
+
+    Two stall sizes rather than one, because a magnitude window alone is
+    satisfiable by a fabricated constant. The bounds here have no value in
+    common across the pair — 0.016..0.05 against 0.08..0.15 — so the only way
+    through is to report something that moves with the time actually lost.
     """
     async def hangs(i, channel):
         try:
@@ -571,7 +575,7 @@ async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(tmp_path, cap
 
     agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
     env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.02}})
-    monkeypatch.setattr(critique_module, "asyncio", _StallingAsyncio(stall=0.08))
+    monkeypatch.setattr(critique_module, "asyncio", _StallingAsyncio(stall=stall))
     caplog.set_level(logging.WARNING)
     try:
         await _judged_turn(env, "kdp", PREDICTIVE_ONLY)
@@ -582,12 +586,9 @@ async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(tmp_path, cap
             f"allowance it named: {text!r}"
         )
         waited = float(m.group(1))
-        # Floor: the allowance plus half the injected stall. Reporting the
-        # allowance (0.020) or a bare 0.05 constant fails it; the real span is
-        # the 0.08 s stall plus delivery of the cancellation. Ceiling: kills a
-        # number taken off another clock or scaled by a unit mistake.
-        assert 0.06 <= waited <= 0.20, (
-            f"the printed wait does not match the span the deadline bounded: {text!r}"
+        assert lo <= waited <= hi, (
+            f"a {stall}s stall must be reported as that much of the 0.02 s allowance, "
+            f"not {waited}: {text!r}"
         )
     finally:
         await _teardown(env)
