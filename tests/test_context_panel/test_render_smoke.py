@@ -9,7 +9,8 @@ routing, scroll rules, colors and chat hand-off of the context section.
 Like tests/test_web_render_smoke.py it is skipped without Playwright, and the
 ``web-smoke`` CI job fails if it is skipped. To run it locally::
 
-    uv run --with playwright pytest tests/test_context_panel/test_render_smoke.py
+    uv run --with playwright --extra context-panel \
+        pytest tests/test_context_panel/test_render_smoke.py
 """
 
 from __future__ import annotations
