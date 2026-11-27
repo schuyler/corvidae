@@ -14,6 +14,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import warnings
 import tomllib
 from pathlib import Path
 
@@ -414,7 +415,7 @@ _UNGUARDED_DEBT = frozenset({
     "tests/cognition/test_memory_turn_backoff.py:corvidae_cognition",
     "tests/cognition/test_memory_turn_trigger.py:corvidae_cognition",
     "tests/cognition/test_memory_window_exclusion.py:corvidae_cognition",
-    "tests/cognition/test_memory_write_conn.py:corvidae_cognition",
+    "tests/cognition/fork_log_store.py:corvidae_cognition",
     "tests/cognition/test_plugin_shutdown_wired.py:corvidae_cognition",
     "tests/cognition/test_probe.py:corvidae_cognition",
     "tests/cognition/test_prompt_routing.py:corvidae_cognition",
@@ -498,12 +499,17 @@ def test_no_new_unguarded_extra_imports():
             '"with optional_extra("<name>"):" before the import):\n  '
             + "\n  ".join(new_debt)
         )
-    if cleared:
-        message.append(
-            "guarded since the ledger was written — delete these lines from "
-            "_UNGUARDED_DEBT in the same commit:\n  " + "\n  ".join(cleared)
-        )
     assert not message, "\n".join(message)
+    if cleared:
+        # Drift in the ledger's other direction is not the fault of the branch
+        # that runs this test: warn, so an unledgered entry is fixed on purpose
+        # (#1319) instead of reddening every PR that touches tests/.
+        warnings.warn(
+            "stale _UNGUARDED_DEBT entries — the tree guards them or no longer "
+            "imports them; delete these lines (not a failure):\n  "
+            + "\n  ".join(cleared),
+            stacklevel=2,
+        )
 
 
 _HIDE_PLUGIN = """
@@ -551,3 +557,13 @@ def test_render_smoke_skips_rather_than_errors_without_context_panel(tmp_path):
     assert proc.returncode in (0, 5), proc.stdout + proc.stderr
     # Not just "collected nothing": the reason must be the missing extra.
     assert "optional context_panel extra not installed" in proc.stdout, proc.stdout
+
+
+def test_a_stale_ledger_entry_warns_rather_than_fails(monkeypatch):
+    """#1319: ledger drift must not redden branches that did not cause it."""
+    stale = frozenset({"tests/cognition/gone.py:corvidae_cognition"})
+    monkeypatch.setattr(
+        sys.modules[__name__], "_UNGUARDED_DEBT", _UNGUARDED_DEBT | stale
+    )
+    with pytest.warns(UserWarning, match="stale _UNGUARDED_DEBT"):
+        test_no_new_unguarded_extra_imports()
