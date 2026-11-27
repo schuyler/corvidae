@@ -24,6 +24,7 @@ tests/test_fork_read_only_tools.py.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import logging
@@ -446,6 +447,51 @@ async def test_r5_5_the_deadline_warning_says_how_long_the_fork_waited(tmp_path,
         m = re.search(r"after (\d+\.\d+)s", text)
         assert m, f"the warning must state its own elapsed time: {text!r}"
         assert 0.05 <= float(m.group(1)) < 3.0, text
+    finally:
+        await _teardown(env)
+
+
+async def test_a_stall_before_the_fork_is_counted_in_the_warning(
+    tmp_path, caplog, monkeypatch
+):
+    """#1304: a starved process must not report a full timeout as "after 0.00s".
+
+    The deadline is armed from the loop clock, so time spent between arming it
+    and stamping the start is spent by the timeout and invisible to the
+    measurement. This reproduces that stall by wrapping ``asyncio.timeout`` so
+    it sleeps before entering: with the stamp taken first the warning's elapsed
+    includes the stall; stamped inside, it reports ~0 for a timeout that
+    expired.
+    """
+    real_timeout = asyncio.timeout
+
+    @contextlib.asynccontextmanager
+    async def stalling_timeout(delay):
+        async with real_timeout(delay) as deadline:
+            # The stall the bug is about: after the timer is armed and before
+            # anything in the body runs, exactly where a starved process loses
+            # the allowance.
+            await asyncio.sleep(0.02)
+            yield deadline
+
+    monkeypatch.setattr(critique_module.asyncio, "timeout", stalling_timeout)
+
+    async def hangs(i, channel):
+        await asyncio.sleep(3)
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kd7", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        # Two decimals: one cannot represent this measurement, since 0.05 would
+        # round to either 0.0 or 0.1 depending on the stall (#1304).
+        m = re.search(r"after (\d+\.\d\d)s", text)
+        assert m, f"the warning must state its own elapsed time to two decimals: {text!r}"
+        assert float(m.group(1)) >= 0.05, (
+            f"a stall before the fork must be counted, not reported as zero: {text!r}"
+        )
     finally:
         await _teardown(env)
 

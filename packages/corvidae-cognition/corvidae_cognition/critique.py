@@ -2233,12 +2233,18 @@ class CritiquePlugin(CorvidaePlugin):
         # while the channel was still busy from one that hit after it.
         forking = False
         try:
+            # Stamped before the deadline is armed, not inside it: the timer
+            # starts from the loop clock at the `async with`, so a stamp taken
+            # after it spends the allowance without counting it, and a starved
+            # process reported a full timeout as "after 0.0s" (#1304). Stamped
+            # first, `waited` over-counts by the gap between the two statements
+            # instead of under-counting by an unbounded one.
+            started = time.monotonic()
             async with asyncio.timeout(timeout) as deadline:
                 # Wall time from here, because this is what the deadline bounds:
                 # the quiet wait plus every request. A warning that says only
                 # "exceeded the timeout" cannot tell a slow fork from a hung
                 # one (#1272).
-                started = time.monotonic()
                 if idle:
                     await self._wait_quiet(agent, channel)
                 forking = True
@@ -2302,9 +2308,9 @@ class CritiquePlugin(CorvidaePlugin):
                 waited = time.monotonic() - started
                 reason = (
                     f"the fork exceeded critique.fork_timeout ({timeout} s) "
-                    f"after {waited:.1f}s" if forking
+                    f"after {waited:.2f}s" if forking
                     else f"the channel stayed busy past critique.fork_timeout "
-                         f"({timeout} s) after {waited:.1f}s")
+                         f"({timeout} s) after {waited:.2f}s")
                 for lens in lenses:
                     self._skip_lens(channel, lens, trace_id, reason)
                 return None
