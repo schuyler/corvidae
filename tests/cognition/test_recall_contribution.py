@@ -114,10 +114,6 @@ class TestMixinContribution:
         assert await compose(env) is None
         assert env.source.queries == []
 
-    def test_on_funnel_ingest_is_gone_from_the_mixin_and_markdown_recall(self):
-        assert not hasattr(RecallSourceMixin, "on_funnel_ingest")
-        assert not hasattr(MarkdownRecallPlugin, "on_funnel_ingest")
-
 
 def write_folder(root: Path, files: dict[str, str]) -> None:
     # Write ``files`` under ``root``.

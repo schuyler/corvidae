@@ -443,3 +443,87 @@ async def test_busy_timeout_ms_is_configurable_per_writer(tmp_path):
         assert row[0] == 2222
     finally:
         await log.close()
+
+
+async def test_a_refused_record_releases_the_write_lock(log, tmp_path):
+    """A record refused after its INSERT rolls back instead of holding the lock (#1211).
+
+    The refusal comes from ``_check_digests``, which runs after the fork row's
+    INSERT has opened a write transaction. Left open, that transaction holds
+    the database's write lock until this connection's next commit, so every
+    other writer on the file -- the conversation log included -- fails with
+    ``database is locked`` in the meantime.
+    """
+    import sqlite3
+
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+    with pytest.raises(ValueError, match="does not resolve"):
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=B[:3],
+            digests=[digest_of(B[2])],
+            chain_parent=first,
+            chain_from=7,
+        )
+    # Another connection can take the write lock at once, without waiting.
+    other = sqlite3.connect(str(tmp_path / "sessions.db"), timeout=0)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.rollback()
+    finally:
+        other.close()
+    # The refused row is gone for good: the next successful record's commit
+    # must not carry it into the table.
+    await _fork(log, B[:2])
+    db = await log._conn()
+    async with db.execute("SELECT count(*) FROM fork_log") as cur:
+        (count,) = await cur.fetchone()
+    assert count == 2
+
+
+@pytest.mark.parametrize("bad_yields,good_yields", [(0, 0), (0, 3), (3, 0)])
+async def test_a_refused_record_does_not_discard_a_concurrent_one(
+    log, bad_yields, good_yields
+):
+    """A refused record's rollback covers only its own rows (#1211).
+
+    Records share one connection and ``_check_digests`` awaits a read, so a
+    second record can INSERT while the first is being refused. The rollback
+    must not take that row with it while its caller is told it succeeded.
+    """
+    import asyncio
+
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+
+    async def refused():
+        for _ in range(bad_yields):
+            await asyncio.sleep(0)
+        with pytest.raises(ValueError, match="does not resolve"):
+            await log.record(
+                stage="appraisal",
+                channel_id="discord:1",
+                messages=B[:3],
+                digests=[digest_of(B[2])],
+                chain_parent=first,
+                chain_from=7,
+            )
+
+    async def valid():
+        for _ in range(good_yields):
+            await asyncio.sleep(0)
+        return await log.record(
+            stage="appraisal",
+            channel_id="discord:2",
+            messages=B[:4],
+            digests=[digest_of(b) for b in B[2:4]],
+            chain_parent=first,
+            chain_from=2,
+        )
+
+    _, fork_id = await asyncio.gather(refused(), valid())
+    assert await _row(log, fork_id) is not None

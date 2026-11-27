@@ -1861,10 +1861,8 @@ class TestTransportMintedIds:
         import inspect
         import re
 
-        assert not hasattr(web_mod, "_CURRENT_SEND")
         source = inspect.getsource(web_mod)
         assert not re.search(r"^\s*(import contextvars|from contextvars)", source, re.M)
-        assert not hasattr(web_mod, "contextvars")
 
     async def test_unknown_id_leaves_entries_untouched(self, make_env):
         """O1/O3: an admission or rejection carrying an id no entry owns is

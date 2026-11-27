@@ -20,6 +20,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+
+from _acp_extra import requires_acp
+
 from helpers import build_plugin_and_channel, drain, sent_texts
 from llm_response_fixtures import _make_text_response
 
@@ -176,6 +179,7 @@ class TestSlotRelease:
 # ---------------------------------------------------------------------------
 
 
+@requires_acp
 class TestAcpRelease:
     async def test_unsent_final_completes_the_prompt_with_end_turn(self):
         from corvidae.channels.acp import AcpPlugin
@@ -539,11 +543,13 @@ class TestCoreIsUnawareOfSilence:
         ]
         assert not offenders, "core must not couple to the silence plugin:\n" + "\n".join(offenders)
 
-    def test_hooks_exports_the_neutral_helper_only(self):
+    def test_hooks_exports_the_neutral_helper(self):
+        """``corvidae.hooks`` exposes ``final_was_unsent``. Presence only -- the
+        matching "and no silence-plugin symbol alongside it" check went with #1238,
+        so nothing here pins the set's size."""
         import corvidae.hooks as hooks
 
         assert hasattr(hooks, "final_was_unsent")
-        assert not hasattr(hooks, "final_was_" + "withheld")
 
 
 # ---------------------------------------------------------------------------

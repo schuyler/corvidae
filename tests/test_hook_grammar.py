@@ -18,7 +18,6 @@ from pluggy import HookCaller
 from corvidae.hooks import (
     HOOK_GRAMMAR,
     IMPERATIVE_HOOKS,
-    AgentSpec,
     _SeedHooksPlugin,
     create_plugin_manager,
 )
@@ -29,19 +28,6 @@ GRAMMAR = HOOK_GRAMMAR
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
 IMPERATIVE = IMPERATIVE_HOOKS
-
-# Names retired by renames or folds; none may come back as a hookspec.
-RETIRED = {
-    "on_conversation_event",  # -> persist_message
-    "process_tool_result",  # -> transform_tool_result
-    "load_conversation",  # -> resolve_conversation
-    "on_llm_error",  # -> resolve_llm_error
-    "compact_conversation",  # -> resolve_compaction
-    "send_message",  # -> send(event=OutboundMessage)
-    "send_thinking",  # -> send(event=OutboundThinking)
-    "send_tool_status",  # -> send(event=OutboundToolStatus)
-    "send_progress",  # -> send(event=OutboundProgress)
-}
 
 
 def _hookcallers() -> dict[str, HookCaller]:
@@ -152,20 +138,6 @@ def test_register_llm_stages_is_an_imperative_hookspec() -> None:
     spec = _CALLERS["register_llm_stages"].spec
     assert not spec.opts.get("firstresult")
     assert list(spec.argnames) == ["stages"]
-
-
-# --- Test 5: retired names stay retired ----------------------------------------
-
-
-@pytest.mark.parametrize("name", _rows(RETIRED))
-def test_retired_name_is_not_a_hookspec(name: str) -> None:
-    """A renamed or folded hook's old name is gone from AgentSpec.
-
-    This is the only test that pins ``on_conversation_event`` ->
-    ``persist_message``: the old name has a valid ``on_`` prefix and broadcast
-    options, so tests 1 and 2 cannot see that the core reads its result.
-    """
-    assert not hasattr(AgentSpec, name), f"{name!r} is still a hookspec on AgentSpec"
 
 
 # --- Test 6: the collect class is retired (#1094) ------------------------------

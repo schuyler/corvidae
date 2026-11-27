@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pluggy
 import pytest
 
+from _acp_extra import requires_acp
+
 from corvidae.agent import MAX_TURNS_FALLBACK_MESSAGE
 from corvidae.channel import ChannelConfig
 from corvidae.context import MessageType, unsent_marker_emission, unsent_marker_text
@@ -609,6 +611,7 @@ class TestReplay:
         ]
         assert _markers_after(history, 0) == {"thinking", "progress"}
 
+    @requires_acp
     async def test_acp_load_session_skips_unsent_rows(self, tmp_path):
         from acp import PROTOCOL_VERSION
 

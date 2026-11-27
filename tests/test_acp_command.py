@@ -15,6 +15,10 @@ import pytest
 
 from click.testing import CliRunner
 
+from _acp_extra import requires_acp
+
+pytestmark = requires_acp
+
 
 class TestAcpCommandHelp:
     def test_acp_help_lists_subcommand(self):

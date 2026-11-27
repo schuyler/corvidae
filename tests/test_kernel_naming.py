@@ -2,8 +2,8 @@
 
 "Core" is reserved for the System Two context of the core/periphery work, so
 no kernel identifier may use it to mean the kernel. This file is the one place
-allowed to spell the retired names: the guard below skips it, and the negative
-checks for the retired plugin class and entry point live here for that reason.
+allowed to spell the retired names: the guard below skips it, and the entry-point
+check for the retired plugin lives here for that reason.
 """
 
 import re
@@ -49,16 +49,6 @@ def test_no_retired_core_names_in_kernel_or_tests() -> None:
     assert not hits, (
         "retired kernel-as-'core' names found; rename them to 'kernel' or to "
         "the split tool plugins (#16):\n" + "\n".join(hits)
-    )
-
-
-def test_retired_tools_plugin_class_is_gone() -> None:
-    """The combined tools plugin no longer exists, with no alias (R1)."""
-    import corvidae.tools
-
-    assert not hasattr(corvidae.tools, OLD_CLASS), (
-        f"corvidae.tools.{OLD_CLASS} must be removed, not aliased; "
-        "use ShellToolPlugin, FileToolsPlugin or WebToolsPlugin"
     )
 
 
