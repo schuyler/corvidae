@@ -425,8 +425,11 @@ class SessionWriter:
         # branch writes none, so this unit can read _RUNNING, _COMMITTED if the
         # worker's own COMMIT later landed, or _REVOKED from an earlier unit on
         # the same writer. None of those may hand the caller a result or tell it
-        # the write was rolled back (#1315).
-        if self._abandoned and unit is self._last_unit:
+        # the write was rolled back (#1315). No identity test: `write()` refuses
+        # once abandoned, so a unit reaching here on an abandoned writer is one
+        # that was abandoned, and a condition that can only be true is one more
+        # place to be wrong.
+        if self._abandoned:
             raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
