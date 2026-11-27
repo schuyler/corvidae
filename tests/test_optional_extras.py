@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from _optional_extras import (
     _REASONS,
+    _reason,
     extra_importable,
     optional_extra,
     requires_extra,
@@ -133,18 +134,30 @@ def test_namespace_shadow_is_not_reported_as_absent(tmp_path, monkeypatch):
 
 
 def test_each_named_extra_has_a_reason():
-    """A skip line should name the extra to install, not just 'skipped'."""
-    for module in (
-        "cross_channel_send",
-        "corvidae_whatsapp",
-        "context_panel",
-        "webhook_notify",
-        "github_webhook",
-        "goals_notify",
-    ):
-        assert module in _REASONS
+    """A skip line should name the extra to install, not just 'skipped'.
+
+    Iterating ``_REASONS`` rather than a copy of its keys (#1299): the hardcoded
+    list silently stopped covering whatever was added to the dict later, which is
+    the drift the reason lines exist to prevent.
+    """
+    assert _REASONS, "no extras named; the table is what this test reads"
+    for module in _REASONS:
         assert module in _REASONS[module], _REASONS[module]
         assert requires_extra(module).mark.kwargs["reason"].find(module) != -1
+
+
+def test_the_collection_time_guard_names_the_extra_in_its_skip():
+    """``optional_extra`` must carry the same actionable reason as the marker.
+
+    ``requires_extra`` covers imports inside functions; ``optional_extra`` is the
+    ``with`` form used where the import runs at collection, and a green skip from
+    it has to name the extra just the same (#1299).
+    """
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        with optional_extra(ABSENT):
+            raise AssertionError("the guarded import must not run")
+
+    assert str(excinfo.value) == _reason(ABSENT)
 
 
 _TESTS_DIR = pathlib.Path(__file__).resolve().parent
