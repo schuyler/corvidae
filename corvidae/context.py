@@ -269,7 +269,13 @@ def unsent_marker_emission(content: object) -> str | None:
 
 
 def _visible(msg: dict) -> dict:
-    return {k: v for k, v in msg.items() if not k.startswith("_")}
+    # A key that is not a string cannot be a `_`-prefixed tag, so it is kept and
+    # counted rather than crashing on `startswith` (#1333).
+    return {
+        k: v
+        for k, v in msg.items()
+        if not (isinstance(k, str) and k.startswith("_"))
+    }
 
 
 def unanswered_user_messages(messages: list[dict]) -> list[dict]:
@@ -377,25 +383,47 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     person row's header is a separate message and is not counted here, as
     before.
 
-    Encoding a row is not expected to raise for ordinary content: ``default=str``
-    counts a value JSON cannot encode by its text, and a row that is not a mapping
-    at all is counted by its repr. It is not yet *never* raises: a non-scalar dict
-    key, a value whose ``str()`` raises, and cyclic content all get past both guards
-    and reach the caller, identically on the parent of this branch (#1333, which
-    #1335 closes). PRD §3.1.18.1's never-raises clause is that contract; claiming it
-    here before it holds would let a caller rely on a guarantee nothing enforces.
+    Encoding a row never raises for the caller (PRD §3.1.18.1): ``default=str``
+    counts a value JSON cannot encode by its text, a row that is not a mapping
+    is counted by its repr, and the shapes that defeat both — a key
+    ``_visible()`` cannot treat as a string, a value whose ``str()`` raises,
+    cyclic content — are counted by the row's repr with one WARNING (#1333).
+    This sits on the budget path, where a raise aborts the compaction that is
+    supposed to make a turn fit.
     """
     if not isinstance(msg, dict):
-        return count_tokens(repr(msg))
-    sent = sent_form(msg, fence_key)
-    # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
-    # character into a six-character \uXXXX sequence and the tokenizer charges
-    # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
-    # compaction long before the provider runs out of context (#754). What the
-    # model receives is the characters, so that is what the estimate counts.
-    return count_tokens(
-        json.dumps(sent if sent is not None else _visible(msg), default=str, ensure_ascii=False)
-    )
+        return count_tokens(_repr_or_marker(msg))
+    try:
+        sent = sent_form(msg, fence_key)
+        # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
+        # character into a six-character \uXXXX sequence and the tokenizer charges
+        # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
+        # compaction long before the provider runs out of context (#754). What the
+        # model receives is the characters, so that is what the estimate counts.
+        return count_tokens(
+            json.dumps(
+                sent if sent is not None else _visible(msg),
+                default=str,
+                ensure_ascii=False,
+            )
+        )
+    except Exception as exc:  # the budget path must always produce a number
+        logger.warning(
+            "message_tokens: could not serialize a %s row (%s: %s); counting its "
+            "repr instead",
+            type(msg).__name__,
+            type(exc).__name__,
+            exc,
+        )
+        return count_tokens(_repr_or_marker(msg))
+
+
+def _repr_or_marker(msg: object) -> str:
+    """``repr(msg)``, or a marker when the object's own repr raises (#1333)."""
+    try:
+        return repr(msg)
+    except Exception:
+        return f"<unrepresentable {type(msg).__name__}>"
 
 
 class ContextWindow:

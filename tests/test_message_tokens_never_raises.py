@@ -1,0 +1,62 @@
+"""PRD §3.1.18.1 (#1333): estimating a row never raises.
+
+`message_tokens` sits on the budget path, where a raise aborts the compaction or
+truncation that is supposed to make a turn fit. Three row shapes defeat both
+`json.dumps(default=str)` and `_visible()`; each must still produce a number.
+"""
+
+import logging
+
+import pytest
+
+from corvidae.context import message_tokens
+
+
+class _RaisesOnStr:
+    def __str__(self) -> str:
+        raise RuntimeError("str() is broken")
+
+    def __repr__(self) -> str:
+        return "<raises-on-str>"
+
+
+def test_a_non_scalar_key_is_counted_not_fatal() -> None:
+    row = {("not", "a", "string"): "value", "content": "hello"}
+    assert message_tokens(row) >= 0
+
+
+def test_a_value_whose_str_raises_is_counted_not_fatal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    row = {"role": "user", "content": _RaisesOnStr()}
+    with caplog.at_level(logging.WARNING):
+        tokens = message_tokens(row)
+    assert tokens >= 0
+    assert any("could not serialize" in r.getMessage() for r in caplog.records)
+
+
+def test_a_cyclic_row_is_counted_not_fatal(caplog: pytest.LogCaptureFixture) -> None:
+    row: dict = {"role": "user"}
+    cycle: list = [row]
+    row["content"] = cycle
+    with caplog.at_level(logging.WARNING):
+        tokens = message_tokens(row)
+    assert tokens >= 0
+    assert any("could not serialize" in r.getMessage() for r in caplog.records)
+
+
+def test_a_row_that_serializes_normally_logs_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        assert message_tokens({"role": "user", "content": "hello"}) > 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_row_whose_repr_also_raises_is_still_counted() -> None:
+    class _Hostile(dict):
+        def __repr__(self) -> str:
+            raise RuntimeError("repr is broken too")
+
+    row = _Hostile({"content": _RaisesOnStr()})
+    assert message_tokens(row) >= 0
