@@ -718,6 +718,9 @@ async def test_r5_5_the_deadline_warning_names_the_abandoned_prompt(tmp_path, ca
         await _judged_turn(env, "k337a", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
         assert f"fork prompt_sha256={expected}" in text, text
+        # The message is for a human; the record is for a joiner. Both must carry it.
+        [rec] = [r for r in caplog.records if 'exceeded critique.fork_timeout' in r.getMessage()]
+        assert rec.fork_prompt_sha256 == expected, vars(rec)
     finally:
         await _teardown(env)
 
@@ -737,6 +740,8 @@ async def test_r5_5_a_busy_channel_names_no_prompt_because_none_was_built(
         await _judged_turn(env, "k337b", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "stayed busy past critique.fork_timeout")
         assert "prompt_sha256=" not in text, text
+        [rec] = [r for r in caplog.records if 'stayed busy past' in r.getMessage()]
+        assert rec.fork_prompt_sha256 is None, vars(rec)
     finally:
         await _teardown(env)
 
