@@ -35,6 +35,7 @@ from llm_response_fixtures import (
     _make_tool_call_response,
 )
 
+from helpers import attach_store
 from corvidae.agent import QueueItem, QueueItemRole
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig
@@ -447,7 +448,7 @@ async def test_pre_363_usage_log_gains_lease_key_on_start(tmp_path) -> None:
 
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         usage_log = UsageLogPlugin(pm)
         await usage_log.on_start({})

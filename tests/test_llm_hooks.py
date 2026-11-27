@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from helpers import attach_store
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.llm import LLMClient
 
@@ -380,7 +381,7 @@ class TestObserverNamesModelSent:
 
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         pm.register(UsageLogPlugin(pm), name="usage_log")
 
@@ -416,7 +417,7 @@ class TestObserverNamesModelSent:
 
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         pm.register(UsageLogPlugin(pm), name="usage_log")
 

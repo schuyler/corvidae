@@ -39,7 +39,7 @@ from corvidae.thinking import ThinkingPlugin
 from corvidae.tools import FileToolsPlugin, ShellToolPlugin, WebToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
 
-from helpers import add_kernel_held, stub_llm_config
+from helpers import add_kernel_held, fresh_session_db_path, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -87,7 +87,10 @@ class FakeTransportPlugin(TransportPlugin):
 # ---------------------------------------------------------------------------
 
 
-def make_config(*, db_path: str = ":memory:", extra: dict | None = None) -> dict:
+def make_config(*, db_path: str | None = None, extra: dict | None = None) -> dict:
+    # The write route refuses ":memory:": default to a fresh temp file.
+    if db_path is None:
+        db_path = fresh_session_db_path()
     config = {
         "agent": {
             "system_prompt": "You are a test agent.",

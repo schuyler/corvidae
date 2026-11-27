@@ -32,6 +32,7 @@ import aiosqlite
 import pytest
 from fake_clock import install_kernel_clock
 
+from helpers import open_test_store
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager, hookimpl
@@ -99,14 +100,13 @@ async def store(H, tmp_path):
     ``on_notify`` is an AsyncMock so stub firings are observable without an
     Agent. Only the kernel's own seeds are registered for the policy hook.
     """
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
+    db, _reader, _writer = await open_test_store()
     pm = create_plugin_manager()
     clock = install_kernel_clock(pm)[0]
     registry = ChannelRegistry({})
     pm.register(registry, name="registry")
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = _reader, _writer
     persistence._registry = registry
     pm.register(persistence, name="persistence")
 

@@ -26,7 +26,8 @@ import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.jsonl_rotate import RotatingAppender, parse_rotation
-from corvidae.persistence import add_column_if_missing
+from corvidae.persistence import add_column_if_missing_sync
+from corvidae.session_writer import MAX_WRITE_DEADLINE_S, WriteCursor
 
 logger = logging.getLogger(__name__)
 
@@ -161,44 +162,48 @@ class UsageLogPlugin(CorvidaePlugin):
         if db is None:
             return None
         if not self._table_ready:
-            await db.execute(USAGE_LOG_DDL)
-            await db.execute(USAGE_LOG_INDEX_DDL)
-            # Lazy in-place upgrade: columns added after the table's first
-            # schema are appended on first use (same pattern as memory.py's
-            # _ensure_table ADD COLUMN sweep).
-            async with db.execute("PRAGMA table_info(usage_log)") as cursor:
-                columns = {row[1] for row in await cursor.fetchall()}
-            # The llm-config column was named role before profiles.
-            if "role" in columns and "profile" not in columns:
-                await db.execute(
-                    "ALTER TABLE usage_log RENAME COLUMN role TO profile"
-                )
-            if "cached_tokens" not in columns:
-                await db.execute(
-                    "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER"
-                )
-            if "trigger" not in columns:
-                await db.execute(
-                    "ALTER TABLE usage_log ADD COLUMN trigger TEXT"
-                )
-            # fork | standalone for stages that can fork (#51); NULL otherwise.
-            await add_column_if_missing(db, "usage_log", "mode", "TEXT")
-            # llama-server's timings.cache_n / prompt_n: prompt tokens reused
-            # from cache vs prefilled, per call (PRD §3.13.10).
-            await add_column_if_missing(db, "usage_log", "cache_n", "INTEGER")
-            await add_column_if_missing(db, "usage_log", "prompt_n", "INTEGER")
-            # #350: call timing (wall-clock start, end, total incl. retries),
-            # attempts, the request's message/tool counts, the channel's
-            # context budget, and the backend's prefill/decode split.
-            for column, column_type in USAGE_LOG_TIMING_COLUMNS:
-                await add_column_if_missing(db, "usage_log", column, column_type)
-            # #363: the queue the call leased (or would lease); NULL when
-            # unleased or written before the column existed.
-            await add_column_if_missing(db, "usage_log", "lease_key", "TEXT")
-            # #364: milliseconds the call waited for a lease; NULL when the
-            # call took none (unleased, unbounded provider) or predates it.
-            await add_column_if_missing(db, "usage_log", "lease_wait_ms", "REAL")
-            await db.commit()
+            from corvidae.persistence import PersistencePlugin
+
+            persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+            # Schema unit: DDL and in-place upgrades, at the schema deadline.
+            def schema(cur: WriteCursor) -> None:
+                cur.execute(USAGE_LOG_DDL)
+                cur.execute(USAGE_LOG_INDEX_DDL)
+                # Lazy in-place upgrade: columns added after the table's first
+                # schema are appended on first use (same pattern as memory.py's
+                # _ensure_table ADD COLUMN sweep).
+                columns = {
+                    row[1] for row in cur.execute("PRAGMA table_info(usage_log)").rows
+                }
+                # The llm-config column was named role before profiles.
+                if "role" in columns and "profile" not in columns:
+                    cur.execute("ALTER TABLE usage_log RENAME COLUMN role TO profile")
+                if "cached_tokens" not in columns:
+                    cur.execute("ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER")
+                if "trigger" not in columns:
+                    cur.execute("ALTER TABLE usage_log ADD COLUMN trigger TEXT")
+                # fork | standalone for stages that can fork (#51); NULL otherwise.
+                add_column_if_missing_sync(cur, "usage_log", "mode", "TEXT")
+                # llama-server's timings.cache_n / prompt_n: prompt tokens reused
+                # from cache vs prefilled, per call (PRD §3.13.10).
+                add_column_if_missing_sync(cur, "usage_log", "cache_n", "INTEGER")
+                add_column_if_missing_sync(cur, "usage_log", "prompt_n", "INTEGER")
+                # #350: call timing (wall-clock start, end, total incl. retries),
+                # attempts, the request's message/tool counts, the channel's
+                # context budget, and the backend's prefill/decode split.
+                for column, column_type in USAGE_LOG_TIMING_COLUMNS:
+                    add_column_if_missing_sync(cur, "usage_log", column, column_type)
+                # #363: the queue the call leased (or would lease); NULL when
+                # unleased or written before the column existed.
+                add_column_if_missing_sync(cur, "usage_log", "lease_key", "TEXT")
+                # #364: milliseconds the call waited for a lease; NULL when the
+                # call took none (unleased, unbounded provider) or predates it.
+                add_column_if_missing_sync(cur, "usage_log", "lease_wait_ms", "REAL")
+
+            await persistence.write(
+                schema, owner="metrics", deadline_s=MAX_WRITE_DEADLINE_S
+            )
             self._table_ready = True
         return db
 
@@ -257,7 +262,7 @@ class UsageLogPlugin(CorvidaePlugin):
             # One monotonic duration gives the end time, so the interval
             # and total_ms never disagree.
             ended_at = started_at + total_ms / 1000
-            await db.execute(
+            sql = (
                 "INSERT INTO usage_log (ts, request_id, profile, model, stage, "
                 "channel_id, trace_id, trigger, mode, prompt_tokens, "
                 "completion_tokens, total_tokens, cached_tokens, cache_n, "
@@ -265,39 +270,47 @@ class UsageLogPlugin(CorvidaePlugin):
                 "attempts, message_count, tool_count, max_context_tokens, "
                 "prompt_ms, predicted_ms, lease_key, lease_wait_ms) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    time.time(),
-                    request_id,
-                    profile,
-                    model,
-                    attribution.get("stage"),
-                    attribution.get("channel_id"),
-                    attribution.get("trace_id"),
-                    attribution.get("trigger"),
-                    attribution.get("mode"),
-                    usage.get("prompt_tokens"),
-                    usage.get("completion_tokens"),
-                    usage.get("total_tokens"),
-                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
-                    timings.get("cache_n"),
-                    timings.get("prompt_n"),
-                    latency_ms,
-                    error,
-                    started_at,
-                    ended_at,
-                    total_ms,
-                    attempts,
-                    message_count,
-                    tool_count,
-                    self._max_context_tokens(attribution.get("channel_id")),
-                    timings.get("prompt_ms"),
-                    timings.get("predicted_ms"),
-                    attribution.get("lease_key"),
-                    lease_wait_ms,
-                ),
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
-            await db.commit()
+            params = (
+                time.time(),
+                request_id,
+                profile,
+                model,
+                attribution.get("stage"),
+                attribution.get("channel_id"),
+                attribution.get("trace_id"),
+                attribution.get("trigger"),
+                attribution.get("mode"),
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+                (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                timings.get("cache_n"),
+                timings.get("prompt_n"),
+                latency_ms,
+                error,
+                started_at,
+                ended_at,
+                total_ms,
+                attempts,
+                message_count,
+                tool_count,
+                self._max_context_tokens(attribution.get("channel_id")),
+                timings.get("prompt_ms"),
+                timings.get("predicted_ms"),
+                attribution.get("lease_key"),
+                lease_wait_ms,
+            )
+            from corvidae.persistence import PersistencePlugin
+
+            persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+            # One unit: the single INSERT.
+            def insert(cur: WriteCursor) -> None:
+                cur.execute(sql, params)
+
+            await persistence.write(insert, owner="metrics")
         except Exception:
             logger.warning("usage_log write failed", exc_info=True)
 

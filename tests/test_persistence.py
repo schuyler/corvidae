@@ -14,6 +14,7 @@ import pytest
 from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
+from helpers import attach_store, open_test_store
 from corvidae.hooks import create_plugin_manager
 
 
@@ -58,11 +59,12 @@ async def _make_plugin_with_db(db=None):
     plugin = PersistencePlugin(pm)
 
     if db is None:
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, reader, writer = await open_test_store()
+    else:
+        reader, writer = await attach_store(db)
 
-    # Inject DB so on_start skips the real open
-    plugin.db = db
+    # Inject the pair so on_start skips the real open
+    plugin.db, plugin.writer = reader, writer
 
     return plugin, registry, db
 
@@ -105,14 +107,14 @@ class TestOnStart:
 
         plugin = PersistencePlugin(pm)
 
-        pre_injected = await aiosqlite.connect(":memory:")
-        await init_db(pre_injected)
-        plugin.db = pre_injected
+        pre_injected, reader, writer = await open_test_store()
+        plugin.db, plugin.writer = reader, writer
 
         config = {"daemon": {"session_db": str(tmp_path / "should_not_open.db")}}
         await plugin.on_start(config=config)
 
-        assert plugin.db is pre_injected
+        assert plugin.db is reader
+        assert plugin.writer is writer
 
         await pre_injected.close()
 
@@ -164,21 +166,27 @@ class TestOnStart:
 
 class TestOnStop:
     async def test_on_stop_closes_db(self):
-        """on_stop must close the db connection."""
-        plugin, _registry, db = await _make_plugin_with_db()
+        """on_stop must close the reader and the writer."""
+        plugin, _registry, _db = await _make_plugin_with_db()
 
         closed = []
-        original_close = db.close
+        original_reader_close = plugin.db.close
+        original_writer_close = plugin.writer.close
 
-        async def spy_close():
-            closed.append(True)
-            await original_close()
+        async def spy_reader_close():
+            closed.append("reader")
+            await original_reader_close()
 
-        db.close = spy_close
+        async def spy_writer_close():
+            closed.append("writer")
+            await original_writer_close()
+
+        plugin.db.close = spy_reader_close
+        plugin.writer.close = spy_writer_close
 
         await plugin.on_stop()
 
-        assert closed, "db.close() was not called"
+        assert closed == ["reader", "writer"], "reader/writer close() not called"
 
     async def test_on_stop_with_no_db_does_not_crash(self):
         """on_stop must be a no-op when db is None."""
@@ -577,7 +585,7 @@ class TestHookIntegration:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        plugin.db = db
+        plugin.db, plugin.writer = await attach_store(db)
         plugin._registry = registry
         pm.register(plugin, name="persistence")
 
@@ -602,7 +610,7 @@ class TestHookIntegration:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        plugin.db = db
+        plugin.db, plugin.writer = await attach_store(db)
         pm.register(plugin, name="persistence")
 
         channel = _make_channel(registry)
@@ -788,7 +796,8 @@ async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
     for mode in ("delete", "truncate", "persist", "memory", "wal", "off"):
         assert mode in message
 
-    await plugin.db.close()
+    # Validation fails before any store opens.
+    assert plugin.db is None and plugin.writer is None
 
 # ---------------------------------------------------------------------------
 # Degradation: corrupt rows and failed writes must not abort the turn
@@ -995,7 +1004,7 @@ class TestPersistenceDegradation:
         async def locked(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(db, "execute", locked)
+        monkeypatch.setattr(plugin.writer, "write", locked)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
             result = await plugin.persist_message(
@@ -1093,3 +1102,29 @@ def test_decode_message_row_returns_dict_for_valid_input():
     raw = json.dumps({"role": "user", "content": "hi"})
     assert decode_message_row(1, raw.encode(), "c") == {"role": "user", "content": "hi"}
     assert decode_message_row(1, raw, "c") == {"role": "user", "content": "hi"}
+
+
+async def test_on_start_refuses_memory_session_db(tmp_path):
+    """``:memory:`` is a config error naming the key and the remedy."""
+    from corvidae.persistence import PersistencePlugin
+
+    plugin = PersistencePlugin(create_plugin_manager())
+    with pytest.raises(ValueError) as excinfo:
+        await plugin.on_start(config={"daemon": {"session_db": ":memory:"}})
+
+    message = str(excinfo.value)
+    assert "daemon.session_db" in message
+    assert "file path" in message
+
+
+async def test_on_start_refuses_half_injection(db):
+    """Injecting only ``db`` raises, naming the missing ``writer``."""
+    from corvidae.persistence import PersistencePlugin
+
+    plugin = PersistencePlugin(create_plugin_manager())
+    plugin.db = db
+    with pytest.raises(RuntimeError) as excinfo:
+        await plugin.on_start(config={})
+
+    assert "writer" in str(excinfo.value)
+    assert "inject both" in str(excinfo.value)

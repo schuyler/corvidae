@@ -21,6 +21,7 @@ from corvidae.clock import Clock
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.session_writer import open_session_store
 from corvidae.scheduler import SchedulerPlugin, frame_firing, parse_job
 
 from harness import driver
@@ -70,15 +71,16 @@ class TestProfiles:
 
 async def _scheduler_on(db_path: Path):
     """A SchedulerPlugin and PersistencePlugin on a real sessions.db file."""
-    conn = await aiosqlite.connect(db_path)
+    conn = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(conn)
+    reader, writer = await open_session_store(db_path)
     pm = create_plugin_manager()
     registry = ChannelRegistry({})
     pm.register(registry, name="registry")
     # The scheduler requires the kernel clock; these tests run on real time.
     pm.register(Clock(), name="clock")
     persistence = PersistencePlugin()
-    persistence.db = conn
+    persistence.db, persistence.writer = reader, writer
     pm.register(persistence, name="persistence")
     sched = SchedulerPlugin(pm)
     pm.register(sched, name="scheduler")
@@ -114,6 +116,7 @@ class TestDbHelpers:
             assert fired is not None and REMIND_TOKEN in fired[1]
             assert reminder_firing_row(db_path, channel_id, "OTHER-TOKEN", t0) is None
         finally:
+            await persistence.on_stop()
             await conn.close()
 
     def test_missing_tables_read_as_nothing(self, tmp_path):
@@ -178,4 +181,5 @@ class TestReminderProbeWiring:
             result = await driver.probe_reminder(ctx)
             assert result.passed is True, result.details
         finally:
+            await persistence.on_stop()
             await conn.close()

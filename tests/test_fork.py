@@ -25,7 +25,7 @@ from corvidae.fork import (
 from corvidae.hooks import hookimpl
 
 from corvidae.outbound import OutboundMessage
-from helpers import LLMResponseRecorder, build_plugin_and_channel, sent, start_llm_plugin
+from helpers import LLMResponseRecorder, build_plugin_and_channel, sent, start_llm_plugin, attach_store
 from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 INSTRUCTION = "Summarize the conversation above."
@@ -478,7 +478,7 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
     await db.commit()
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
     pm.register(UsageLogPlugin(pm), name="usage_log")
     for rid, attribution in [("f", {"mode": "fork"}), ("s", {"mode": "standalone"}), ("t", {})]:

@@ -27,7 +27,7 @@ from typing import Any
 import aiosqlite
 import pytest
 from fake_clock import FakeClock
-from helpers import build_plugin_and_channel, sent_texts, start_llm_plugin
+from helpers import build_plugin_and_channel, sent_texts, start_llm_plugin, attach_store
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call,
@@ -597,7 +597,7 @@ async def test_r13_usage_log_created_before_this_change_gains_lease_wait_ms_in_p
         await db.commit()
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         usage_log = UsageLogPlugin(pm)
         await usage_log.on_start({})

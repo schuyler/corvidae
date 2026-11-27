@@ -6,6 +6,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from helpers import attach_store
 from corvidae.hooks import create_plugin_manager, hookimpl
 
 
@@ -145,7 +146,7 @@ class TestUsageLogPlugin:
 
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         plugin = UsageLogPlugin()
         pm.register(plugin, name="usage_log")
