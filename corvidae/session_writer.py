@@ -407,10 +407,13 @@ class SessionWriter:
     def _outcome(self, unit: _Unit) -> T:
         """Return the unit's recorded result or raise its recorded outcome.
 
-        Never blocks the loop: after a revocation that gave up, the worker holds
-        this lock inside a C call, and a plain ``with unit.lock`` here would wedge
-        the event loop — which also disarms shutdown's force-exit, turning a
-        bounded ugly exit into an unbounded hang (#1315).
+        Never waits unboundedly for the unit's lock. On an abandoned writer it
+        does not wait at all: the worker holds that lock inside a C call, so a
+        plain ``with unit.lock`` here would wedge the event loop and disarm
+        shutdown's force-exit, turning a bounded ugly exit into an unbounded hang
+        (#1315). On a healthy writer it does wait — bounded in practice, because
+        the only reason the lock is unavailable there is a worker that has
+        already finished and is about to release it (#1328).
         """
         if not unit.lock.acquire(blocking=False):
             if not self._abandoned:
