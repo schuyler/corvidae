@@ -317,9 +317,11 @@ def late_result_ids(messages: list) -> set[str]:
 
 
 def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
-    """Token count of a message the way it actually gets sent: the
-    JSON-serialized visible dict, not just `content`. Catches size hiding in
-    `tool_calls` and `reasoning_content` that content-only counting misses.
+    """Token count of a message as the model sees it: the JSON-serialized
+    visible dict with non-ASCII characters left as themselves, not just
+    `content`. Catches size hiding in `tool_calls` and `reasoning_content` that
+    content-only counting misses, and does not charge for the ``\\uXXXX``
+    escapes a transport would put in their place (#754).
     Accepts messages in tagged or already-clean form — `_visible()` strips
     any `_`-prefixed keys itself, and is a no-op on a dict with none.
 
@@ -337,7 +339,14 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     if not isinstance(msg, dict):
         return count_tokens(repr(msg))
     sent = sent_form(msg, fence_key)
-    return count_tokens(json.dumps(sent if sent is not None else _visible(msg), default=str))
+    # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
+    # character into a six-character \uXXXX sequence and the tokenizer charges
+    # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
+    # compaction long before the provider runs out of context (#754). What the
+    # model receives is the characters, so that is what the estimate counts.
+    return count_tokens(
+        json.dumps(sent if sent is not None else _visible(msg), default=str, ensure_ascii=False)
+    )
 
 
 class ContextWindow:
