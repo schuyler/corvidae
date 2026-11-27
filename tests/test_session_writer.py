@@ -565,3 +565,25 @@ async def test_an_abandoned_unit_never_hands_back_a_result(tmp_path: Path) -> No
             writer._outcome(unit)
     finally:
         writer._conn.close()
+
+
+async def test_an_abandoned_unit_is_not_reported_as_rolled_back(tmp_path: Path) -> None:
+    """#1315: a `_REVOKED` unit on an abandoned writer must not read as a rollback.
+
+    The give-up branch writes no state, so a unit from an earlier, successful
+    revocation can still carry `_REVOKED`; the caller must see the abandonment,
+    because on a busy wait its write may have landed.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._REVOKED
+    writer._last_unit = unit
+    writer._abandoned = True
+    writer._abandoned_owner = unit.owner
+    try:
+        with pytest.raises(WriteAbandoned):
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()

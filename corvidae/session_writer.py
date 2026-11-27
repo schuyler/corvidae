@@ -421,15 +421,15 @@ class SessionWriter:
             state, exc, result = unit.state, unit.exc, unit.result
         finally:
             unit.lock.release()
+        # Abandonment decides first, whatever state the unit reads: the give-up
+        # branch writes none, so this unit can read _RUNNING, _COMMITTED if the
+        # worker's own COMMIT later landed, or _REVOKED from an earlier unit on
+        # the same writer. None of those may hand the caller a result or tell it
+        # the write was rolled back (#1315).
+        if self._abandoned and unit is self._last_unit:
+            raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
-        if self._abandoned and unit is self._last_unit:
-            # The give-up branch writes no state, so the unit can still read
-            # _RUNNING here — or _COMMITTED if the worker's own COMMIT landed
-            # after the caller was told nothing. Either way the caller must not
-            # be handed a result: this write was abandoned, no matter what the
-            # worker later did with it (#1315).
-            raise WriteAbandoned(unit.owner, self._path)
         if exc is not None:
             raise exc
         return result
