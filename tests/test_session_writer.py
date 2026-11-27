@@ -104,6 +104,7 @@ async def _stall_and_collide(
     release = threading.Event()  # lets a Python-stalled unit continue
     finished = threading.Event()  # set when the unit's thread is done
     after_revoke: list[BaseException] = []
+    stall_errors: list[BaseException] = []  # what the stall itself raised
 
     def unit(cur: WriteCursor) -> None:
         """Insert a row, stall, then try to write once more."""
@@ -112,8 +113,9 @@ async def _stall_and_collide(
             in_unit.set()
             try:
                 stall(cur, release)
-            except Exception:  # noqa: BLE001 - an interrupted stall is expected
-                pass
+            except Exception as exc:  # noqa: BLE001 - an interrupted stall is expected
+                # Recorded, not swallowed: the long-SQL stall ends this way.
+                stall_errors.append(exc)
             try:
                 # The revoked unit's next call must raise, not write.
                 cur.execute("INSERT INTO scratch (v) VALUES (2)")
@@ -137,8 +139,13 @@ async def _stall_and_collide(
         # The kernel's own write, issued while the lock is held.
         channel = SimpleNamespace(id="test:scope")
         started = time.monotonic()
-        row_id = await store.persistence.persist_message(
-            channel, {"role": "user", "content": "hi"}, MessageType.MESSAGE
+        # Bounded so a route that never revokes fails this test instead of
+        # tripping pytest's whole-run timeout.
+        row_id = await asyncio.wait_for(
+            store.persistence.persist_message(
+                channel, {"role": "user", "content": "hi"}, MessageType.MESSAGE
+            ),
+            STALL_DEADLINE_S + MARGIN_S + 1,
         )
         elapsed = time.monotonic() - started
 
@@ -209,6 +216,9 @@ async def test_r3_error_names_owner_and_deadline(
     # The formatted line carries the owner and the deadline (0.2 s).
     assert STALL_OWNER in message
     assert "0.2" in message
+    # The structured fields name the deadline itself, not an elapsed time.
+    assert errors[0].owner == STALL_OWNER
+    assert errors[0].deadline_s == STALL_DEADLINE_S
 
 
 def test_r6_refuses_non_serialized_sqlite(
