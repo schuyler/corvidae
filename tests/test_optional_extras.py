@@ -247,10 +247,12 @@ def _importorskip_name(node: ast.stmt) -> str | None:
 def _import_time_imports(tree: ast.Module):
     """Yield ``(lineno, top_level, guarded_names, target)`` per import-time import.
 
-    ``target`` is the dotted module the statement imports — ``corvidae_cognition
-    .fork_log`` for ``from corvidae_cognition.fork_log import ForkLog`` — which
-    is what the ledger records, so a grant for one module of a package does not
-    pre-approve a different module of the same package (#1321).
+    ``target`` is the dotted module *and the name imported from it* —
+    ``corvidae_cognition.fork_log.ForkLog`` for ``from corvidae_cognition
+    .fork_log import ForkLog``, and ``corvidae_cognition.fork_log`` for ``import
+    corvidae_cognition.fork_log``. That is what the ledger records, so a grant
+    for one name does not pre-approve another name, or another module, of the
+    same package (#1321).
 
     Descent is generic on purpose: whatever runs when a module is imported counts
     — module scope, class bodies, and compound statements such as ``with``,
