@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from _optional_extras import optional_extra
 
 from corvidae.channel import ChannelRegistry
 from corvidae.context import ContextWindow
@@ -27,12 +28,13 @@ from corvidae.hooks import (
 )
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
-from corvidae_cognition import heartbeat
-from corvidae_cognition import goals as goals_mod
-from corvidae_cognition.goals import GoalsPlugin
-from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
-from corvidae_cognition import memory as memory_mod
-from corvidae_cognition.memory import MemoryPlugin
+with optional_extra("corvidae_cognition"):
+    from corvidae_cognition import heartbeat
+    from corvidae_cognition import goals as goals_mod
+    from corvidae_cognition.goals import GoalsPlugin
+    from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
+    from corvidae_cognition import memory as memory_mod
+    from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
 
 AFTER = 600
