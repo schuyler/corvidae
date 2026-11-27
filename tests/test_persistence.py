@@ -1093,3 +1093,173 @@ def test_decode_message_row_returns_dict_for_valid_input():
     raw = json.dumps({"role": "user", "content": "hi"})
     assert decode_message_row(1, raw.encode(), "c") == {"role": "user", "content": "hi"}
     assert decode_message_row(1, raw, "c") == {"role": "user", "content": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# TestBusyTimeout
+# ---------------------------------------------------------------------------
+
+
+class TestBusyTimeout:
+    async def test_on_start_sets_busy_timeout_by_default(self, tmp_path):
+        """A held write lock must cost a bounded wait, not a 5 s default.
+
+        aiosqlite forwards sqlite3.connect's timeout=, whose Python default is
+        5.0 s; every writer on this file otherwise gives up after ~5 s while
+        another connection holds the write lock (corvidae#1211).
+        """
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "busy_default.db")
+        config = {"daemon": {"session_db": db_path}}
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        actual_ms = row[0]
+
+        await plugin.db.close()
+
+        assert actual_ms == 30000
+
+    async def test_on_start_respects_sqlite_busy_timeout_config_override(self, tmp_path):
+        """daemon.sqlite_busy_timeout_ms override is applied by on_start."""
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "busy_override.db")
+        config = {
+            "daemon": {
+                "session_db": db_path,
+                "sqlite_busy_timeout_ms": 1234,
+            }
+        }
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        actual_ms = row[0]
+
+        await plugin.db.close()
+
+        assert actual_ms == 1234
+
+    async def test_on_start_applies_the_wait_to_an_injected_connection(self, tmp_path):
+        """A connection a test built still gets the daemon's wait.
+
+        The connect/init_db pair is split by an ``opened_here`` flag so the PRAGMA
+        lands here too. Without that, an injected connection -- which is how every
+        plugin-level test opens the file, and how a re-opened DB would be handed
+        over -- would exercise a writer with no bound at all.
+        """
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        pm.register(_make_registry(), name="registry")
+        plugin = PersistencePlugin(pm)
+        db_path = str(tmp_path / "injected.db")
+        plugin.db = await aiosqlite.connect(db_path)
+        await init_db(plugin.db)
+
+        await plugin.on_start(config={
+            "daemon": {
+                "session_db": db_path,
+                "sqlite_busy_timeout_ms": 2222,
+            }
+        })
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            actual_ms = (await cursor.fetchone())[0]
+        await plugin.db.close()
+
+        assert actual_ms == 2222
+
+    async def test_on_start_applies_the_wait_before_the_schema_writes(
+        self, tmp_path, monkeypatch
+    ):
+        """The DDL is a write, so it must not run on the inherited default (N4).
+
+        ``on_start`` used to call ``init_db`` (schema + migrations, committed
+        there) before setting the PRAGMA, which left the boot-time writes on
+        sqlite3's 5.0 s handler — the same ordering this change fixed in
+        ``markdown_recall/index.py``, where the PRAGMA precedes
+        ``journal_mode`` for exactly this reason.
+        """
+        import corvidae.persistence as persistence_module
+        from corvidae.persistence import PersistencePlugin
+
+        seen = {}
+        real_init_db = persistence_module.init_db
+
+        async def spy(db):
+            async with db.execute("PRAGMA busy_timeout") as cursor:
+                seen["busy_ms"] = (await cursor.fetchone())[0]
+            return await real_init_db(db)
+
+        monkeypatch.setattr(persistence_module, "init_db", spy)
+
+        pm = create_plugin_manager()
+        pm.register(_make_registry(), name="registry")
+        plugin = PersistencePlugin(pm)
+        await plugin.on_start(config={
+            "daemon": {
+                "session_db": str(tmp_path / "ordering.db"),
+                "sqlite_busy_timeout_ms": 7777,
+            }
+        })
+
+        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
+            final_ms = (await cursor.fetchone())[0]
+        await plugin.db.close()
+
+        assert seen.get("busy_ms") == 7777, (
+            "init_db ran before the PRAGMA: the schema writes were unbounded"
+        )
+        assert final_ms == 7777
+
+
+def test_busy_timeout_ms_from_config_rejects_unusable_values():
+    """0 or a negative wait disables busy handling -- worse than 5 s.
+
+    The value gates every writer on the session database, so an unusable one is
+    logged and replaced rather than obeyed (corvidae#1211).
+    """
+    from corvidae.persistence import (
+        DEFAULT_BUSY_TIMEOUT_MS,
+        busy_timeout_ms_from_config,
+    )
+
+    for raw in (0, -5, None, "abc", "", [5], True, False, 1.5, 600000.9,
+                float("inf"), float("nan"), 600_001,
+                # each passes a .isdigit()/lstrip guard and then raises in int()
+                "++5", "+-600000", "--5", "\u00b2", "9" * 5000):
+        got = busy_timeout_ms_from_config({"daemon": {"sqlite_busy_timeout_ms": raw}})
+        assert got == DEFAULT_BUSY_TIMEOUT_MS, raw
+    assert busy_timeout_ms_from_config({}) == DEFAULT_BUSY_TIMEOUT_MS
+    # `daemon:` present but empty/null is what a stub agent.yaml yields; the
+    # surrounding pre-existing lookups (config.get("daemon", {})) would raise
+    # AttributeError on a null, so this shape is pinned here rather than inherited.
+    assert busy_timeout_ms_from_config({"daemon": None}) == DEFAULT_BUSY_TIMEOUT_MS
+    assert busy_timeout_ms_from_config({"daemon": {}}) == DEFAULT_BUSY_TIMEOUT_MS
+    # A truthy non-mapping daemon section is the last shape that could raise
+    # inside the resolver; the sibling lookups in on_start still have this hole.
+    for bad in ("oops", [1], 7):
+        assert busy_timeout_ms_from_config({"daemon": bad}) == DEFAULT_BUSY_TIMEOUT_MS, bad
+    assert busy_timeout_ms_from_config(
+        {"daemon": {"sqlite_busy_timeout_ms": 1234}}
+    ) == 1234
+    # A string digit is what a YAML scalar yields; it is honoured, not rejected.
+    assert busy_timeout_ms_from_config(
+        {"daemon": {"sqlite_busy_timeout_ms": "45000"}}
+    ) == 45000

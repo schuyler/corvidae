@@ -412,6 +412,39 @@ async def test_a_table_from_an_older_build_gains_the_new_columns(tmp_path):
         await log.close()
 
 
+async def test_open_sets_busy_timeout(tmp_path):
+    """The fork writer must wait out a held write lock, not fail at 5 s.
+
+    It shares the daemon's sessions.db with the conversation writer
+    (corvidae#1211); with no PRAGMA it inherits sqlite3.connect's 5.0 s
+    Python default and drops fork rows whenever consolidation holds the lock.
+    """
+    log = ForkLog(str(tmp_path / "sessions.db"))
+    await log.open()
+    try:
+        async with log._db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 30000
+    finally:
+        await log.close()
+
+
+async def test_busy_timeout_ms_is_configurable_per_writer(tmp_path):
+    """The configured wait reaches this writer too, not only the daemon's own.
+
+    All three writers share sessions.db; a knob that moved only one of them
+    would leave one file with three different waits (review of #1211 work).
+    """
+    log = ForkLog(str(tmp_path / "sessions.db"), busy_timeout_ms=2222)
+    await log.open()
+    try:
+        async with log._db.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 2222
+    finally:
+        await log.close()
+
+
 async def test_a_refused_record_releases_the_write_lock(log, tmp_path):
     """A record refused after its INSERT rolls back instead of holding the lock (#1211).
 

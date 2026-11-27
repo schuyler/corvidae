@@ -101,6 +101,7 @@ from corvidae.attribution import (
     reset_attribution,
     set_attribution,
 )
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS, busy_timeout_ms_from_config
 from corvidae.prompts import resolve_prompt
 from corvidae.context import (
     ContextWindow,
@@ -301,11 +302,12 @@ class RetrievalPool:
     banding_path: str = ""
 
 
-# How long (ms) the dedicated memory write connection waits for SQLite's
-# write lock before failing the write (the range is then retried).
-# shortcut: a module constant, not an agent.yaml key; make it config if a
-# deployment with slow disks or long retention runs needs a longer wait.
-WRITE_BUSY_TIMEOUT_MS = 5000
+# How long the dedicated memory write connection waits for SQLite's write lock
+# before failing the write (the range is then retried) is not a module constant:
+# it is ``daemon.sqlite_busy_timeout_ms``, resolved in on_init, because this
+# connection is opened on the persistence file and two waits on one file is the
+# split that made corvidae#1211 hard to read. A plugin built without on_init
+# falls back to DEFAULT_BUSY_TIMEOUT_MS, the same number the kernel writers get.
 
 # JSON schema for the consolidation reply (#199, #635). Mirrors what
 # _consolidation_from_text reads: ``entries`` (each needing a narrative) and
@@ -1867,6 +1869,27 @@ def memory_section(memories: list[dict], *, full: bool) -> str | None:
     return f"{MEMORY_HEADER}\n" + "\n".join(lines)
 
 
+def _is_busy_give_up(exc: BaseException) -> bool:
+    """True when ``exc`` is SQLite saying it waited for the write lock and gave up.
+
+    ``sqlite_errorname`` is the precise test: SQLITE_BUSY and its extended
+    SQLITE_BUSY_TIMEOUT both mean a wait ran out, while SQLITE_LOCKED is a table
+    or schema lock that spent no wait at all. Measured on sqlite 3.50.4 with a
+    WAL writer held by an open ``BEGIN IMMEDIATE``: the give-up lands 0.30 s into
+    ``busy_timeout=300`` as SQLITE_BUSY (code 5), message "database is locked".
+    The message check is a floor for a build without the PEP 249 extensions —
+    measured here too, a hand-built ``sqlite3.OperationalError`` carries no
+    ``sqlite_errorname`` at all — and it stays exact rather than a substring
+    match, because a loose one is the bug this replaces.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    name = getattr(exc, "sqlite_errorname", "") or ""
+    if name:
+        return name in ("SQLITE_BUSY", "SQLITE_BUSY_TIMEOUT")
+    return str(exc).lower() == "database is locked"
+
+
 class MemoryPlugin(CorvidaePlugin):
     """Plugin that owns the memory store schema (consolidation and retrieval
     are layered on in later work packages of Phase 1a).
@@ -1902,6 +1925,15 @@ class MemoryPlugin(CorvidaePlugin):
         # Set first thing in on_stop: after it, nothing new may be spawned (#663).
         self._stopping = False
         self._schema_ready = False
+        # on_init replaces this with the resolved config key; the fallback keeps
+        # a hand-built plugin bounded on the shared file (corvidae#1211).
+        self._busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
+        # The wait in force on the connection a memory write actually ran on.
+        # Equal to the resolved value for the dedicated connection; read back off
+        # the persistence connection in the no-file fallback, where memory does
+        # not get to choose. _log_busy_give_up names this one, so a WARNING can
+        # never report a timeout that was not in effect.
+        self._write_busy_ms: int = DEFAULT_BUSY_TIMEOUT_MS
         # Dedicated write connection (#221): opened in on_start once the
         # schema exists (or lazily on first write), closed in on_stop.
         # Only MemoryPlugin writes to it, so its transactions are atomic by
@@ -1998,9 +2030,11 @@ class MemoryPlugin(CorvidaePlugin):
         """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
+        self._busy_timeout_ms = busy_timeout_ms_from_config(config)
         self._fork_log = ForkRecorder(
             config.get("daemon", {}).get("session_db", "sessions.db"),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
+            busy_timeout_ms=self._busy_timeout_ms,
         )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(
@@ -4486,7 +4520,8 @@ class MemoryPlugin(CorvidaePlugin):
         (isolation_level=None) so transactions are exactly the explicit
         BEGIN IMMEDIATE .. COMMIT of ``_write_txn``. Returns ``shared`` itself
         for a database with no file (in-memory), which a second connection
-        cannot open.
+        cannot open; that connection's wait is the persistence plugin's, so it is
+        read back here rather than assumed.
         """
         async with shared.execute("PRAGMA database_list") as cursor:
             files = [row[2] for row in await cursor.fetchall() if row[1] == "main"]
@@ -4500,14 +4535,23 @@ class MemoryPlugin(CorvidaePlugin):
                 "share the persistence connection (not atomic against "
                 "other plugins' commits)"
             )
+            async with shared.execute("PRAGMA busy_timeout") as cursor:
+                row = await cursor.fetchone()
+            # This connection's wait is the kernel's, not ours; record the real
+            # number so a give-up here cannot name a timeout nobody set.
+            self._write_busy_ms = int(row[0]) if row else self._busy_timeout_ms
             return shared
         async with shared.execute("PRAGMA journal_mode") as cursor:
             row = await cursor.fetchone()
         journal_mode = str(row[0]) if row else "wal"
         conn = await aiosqlite.connect(path, isolation_level=None)
         try:
+            # busy_timeout first: switching journal mode is itself an operation
+            # that can meet SQLITE_BUSY, and a wait installed after it is not in
+            # force for the statement that needed it (corvidae#1211).
+            await conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
+            self._write_busy_ms = int(self._busy_timeout_ms)
             await conn.execute(f"PRAGMA journal_mode={journal_mode}")
-            await conn.execute(f"PRAGMA busy_timeout={int(WRITE_BUSY_TIMEOUT_MS)}")
             if self._vec_available and not await self._load_vec_extension(conn):
                 logger.warning(
                     "memory: sqlite-vec failed to load on the write connection "
@@ -4538,14 +4582,41 @@ class MemoryPlugin(CorvidaePlugin):
             self._owns_write_db = self._write_db is not shared
         return self._write_db
 
+    def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
+        """Log once when a write gave up on the lock, whatever the statement.
+
+        Every statement of a memory write section calls this through
+        ``_write_txn`` -- ``BEGIN IMMEDIATE``, the body, ``COMMIT`` -- so the same
+        failure cannot be reported twice and cannot go unreported. The number
+        named is the wait in force on the connection the write ran on
+        (``_write_busy_ms``): the config value for the dedicated connection, the
+        persistence connection's own for the no-file fallback. Returns True if it
+        logged.
+
+        Whether an error is such a give-up is the SQLite result code's call, not
+        the message's: ``SQLITE_LOCKED`` ("database table is locked") also contains
+        "locked", and reporting that as a timeout the connection never waited for
+        would be the same kind of unmeasured claim this change set out to remove.
+        """
+        if not _is_busy_give_up(exc):
+            return False
+        logger.warning(
+            "memory write blocked: database %s stayed locked past the %d ms "
+            "busy timeout; the write will be retried on the next trigger",
+            path, self._write_busy_ms,
+        )
+        return True
+
     @asynccontextmanager
     async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
         """One memory write as a real SQLite transaction on the write connection.
 
         ``BEGIN IMMEDIATE`` .. ``COMMIT``; any exception (and cancellation)
         rolls back, logs a failed rollback at WARNING, and propagates for the
-        caller to report. A write blocked past the busy timeout logs a
-        WARNING naming the database path and timeout, then propagates.
+        caller to report. A write that gives up on the lock -- at ``BEGIN
+        IMMEDIATE``, in the body, or at ``COMMIT`` against a long reader -- logs
+        one WARNING naming the database path and the timeout in force, then
+        propagates; see ``_log_busy_give_up``.
         Callers hold ``_db_lock`` so memory's own writers don't contend.
         """
         conn = await self._write_conn()
@@ -4559,20 +4630,17 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 await conn.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as exc:
-                if "locked" in str(exc) or "busy" in str(exc):
-                    logger.warning(
-                        "memory write blocked: database %s stayed locked past "
-                        "the %d ms busy timeout; the write will be retried "
-                        "on the next trigger",
-                        path, WRITE_BUSY_TIMEOUT_MS,
-                    )
+                self._log_busy_give_up(exc, path)
                 raise
         try:
             yield conn
             # COMMIT is inside the try: a failed commit (SQLITE_BUSY against a
             # long reader) must roll back rather than leave the lock held.
             await (conn.execute("COMMIT") if own_txn else conn.commit())
-        except BaseException:
+        except BaseException as exc:
+            # A give-up at COMMIT is the likelier one now the wait is
+            # config-scaled, and it reaches here, not the BEGIN handler.
+            self._log_busy_give_up(exc, path)
             # Undo every statement of the section, including cancellation.
             try:
                 await (conn.execute("ROLLBACK") if own_txn else conn.rollback())

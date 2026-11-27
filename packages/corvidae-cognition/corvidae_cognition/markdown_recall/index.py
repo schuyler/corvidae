@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 import aiosqlite
 
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 from corvidae_cognition.fts import (
     TOKENIZE_CLAUSE,
     create_fts_table,
@@ -147,6 +148,7 @@ class MarkdownIndex:
         db_path: Path,
         get_client: Callable[[], Any],
         get_identity: Callable[[], _EncoderIdentity | None],
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     ) -> None:
         # Accept a single root (backward compat) or a list of roots.
         if isinstance(root, list):
@@ -204,6 +206,7 @@ class MarkdownIndex:
         # A folder-level lock: the index is shared across channels, so
         # reconcile and search serialize on it (not the mixin's per-channel
         # single-flight).
+        self._busy_timeout_ms = busy_timeout_ms
         self._lock = asyncio.Lock()
 
     # -- connection + schema ------------------------------------------------
@@ -226,6 +229,13 @@ class MarkdownIndex:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             db = await aiosqlite.connect(self._db_path)
             db.row_factory = aiosqlite.Row
+            # Before journal_mode: that statement is itself a write on a
+            # database another writer may hold, and until this pragma lands
+            # the connection is on sqlite3's inherited 5 s default
+            # (corvidae#1211).
+            await db.execute(
+                f"PRAGMA busy_timeout={self._busy_timeout_ms}"
+            )
             await db.execute("PRAGMA journal_mode=WAL")
             self._db = db
             return db

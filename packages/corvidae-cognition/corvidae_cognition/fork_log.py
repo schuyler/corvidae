@@ -28,6 +28,8 @@ from typing import Any, Iterable, Sequence
 
 import aiosqlite
 
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
+
 logger = logging.getLogger("corvidae.fork_log")
 
 SCHEMA = """
@@ -146,9 +148,16 @@ def _dumps(value: Any) -> str | None:
 class ForkLog:
     """One connection to the fork log; open lazily, close on shutdown."""
 
-    def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        sample_every: int = 50,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> None:
         self._db_path = db_path
         self._sample_every = max(1, sample_every)
+        self._busy_timeout_ms = busy_timeout_ms
         self._seen = 0
         #: Forks whose row could not be written. Non-zero means the corpus has
         #: a hole the queries cannot see, so the caller escalates it.
@@ -165,6 +174,11 @@ class ForkLog:
             return
         db = await aiosqlite.connect(self._db_path)
         db.row_factory = aiosqlite.Row
+        # Shares the session database with the conversation writer; without a
+        # bound of its own this writer waits sqlite3's 5.0 s default and drops
+        # fork rows whenever another connection holds the write lock
+        # (corvidae#1211).
+        await db.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         await db.executescript(SCHEMA)
         await self._migrate(db)
         await db.executescript(INDEXES)
@@ -617,8 +631,16 @@ class ForkRecorder:
     conversation; the failure counter is here so a caller can escalate.
     """
 
-    def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
-        self.log = ForkLog(db_path, sample_every=sample_every)
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        sample_every: int = 50,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> None:
+        self.log = ForkLog(
+            db_path, sample_every=sample_every, busy_timeout_ms=busy_timeout_ms
+        )
         self._last: dict[str, tuple[int, list[bytes]]] = {}
 
     @property
