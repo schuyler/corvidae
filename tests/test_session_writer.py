@@ -644,3 +644,48 @@ async def test_a_healthy_writer_reports_the_workers_own_error(
         release.set()
         holder.join(2.0)
         writer._conn.close()
+async def test_a_queued_unit_is_refused_by_name_when_the_route_frees(
+    tmp_path: Path,
+) -> None:
+    """#1328 follow-up 1: the refusal must not blame a plugin that never ran.
+
+    A second `write()` that starts while the writer is healthy passes the entry
+    check and queues on the route lock; if the unit ahead of it is abandoned, the
+    queued unit must be refused by name once the route is free, naming itself and
+    the abandoned unit, not just the other plugin's owner.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=0.5)
+    lock = writer._lock()
+    await lock.acquire()  # the unit ahead holds the route
+
+    ran: list[str] = []
+
+    def body(cursor: WriteCursor) -> None:
+        ran.append("ran")
+        raise AssertionError("a refused unit must not run")
+
+    try:
+        queued = asyncio.create_task(
+            writer.write(body, owner="plugin-b", deadline_s=1.0)
+        )
+        await asyncio.sleep(0.1)  # plugin-b passed the entry check and is queued
+        assert writer._abandoned is False
+        # Now the unit ahead of it is abandoned.
+        writer._abandoned = True
+        writer._abandoned_owner = "plugin-a"
+        lock.release()
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await asyncio.wait_for(queued, timeout=2.0)
+        message = str(excinfo.value)
+        assert "plugin-b" in message
+        assert "plugin-a" in message
+        assert excinfo.value.owner == "plugin-b"
+        assert excinfo.value.abandoned_owner == "plugin-a"
+        assert ran == [], "the refused unit was allowed to run"
+    finally:
+        if lock.locked():
+            lock.release()
+        await writer.close()
+        writer._conn.close()

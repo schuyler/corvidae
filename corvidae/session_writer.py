@@ -74,16 +74,22 @@ class WriteAbandoned(WriteRevoked):
     busy-wait abandonment the worker's own ``COMMIT`` may still land.
     """
 
-    def __init__(self, owner: str, path: str) -> None:
+    def __init__(self, owner: str, path: str, *, abandoned_owner: str = "") -> None:
         self.owner = owner
         self.path = path
+        self.abandoned_owner = abandoned_owner or owner
         self.deadline_s = float("nan")
+        blamed = (
+            ""
+            if self.abandoned_owner == owner
+            else f" (this writer abandoned a unit from {self.abandoned_owner})"
+        )
         Exception.__init__(
             self,
-            f"write unit from {owner} on {path} could not be revoked: its "
-            "statement ignores interrupt(), so whether its write landed is "
-            "unknown and this writer refuses further writes until restart — add "
-            "the plugin to plugins.disabled and report it",
+            f"write unit from {owner} on {path} cannot run{blamed}: a unit whose "
+            "statement ignores interrupt() was abandoned, so whether that write "
+            "landed is unknown and this writer refuses further writes until "
+            "restart — add the plugin to plugins.disabled and report it",
         )
 
 
@@ -298,14 +304,18 @@ class SessionWriter:
             self._alock = asyncio.Lock()
         return self._alock
 
-    def _refuse_if_abandoned(self) -> None:
+    def _refuse_if_abandoned(self, owner: str = "") -> None:
         """Refuse every write after an abandonment, naming why (#1315).
 
         Left to SQLite, the next unit fails with "cannot start a transaction
         within a transaction", which names neither the abandonment nor the owner.
         """
         if self._abandoned:
-            raise WriteAbandoned(self._abandoned_owner, self._path)
+            raise WriteAbandoned(
+                owner or self._abandoned_owner,
+                self._path,
+                abandoned_owner=self._abandoned_owner,
+            )
 
     async def write(
         self,
@@ -315,7 +325,7 @@ class SessionWriter:
         deadline_s: float = DEFAULT_WRITE_DEADLINE_S,
     ) -> T:
         """Run ``fn`` as one transactional unit with a deadline."""
-        self._refuse_if_abandoned()
+        self._refuse_if_abandoned(owner)
         # Reject a deadline outside the accepted range.
         if not 0 < deadline_s <= MAX_WRITE_DEADLINE_S:
             raise ValueError(
@@ -328,6 +338,10 @@ class SessionWriter:
         # the lock while a worker still holds the transaction.
         async def locked() -> T:
             async with self._lock():
+                # Re-check once the route is ours: a unit that queued while the
+                # writer was healthy would otherwise enter `_run_unit` on a
+                # writer abandoned by the unit ahead of it (#1328, follow-up 1).
+                self._refuse_if_abandoned(owner)
                 return await self._run_unit(fn, owner, deadline_s)
 
         return await self._shielded(locked())
