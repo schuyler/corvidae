@@ -22,6 +22,7 @@ from corvidae.context import MessageType
 from corvidae.persistence import PersistencePlugin
 from corvidae.session_writer import (
     SessionWriter,
+    WriteAbandoned,
     WriteCursor,
     WriteRevoked,
     open_session_store,
@@ -515,7 +516,9 @@ async def test_a_real_abandonment_keeps_the_loop_free_through_close(
             await asyncio.wait_for(
                 writer.write(stall, owner="stall-test", deadline_s=0.2), timeout=4.0
             )
-        assert writer._abandoned is True  # set by _revoke, not by the test
+        # Set by _revoke on its give-up branch, not by this test; the behaviour
+        # assertions below (not this line) are what pin the fix.
+        assert writer._abandoned is True
         started = time.monotonic()
         await asyncio.wait_for(writer.close(), timeout=2.0)
         elapsed = time.monotonic() - started
@@ -526,6 +529,15 @@ async def test_a_real_abandonment_keeps_the_loop_free_through_close(
         assert ticks > ticks_before, "the loop stopped turning after close()"
         # Left open: the connection still answers after close().
         assert writer._conn.execute("SELECT 1").fetchone() == (1,)
+        # A later write is refused by name rather than failing inside SQLite
+        # with "cannot start a transaction within a transaction".
+        def healthy(cursor: WriteCursor) -> None:
+            cursor.execute("SELECT 1")
+
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(healthy, owner="healthy", deadline_s=5.0)
+        assert "stall-test" in str(excinfo.value)
+        assert "plugins.disabled" in str(excinfo.value)
     finally:
         stop.set_result(None)
         release.set()

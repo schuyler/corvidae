@@ -65,6 +65,28 @@ class WriteRevoked(Exception):
         )
 
 
+class WriteAbandoned(WriteRevoked):
+    """A unit could not be revoked, so its outcome is unknown (#1315).
+
+    Its statement is not reaching SQLite's interrupt check, so the transaction it
+    opened is still open and the connection cannot be used again. The caller is
+    told the outcome is unknown rather than that the write was rolled back: on a
+    busy-wait abandonment the worker's own ``COMMIT`` may still land.
+    """
+
+    def __init__(self, owner: str, path: str) -> None:
+        self.owner = owner
+        self.path = path
+        self.deadline_s = float("nan")
+        Exception.__init__(
+            self,
+            f"write unit from {owner} on {path} could not be revoked: its "
+            "statement ignores interrupt(), so whether its write landed is "
+            "unknown and this writer refuses further writes until restart — add "
+            "the plugin to plugins.disabled and report it",
+        )
+
+
 @dataclass(frozen=True)
 class WriteResult:
     """What one statement returned, fetched eagerly."""
@@ -222,6 +244,7 @@ class SessionWriter:
         #: Set when a revocation gave up: the worker still holds the connection
         #: inside a statement, so closing it here would block the loop (#1315).
         self._abandoned = False
+        self._abandoned_owner = ""
 
     @classmethod
     def open(
@@ -275,6 +298,15 @@ class SessionWriter:
             self._alock = asyncio.Lock()
         return self._alock
 
+    def _refuse_if_abandoned(self) -> None:
+        """Refuse every write after an abandonment, naming why (#1315).
+
+        Left to SQLite, the next unit fails with "cannot start a transaction
+        within a transaction", which names neither the abandonment nor the owner.
+        """
+        if self._abandoned:
+            raise WriteAbandoned(self._abandoned_owner, self._path)
+
     async def write(
         self,
         fn: Callable[[WriteCursor], T],
@@ -283,6 +315,7 @@ class SessionWriter:
         deadline_s: float = DEFAULT_WRITE_DEADLINE_S,
     ) -> T:
         """Run ``fn`` as one transactional unit with a deadline."""
+        self._refuse_if_abandoned()
         # Reject a deadline outside the accepted range.
         if not 0 < deadline_s <= MAX_WRITE_DEADLINE_S:
             raise ValueError(
@@ -381,8 +414,9 @@ class SessionWriter:
         """
         if not unit.lock.acquire(blocking=False):
             # The unit is already known dead: revocation returned None, which
-            # means the worker held this lock for the whole bound.
-            raise WriteRevoked(unit.owner, unit.deadline_s)
+            # means the worker held this lock for the whole bound. Its outcome is
+            # unknown, not rolled back — the worker's own COMMIT may still land.
+            raise WriteAbandoned(unit.owner, self._path)
         try:
             state, exc, result = unit.state, unit.exc, unit.result
         finally:
@@ -504,12 +538,15 @@ class SessionWriter:
             logger.error(
                 "write unit from %r did not yield to revocation within %g s on "
                 "%s; its statement ignores interrupt(), so it is abandoned and "
-                "the route released — the connection is left to process exit "
-                "rather than closed under a running worker",
+                "its transaction is left open — this writer now refuses every "
+                "further write (WriteAbandoned) and the connection is left to "
+                "process exit rather than closed under a running worker",
                 unit.owner, self._revoke_bound_s, self._path,
                 extra={"owner": unit.owner},
             )
-            unit.state, unit.exc = _REVOKED, None
+            # No state write here: the lock is held by the worker, and this
+            # module writes unit state only under it. The flag is the record.
+            self._abandoned_owner = unit.owner
             self._abandoned = True
             return
         if not outcome:
