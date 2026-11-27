@@ -351,6 +351,11 @@ def test_outcome_does_not_block_when_the_unit_lock_is_held(
 
     writer = SessionWriter.open(tmp_path / "sessions.db")
     unit = sw._Unit("wedged-owner", 0.2)
+    # The writer has abandoned a unit: the lock is held inside a C call, so the
+    # wait here would be unbounded.
+    writer._abandoned = True
+    writer._abandoned_owner = unit.owner
+    writer._last_unit = unit
     holding = threading.Event()
     release = threading.Event()
 
@@ -365,7 +370,7 @@ def test_outcome_does_not_block_when_the_unit_lock_is_held(
     try:
         assert holding.wait(2.0)
         started = time.monotonic()
-        with pytest.raises(WriteRevoked):
+        with pytest.raises(WriteAbandoned):
             writer._outcome(unit)
         assert time.monotonic() - started < 0.5
     finally:
@@ -484,7 +489,7 @@ async def test_close_does_not_close_the_connection_after_an_abandonment(
 
 
 async def test_a_real_abandonment_keeps_the_loop_free_through_close(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#1315, end to end: write() stalls, the unit is abandoned, close() returns.
 
@@ -512,10 +517,19 @@ async def test_a_real_abandonment_keeps_the_loop_free_through_close(
     stop = asyncio.get_running_loop().create_future()
     ticker = asyncio.create_task(count_ticks(stop))
     try:
-        with pytest.raises(WriteRevoked):
-            await asyncio.wait_for(
-                writer.write(stall, owner="stall-test", deadline_s=0.2), timeout=4.0
-            )
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(WriteRevoked):
+                await asyncio.wait_for(
+                    writer.write(stall, owner="stall-test", deadline_s=0.2), timeout=4.0
+                )
+        # One ERROR for the abandonment, naming the owner (#1328 follow-up 5).
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and r.name == "corvidae.session_writer"
+        ]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        assert errors[0].owner == "stall-test"
         # Set by _revoke on its give-up branch, not by this test; the behaviour
         # assertions below (not this line) are what pin the fix.
         assert writer._abandoned is True
@@ -527,8 +541,11 @@ async def test_a_real_abandonment_keeps_the_loop_free_through_close(
         ticks_before = ticks
         await asyncio.sleep(0.15)
         assert ticks > ticks_before, "the loop stopped turning after close()"
-        # Left open: the connection still answers after close().
-        assert writer._conn.execute("SELECT 1").fetchone() == (1,)
+        # Left open: the connection still answers after close(). Off the loop,
+        # because on a real abandonment this call is the block probe A measured.
+        assert (
+            await asyncio.to_thread(lambda: writer._conn.execute("SELECT 1").fetchone())
+        ) == (1,)
         # A later write is refused by name rather than failing inside SQLite
         # with "cannot start a transaction within a transaction".
         def healthy(cursor: WriteCursor) -> None:
@@ -586,4 +603,44 @@ async def test_an_abandoned_unit_is_not_reported_as_rolled_back(tmp_path: Path) 
         with pytest.raises(WriteAbandoned):
             writer._outcome(unit)
     finally:
+        writer._conn.close()
+
+
+async def test_a_healthy_writer_reports_the_workers_own_error(
+    tmp_path: Path,
+) -> None:
+    """#1328: the lock-unavailable branch must not blame an abandonment that
+    never happened.
+
+    A worker that fails its BEGIN signals `done` from inside the unit lock, so the
+    loop can see the outcome before the lock is released. The caller must get the
+    real error, not "this writer refuses further writes until restart".
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("healthy-owner", 0.2)
+    unit.state = sw._ROLLED_BACK
+    unit.exc = sqlite3.OperationalError("cannot start a transaction within a transaction")
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_briefly() -> None:
+        unit.lock.acquire()
+        holding.set()
+        release.wait(5.0)
+        unit.lock.release()
+
+    holder = threading.Thread(target=hold_briefly, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(2.0)
+        timer = threading.Timer(0.2, release.set)
+        timer.start()
+        with pytest.raises(sqlite3.OperationalError):
+            await asyncio.wait_for(asyncio.to_thread(writer._outcome, unit), timeout=3.0)
+        assert writer._abandoned is False
+    finally:
+        release.set()
+        holder.join(2.0)
         writer._conn.close()
