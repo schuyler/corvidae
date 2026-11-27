@@ -606,3 +606,45 @@ async def test_a_delivery_after_on_stop_is_buffered_and_never_armed(tmp_path):
     assert rec.calls == []
     assert state.window is None
     assert [d.payload for d in state.buffer] == [{"n": 1}]
+
+
+async def test_a_restored_digest_over_max_buffered_drops_the_oldest_and_counts_it(
+    tmp_path, caplog
+):
+    """AC1's overflow branch: a digest that no longer fits is dropped oldest-first.
+
+    The buffer only fills during the send, so the flush is gated: two deliveries
+    are taken, a third arrives while the send is in flight, and the restore has
+    to drop one to respect ``max_buffered``.
+    """
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05, "max_buffered": 2},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    real_notify = plugin._notify
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def refusing(endpoint, deliveries, dropped):
+        started.set()
+        await gate.wait()
+        raise RuntimeError("the spill service is down")
+
+    plugin._notify = refusing
+    await plugin._deliver(delivery({"n": 0}))
+    await plugin._deliver(delivery({"n": 1}))
+    await asyncio.wait_for(started.wait(), 2)
+    await plugin._deliver(delivery({"n": 2}))  # lands while the flush is in flight
+    with caplog.at_level(logging.WARNING, logger="webhook_notify"):
+        gate.set()
+        await settle()
+
+    state = plugin._state["github"]
+    assert [d.payload for d in state.buffer] == [{"n": 1}, {"n": 2}], "oldest dropped"
+    assert state.dropped == 1 and state.pending_dropped == 1
+    assert any("counted 1 dropped" in r.getMessage() for r in caplog.records)
+
+    plugin._notify = real_notify
+    await plugin._deliver(delivery({"n": 3}))
+    await settle()
+    assert '"n":0' not in rec.calls[-1]["text"]

@@ -355,9 +355,13 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         try:
             await self._notify(endpoint, deliveries, dropped)
         except BaseException:
-            # Nothing reached an endpoint, so nothing was sent: the deliveries go
-            # back to the buffer and the cap slot is not spent. Before #853 the
-            # buffer was already cleared here, so the whole digest was lost.
+            # The deliveries go back to the buffer and the cap slot is not spent.
+            # Before #853 the buffer was already cleared here, so the whole digest
+            # was lost. A raise does NOT mean nothing was sent: the spill notifies
+            # an endpoint's channels one at a time, so a failure on the second has
+            # already delivered to the first, and the retry these deliveries get
+            # will duplicate it there. At-least-once is the intended trade; the
+            # duplicate is the price of not losing the digest.
             self._restore(endpoint, state, limit, deliveries, dropped)
             raise
         finally:
@@ -388,7 +392,8 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         logger.warning(
             "webhook_notify: endpoint %s did not accept a digest of %d "
             "deliveries; kept %d buffered for the next window and counted %d "
-            "dropped",
+            "dropped. A retry may repeat the digest in any channel of this "
+            "endpoint that was already notified before the failure",
             endpoint, len(deliveries), len(state.buffer), overflow,
         )
 
