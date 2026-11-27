@@ -9,7 +9,10 @@ outcome than the collection error it replaced.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from _optional_extras import (
@@ -139,3 +142,43 @@ def test_each_named_extra_has_a_reason():
         assert module in _REASONS
         assert module in _REASONS[module], _REASONS[module]
         assert requires_extra(module).mark.kwargs["reason"].find(module) != -1
+
+
+_HIDE_PLUGIN = """
+import sys
+
+class _Hide:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] == "context_panel":
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
+        return None
+
+sys.meta_path.insert(0, _Hide())
+"""
+
+
+def test_render_smoke_skips_rather_than_errors_without_context_panel(tmp_path):
+    """#1287: playwright being present is not evidence that context_panel is.
+
+    ``test_render_smoke.py`` skipped cleanly for a missing playwright and then
+    imported ``context_panel`` unguarded, so a venv with playwright but without
+    the extra errored at collection -- the failure mode #1281 is about. This
+    collects the real module with the extra hidden and requires a clean exit.
+    """
+    (tmp_path / "hide_context_panel.py").write_text(_HIDE_PLUGIN)
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(tmp_path), str(root), os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "hide_context_panel",
+         "--collect-only", "-q", "tests/test_context_panel/test_render_smoke.py"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert "ERROR" not in proc.stdout, proc.stdout
+    # 0 or 5 ("no tests collected"): the module-level skip is the wanted
+    # outcome, and either way collection must not have errored.
+    assert proc.returncode in (0, 5), proc.stdout + proc.stderr
