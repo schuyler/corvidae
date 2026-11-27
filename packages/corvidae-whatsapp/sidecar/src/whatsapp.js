@@ -310,13 +310,20 @@ export class WhatsAppAdapter {
         // Persist the fact, not a hint. Written here and nowhere else, so a restart
         // can tell "paired before" from "pairing abandoned" without reading a
         // Baileys-internal sentinel.
-        this.#writeSessionMarker();
+        // Written before the report, and synchronously: the session notify must
+        // not claim a state the marker did not take (#1256).
+        const markerError = this.#writeSessionMarker();
         this.attempt = 0;
         this.log.info?.("whatsapp: linked");
         this.notify({
           jsonrpc: "2.0",
           method: "session",
-          params: { linked: true, reason: "open" },
+          params: {
+            linked: true,
+            reason: "open",
+            marker: markerError ? "failed" : "written",
+            ...(markerError ? { marker_error: markerError } : {}),
+          },
         });
         return;
       }
@@ -331,12 +338,19 @@ export class WhatsAppAdapter {
           // Alfred's bound on the marker: a logout that leaves it behind says
           // "session before" on the next start and lands the operator on
           // reconnecting/wait instead of pair.
-          fs.promises.unlink(this.sessionMarker).catch(() => {});
+          // Removed synchronously and reported: a failed unlink is the same
+          // failure as a marker left behind, and used to be invisible (#1256).
+          const markerError = this.#removeSessionMarker();
           this.log.warn?.("whatsapp: logged out — re-pair with `npm run pair`");
           this.notify({
             jsonrpc: "2.0",
             method: "session",
-            params: { linked: false, reason: "loggedOut" },
+            params: {
+              linked: false,
+              reason: "loggedOut",
+              marker: markerError ? "failed" : "removed",
+              ...(markerError ? { marker_error: markerError } : {}),
+            },
           });
           return;
         }
@@ -456,9 +470,26 @@ export class WhatsAppAdapter {
   // answers it at all. A throw here is a miss, not a failure.
   #writeSessionMarker() {
     const payload = JSON.stringify({ paired_at: new Date().toISOString(), self_jid: this.selfJid }) + "\n";
-    return fs.promises
-      .writeFile(this.sessionMarker, payload, { mode: 0o600 })
-      .catch((error) => this.log.warn?.(`whatsapp: could not write the session marker: ${error.message}`));
+    try {
+      fs.writeFileSync(this.sessionMarker, payload, { mode: 0o600 });
+      return null;
+    } catch (error) {
+      this.log.error?.(`whatsapp: could not write the session marker: ${error.message}`);
+      return error.message;
+    }
+  }
+
+  #removeSessionMarker() {
+    try {
+      fs.unlinkSync(this.sessionMarker);
+      return null;
+    } catch (error) {
+      // Nothing there is the state we wanted; anything else is a marker that
+      // will tell the next start "paired before" when it was not (#1256).
+      if (error.code === "ENOENT") return null;
+      this.log.error?.(`whatsapp: could not remove the session marker: ${error.message}`);
+      return error.message;
+    }
   }
 
   async #lookupRaw(chatJid, id) {
