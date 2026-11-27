@@ -520,8 +520,17 @@ class MarkdownIndex:
 
             for path, (size, mtime_ns) in files.items():
                 prev = current.get(path)
-                if prev is not None and prev[0] == size and prev[1] == mtime_ns:
-                    continue  # unchanged: the stat check is a shortcut
+                if (
+                    prev is not None
+                    and prev[0] == size
+                    and prev[1] == mtime_ns
+                    and prev[2]
+                ):
+                    # Unchanged: the stat check is a shortcut. An empty hash means
+                    # a batch failed before this file's vectors landed, so the
+                    # shortcut must not take it -- that skip is what kept #1203
+                    # permanent.
+                    continue
                 await self._reconcile_file(db, path, size, mtime_ns, prev)
 
             # Missing files: in the manifest, not in the walk.
@@ -533,6 +542,32 @@ class MarkdownIndex:
                         continue
                 await self._delete_file(db, path)
             await db.commit()
+            await self._warn_missing_vectors(db)
+
+    async def _warn_missing_vectors(self, db: aiosqlite.Connection) -> None:
+        """Say how many chunks have no vector; say they are being retried (#1203).
+
+        The degradation is invisible to callers otherwise: those chunks are
+        reachable only through the FTS5 half of the search.
+        """
+        if not self._vec_available:
+            return
+        try:
+            async with db.execute(
+                "SELECT count(*) AS n FROM chunks c LEFT JOIN chunks_vec v "
+                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception:  # a missing table is not a reconcile failure
+            return
+        missing = row["n"] if row else 0
+        if missing:
+            logger.warning(
+                "markdown recall: %d chunks have no vector (FTS5-only); their "
+                "files are left unsettled and are re-embedded on the next "
+                "reconcile",
+                missing,
+            )
 
     async def _rebuild_all(
         self, db: aiosqlite.Connection, files: dict[str, tuple[int, int]]
@@ -594,22 +629,7 @@ class MarkdownIndex:
         await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
         await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
-        # The degradation is invisible to callers: make it a line with a number
-        # in it, and say what happens next (#1203).
-        if self._vec_available:
-            async with db.execute(
-                "SELECT count(*) AS n FROM chunks c LEFT JOIN chunks_vec v "
-                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
-            ) as cursor:
-                row = await cursor.fetchone()
-            missing = row["n"] if row else 0
-            if missing:
-                logger.warning(
-                    "markdown recall: %d chunks have no vector (FTS5-only); their "
-                    "files are left unsettled and are re-embedded on the next "
-                    "reconcile",
-                    missing,
-                )
+        await self._warn_missing_vectors(db)
 
     async def _reconcile_file(
         self,

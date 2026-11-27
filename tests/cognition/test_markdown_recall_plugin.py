@@ -326,3 +326,57 @@ async def test_a_failed_embedding_leaves_the_file_unsettled(build, tmp_path, mon
         "a failed embedding must leave the file unsettled so the next reconcile "
         "re-embeds it; a real hash here is #1203's permanent loss"
     )
+
+
+async def test_a_healthy_reconcile_retries_a_file_whose_batch_failed(
+    build, tmp_path, monkeypatch
+):
+    """#1203 review: the empty hash must actually be read by the next reconcile.
+
+    The settle path compares size and mtime first, so without a guard an
+    unchanged file skips `_reconcile_file` entirely and the sentinel is never
+    seen: zero embed calls, and the chunks stay un-embedded for good.
+    """
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha beta gamma content"})
+    config = {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    env = await build(config, root)
+    await env.source.on_start(config)
+    await env.source._startup_task
+    index = env.source._index
+    db = index._db
+
+    calls = {"embed": 0, "hash": []}
+
+    async def capture(db_, path, size, mtime_ns, content_hash, chunks, vectors):
+        calls["hash"].append(content_hash)
+        await db_.execute(
+            "INSERT OR REPLACE INTO manifest (path, size, mtime_ns, content_hash, "
+            "chunk_count) VALUES (?, ?, ?, ?, ?)",
+            (path, size, mtime_ns, content_hash, len(chunks)),
+        )
+        await db_.commit()
+
+    monkeypatch.setattr(index, "_vec_available", True)
+    monkeypatch.setattr(index, "_replace_file_chunks", capture)
+
+    async def failing(texts, kind):
+        calls["embed"] += 1
+        return [None] * len(texts)
+
+    monkeypatch.setattr(index, "_embed", failing)
+    (root / "a.md").write_text("# A\n\nalpha beta gamma content, edited once")
+    await index.reconcile()
+    assert calls["hash"][-1] == "", "the failed batch must leave the file unsettled"
+
+    async def healthy(texts, kind):
+        calls["embed"] += 1
+        return [[0.1, 0.2] for _ in texts]
+
+    monkeypatch.setattr(index, "_embed", healthy)
+    before = calls["embed"]
+    await index.reconcile()  # no edit, no touch: only the sentinel can trigger it
+    assert calls["embed"] == before + 1, (
+        "an unchanged file with an empty hash must still be re-embedded"
+    )
+    assert calls["hash"][-1] != "", "the successful batch settles the file"
