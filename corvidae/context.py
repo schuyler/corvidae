@@ -38,6 +38,21 @@ except Exception:
 
 _FALLBACK_CHARS_PER_TOKEN: float = 3.5
 
+# Per-character token cost for non-ASCII text in the same fallback, measured
+# against cl100k_base on the samples in #754 (probe 14:42:50Z): 5760 CJK
+# characters cost 5760 tokens and 1440 emoji cost 2880, i.e. one token per
+# BMP character and two per astral one. A sweep of 17 scripts at 15:14:09Z put
+# the weighted estimate between 0.36x of the tokenizer's count (Ge'ez) and 1.88x
+# (the ASCII heuristic, untouched here), against 0.11x to 1.88x for the same
+# fallback run flat on unescaped text: the weighting lifts the worst under-count
+# roughly three-fold. Before #754 the escaped form made that flat heuristic read
+# 0.59x to 2.62x — two errors partly cancelling by accident, which is why the
+# serialization keyword and this weighting belong in one change and not one
+# without the other. Kept as two constants rather than a lookup table: the
+# fallback is a rescue path for when the real thing is absent.
+_FALLBACK_TOKENS_PER_WIDE: float = 1.0
+_FALLBACK_TOKENS_PER_ASTRAL: float = 2.0
+
 
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken, or fall back to char estimate.
@@ -68,7 +83,34 @@ def count_tokens(text: str) -> int:
                 exc_info=True,
             )
     # Character-based estimate: tiktoken is unavailable or just failed.
-    return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
+    if text.isascii():
+        return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
+    # Non-ASCII is not 3.5 characters of anything. Measured against
+    # cl100k_base at 14:42:50Z, a flat 3.5 charged the same corpus 2.3x high on
+    # ASCII, 3.4x low on CJK and 6.9x low on emoji: one estimate, wrong in both
+    # directions, so a window of non-ASCII text compacted late and met the
+    # provider's limit instead of the operator's. Weighting by codepoint range
+    # brought the two non-ASCII samples to 1.00x of the tokenizer's count
+    # (14:44:26Z: CJK 5768 against 5760, emoji 2888 against 2880). The ASCII
+    # bias is pre-existing and untouched here.
+    # Counts by codepoint range through the codecs rather than a per-character
+    # Python loop: this runs once per row on every compaction pass and once per
+    # candidate page in the file tool's budget, where a Python scan of a large
+    # page is real time. Measured on 1,760,000 characters of mixed text, twice
+    # (15:12:33Z and 15:15:39Z): 5.0ms and 6.8ms per call by codec against
+    # 84.3ms and 89.4ms by loop, with identical counts on every sample.
+    # `surrogatepass` keeps a lone surrogate (which
+    # reaches here because the encoder refused it) from raising in the fallback
+    # too; it takes a single UTF-16 unit, so it is weighted as the BMP
+    # character it is.
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    astral = len(text.encode("utf-16-le", "surrogatepass")) // 2 - len(text)
+    wide = len(text) - ascii_chars - astral
+    return int(
+        ascii_chars / _FALLBACK_CHARS_PER_TOKEN
+        + wide * _FALLBACK_TOKENS_PER_WIDE
+        + astral * _FALLBACK_TOKENS_PER_ASTRAL
+    )
 
 
 class MessageType(str, enum.Enum):
@@ -317,9 +359,14 @@ def late_result_ids(messages: list) -> set[str]:
 
 
 def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
-    """Token count of a message the way it actually gets sent: the
-    JSON-serialized visible dict, not just `content`. Catches size hiding in
-    `tool_calls` and `reasoning_content` that content-only counting misses.
+    """Token count of a message as the model sees it: the JSON-serialized
+    visible dict with non-ASCII characters left as themselves, not just
+    `content`. Catches size hiding in `tool_calls` and `reasoning_content` that
+    content-only counting misses, and does not charge for the ``\\uXXXX``
+    escapes a transport would put in their place (#754). A row that is not a
+    mapping has no visible dict, so it is counted by its repr instead
+    (§3.1.18.1); a row whose provenance renders is counted from the rendered
+    form, described below.
     Accepts messages in tagged or already-clean form — `_visible()` strips
     any `_`-prefixed keys itself, and is a no-op on a dict with none.
 
@@ -330,14 +377,25 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     person row's header is a separate message and is not counted here, as
     before.
 
-    Never raises on a row's content (PRD §3.1.18.1): ``default=str`` counts a
-    value JSON cannot encode by its text, and a row that is not a mapping at
-    all is counted by its repr.
+    Encoding a row is not expected to raise for ordinary content: ``default=str``
+    counts a value JSON cannot encode by its text, and a row that is not a mapping
+    at all is counted by its repr. It is not yet *never* raises: a non-scalar dict
+    key, a value whose ``str()`` raises, and cyclic content all get past both guards
+    and reach the caller, identically on the parent of this branch (#1333, which
+    #1335 closes). PRD §3.1.18.1's never-raises clause is that contract; claiming it
+    here before it holds would let a caller rely on a guarantee nothing enforces.
     """
     if not isinstance(msg, dict):
         return count_tokens(repr(msg))
     sent = sent_form(msg, fence_key)
-    return count_tokens(json.dumps(sent if sent is not None else _visible(msg), default=str))
+    # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
+    # character into a six-character \uXXXX sequence and the tokenizer charges
+    # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
+    # compaction long before the provider runs out of context (#754). What the
+    # model receives is the characters, so that is what the estimate counts.
+    return count_tokens(
+        json.dumps(sent if sent is not None else _visible(msg), default=str, ensure_ascii=False)
+    )
 
 
 class ContextWindow:
