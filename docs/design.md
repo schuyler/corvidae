@@ -1160,12 +1160,13 @@ persistence for hours, five times, and nothing in the log said who. The route
 bounds how long any in-process writer can hold the lock and names the one that
 overran.
 
-**Two connections.** The file is opened twice, and only the writer writes:
+**Connections.** The persistence plugin opens the file twice, a writer and a reader, and only the writer writes; critique's probe opens a third, read-only connection:
 
 | Connection | Opened by | Used for |
 |---|---|---|
 | writer (`PersistencePlugin.writer`) | `open_session_store`, plain `sqlite3`, `isolation_level=None`, `check_same_thread=False`, `busy_timeout` 5000 ms (`WRITER_BUSY_TIMEOUT_MS`) | every write: persistence, scheduler, metrics, acp, memory, retention, goals, fork_log |
 | reader (`PersistencePlugin.db`) | `open_session_store`, aiosqlite, `file:...?mode=ro` URI, `isolation_level=None` | every read; a write attempted on it fails with `attempt to write a readonly database` |
+| critique probe | `ReadOnlyProbe`, aiosqlite, `file:...?mode=ro` URI | read only |
 
 The reader is in autocommit so a stray failed write cannot leave it holding a
 stale snapshot that pins WAL checkpoints. No plugin holds the writer
@@ -1232,8 +1233,8 @@ with `SQLITE_THREADSAFE=1`.
 **Input normalization.** A cursor method normalizes its arguments before it
 takes the lock, so no plugin-controlled Python (a lazy iterator, a `Mapping`
 subclass, `__conform__`) runs while the worker holds it, where `interrupt()`
-could not reach it. `sql` becomes a plain `str`; `executemany` takes a list of
-parameter sets, each a tuple or a dict with `str` keys; every value must be
+could not reach it. `sql` becomes a plain `str`; `executemany` takes any iterable of
+parameter sets, materialized into a list, each a tuple or a dict with `str` keys; every value must be
 `None`, `int`, `float`, `str` or `bytes`. A `bytearray` or `memoryview` is
 copied to `bytes`; a subclass of a plain type is copied to its base type; an
 `enum.Enum` member binds by its `.value`, so `MessageType.CONTEXT` is stored as
@@ -1280,7 +1281,9 @@ attributes for the raw connection is outside the guarantee, which is against
 accidental wedging. Out-of-process writers (`corvidae redact`, `reconsolidate`,
 the `goals` CLI) keep `busy_timeout` and short transactions, and are exempt from
 the route. With a journal mode other than WAL, an unexhausted reader cursor can
-block the writer's `COMMIT` up to `busy_timeout`, failing units; WAL has no such
+block the writer's `COMMIT` (up to `busy_timeout`, 5 s, the same as the
+default deadline), so the unit fails or, more often, is revoked, with the ERROR
+naming its owner rather than the reader; WAL has no such
 conflict ([configuration.md](configuration.md#daemon--daemon-level-settings)).
 A test scans the daemon's modules for any other `sqlite3.connect` or
 `aiosqlite.connect` and fails on one that is not on its allowlist.
@@ -5816,7 +5819,7 @@ CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
 MemoryPlugin        → "persistence", "llm", "clock", "idle", "trace"; soft-uses "agent", "registry" for forks  (cognition extra)
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)                                (cognition extra)
-CritiquePlugin      → "task", "llm", "trace", "held"; soft-uses "agent" for forks                  (cognition extra)
+CritiquePlugin      → "task", "llm", "trace", "held", "persistence"; soft-uses "agent" for forks                  (cognition extra)
 TracePlugin         → none; optional "outcome_log" (startup warning only)          (cognition extra)
 OutcomeLogPlugin    → "persistence", "trace"                                      (cognition extra)
 AppraisalPlugin     → "persistence", "trace"; soft-uses "agent" for forks                  (cognition extra)

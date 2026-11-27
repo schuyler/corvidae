@@ -960,7 +960,7 @@ from corvidae.session_writer import WriteCursor, WriteRevoked
 async def note_seen(self, channel_id: str, text: str) -> int | None:
     persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
 
-    def unit(cur: WriteCursor) -> int:
+    def unit(cur: WriteCursor) -> int | None:
         # The read that decides the write runs in the unit, so nothing
         # can change between the check and the insert.
         row = cur.execute(
@@ -980,7 +980,7 @@ async def note_seen(self, channel_id: str, text: str) -> int | None:
         return None  # rolled back; the kernel already logged an ERROR naming you
 ```
 
-Resolve persistence when you use it, not in `on_init`: the store opens in
+Call `write` only once persistence has started: the store opens in
 `persistence.on_start`, and `write` before that raises `RuntimeError`. `write`
 returns whatever the unit returns. If the unit raises, the transaction rolls
 back and the exception comes out of `await persistence.write(...)` unchanged.
@@ -1028,7 +1028,8 @@ rolled back, the kernel logs one ERROR naming `owner` and the deadline, and
 None of the unit's rows persist. If your Python is stuck rather than the SQL,
 the thread keeps running until the function returns, but every cursor call it
 makes after that raises. Decide what your plugin does on `WriteRevoked`: the
-kernel's persistence logs a WARNING and drops the row.
+kernel's `persist_message` logs a WARNING and drops the row, while
+`on_compaction` lets the exception propagate.
 
 **Extensions.** `await persistence.load_extension(path, owner="my_plugin")`
 loads a SQLite extension on the write connection, outside any transaction. It
