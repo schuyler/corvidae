@@ -543,3 +543,25 @@ async def test_a_real_abandonment_keeps_the_loop_free_through_close(
         release.set()
         await ticker
         writer._conn.close()
+
+
+async def test_an_abandoned_unit_never_hands_back_a_result(tmp_path: Path) -> None:
+    """#1315: the give-up branch writes no state, so state alone must not decide.
+
+    If the worker's own COMMIT lands after the caller was told nothing, the unit
+    reads `_COMMITTED`; the caller must still see `WriteAbandoned` rather than a
+    silent `None`.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._COMMITTED  # what the worker leaves behind if its COMMIT lands
+    writer._last_unit = unit
+    writer._abandoned = True
+    writer._abandoned_owner = unit.owner
+    try:
+        with pytest.raises(WriteAbandoned):
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()

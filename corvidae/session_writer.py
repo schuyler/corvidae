@@ -423,6 +423,13 @@ class SessionWriter:
             unit.lock.release()
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
+        if self._abandoned and unit is self._last_unit:
+            # The give-up branch writes no state, so the unit can still read
+            # _RUNNING here — or _COMMITTED if the worker's own COMMIT landed
+            # after the caller was told nothing. Either way the caller must not
+            # be handed a result: this write was abandoned, no matter what the
+            # worker later did with it (#1315).
+            raise WriteAbandoned(unit.owner, self._path)
         if exc is not None:
             raise exc
         return result
