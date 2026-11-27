@@ -58,7 +58,7 @@ llm:
 
 # Daemon settings (optional)
 daemon:
-  session_db: sessions.db           # SQLite path for conversation history
+  session_db: sessions.db           # SQLite path for conversation history (a file; ':memory:' is refused)
   # max_task_workers: 4             # concurrent background task workers
   # completed_task_buffer: 100      # completed tasks retained in memory
   # task_results_path: task-results.jsonl  # persist results to JSONL (off by default; survives deque eviction + restart)

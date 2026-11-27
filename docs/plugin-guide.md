@@ -946,6 +946,106 @@ For common cases the standard library and ecosystem offer native async alternati
 
 As a last-resort safety net, `execute_tool_call` detects a sync callable registered as a bare `Tool(name=..., fn=sync_fn, schema=...)` (bypassing `Tool.from_function()`) and wraps the call in `asyncio.to_thread()`, logging a warning. Treat that warning as a bug to fix in the plugin, not a supported registration path.
 
+## Writing to sessions.db
+
+A plugin writes the kernel's `sessions.db` as a unit: a synchronous function
+the kernel runs in one transaction on a worker thread, under a deadline.
+
+```python
+from corvidae.hooks import get_dependency
+from corvidae.persistence import PersistencePlugin
+from corvidae.session_writer import WriteCursor, WriteRevoked
+
+
+async def note_seen(self, channel_id: str, text: str) -> int | None:
+    persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+    def unit(cur: WriteCursor) -> int:
+        # The read that decides the write runs in the unit, so nothing
+        # can change between the check and the insert.
+        row = cur.execute(
+            "SELECT id FROM my_notes WHERE channel_id = ? AND text = ?",
+            (channel_id, text),
+        ).rows
+        if row:
+            return row[0][0]
+        return cur.execute(
+            "INSERT INTO my_notes (channel_id, text) VALUES (?, ?)",
+            (channel_id, text),
+        ).lastrowid
+
+    try:
+        return await persistence.write(unit, owner="my_plugin", deadline_s=2.0)
+    except WriteRevoked:
+        return None  # rolled back; the kernel already logged an ERROR naming you
+```
+
+Resolve persistence when you use it, not in `on_init`: the store opens in
+`persistence.on_start`, and `write` before that raises `RuntimeError`. `write`
+returns whatever the unit returns. If the unit raises, the transaction rolls
+back and the exception comes out of `await persistence.write(...)` unchanged.
+`owner` is the name that appears in the log when your unit is revoked.
+
+**The unit contract:**
+
+- **Synchronous, SQL only.** The unit takes the `WriteCursor` and nothing else.
+  No `await`, no model call, no network, no file I/O inside it; do those before
+  or after. That is the point: a unit that cannot await cannot sit on the write
+  lock behind a model call. Pure computation on the rows you read is fine.
+- **Reads that decide the write go inside.** A watermark compare-and-set, a
+  `lastrowid` used as a foreign key, a near-duplicate check, a `rowcount` check:
+  all in the same unit. Reads that do not decide a write can use
+  `persistence.db`.
+- **Do not issue `BEGIN`, `COMMIT`, `ROLLBACK` or `END`.** The kernel owns the
+  transaction. Nothing stops you, but a unit that commits itself can leave part
+  of its rows behind when it is later rolled back.
+- **No scripts.** There is no `executescript` (CPython's issues its own
+  `COMMIT`). Hold multi-statement DDL as a tuple of statements and run one
+  `cur.execute` each.
+- **`cur.execute(sql, params)` returns a `WriteResult`** with `.rows` (every
+  row, fetched eagerly, as tuples), `.lastrowid` and `.rowcount`.
+  `cur.executemany(sql, seq)` is DML-only and returns no rows. Neither hands
+  you a live cursor.
+- **Parameter types.** Values must be `None`, `int`, `float`, `str` or `bytes`.
+  A `bytearray` or `memoryview` is copied to `bytes`, a subclass of a plain
+  type to its base type, and an `enum.Enum` member binds by its `.value` (so
+  `MessageType.CONTEXT` is stored as `'context'`). Anything else raises
+  `TypeError` naming your owner, the parameter and its type; convert it first
+  (`sqlite_vec.serialize_float32` already returns `bytes`). Parameter sets are
+  tuples, or dicts with `str` keys; `executemany` takes any iterable of them,
+  which the kernel turns into a list before the unit takes its lock.
+- **Deadline.** `deadline_s` defaults to 5 s and must be in `(0, 30]`, or
+  `write` raises `ValueError`. Schema units (DDL, `ALTER`, backfilling a new
+  column) should pass `MAX_WRITE_DEADLINE_S`. Work that might not fit in 30 s
+  is split into several units, a few hundred rows each; memory's
+  `message_fts` backfill is the model.
+- **Keep to the cursor.** A cursor used after its unit ended raises
+  `RuntimeError`; after revocation it raises `WriteRevoked`.
+
+**`WriteRevoked`.** A unit still running at its deadline is interrupted and
+rolled back, the kernel logs one ERROR naming `owner` and the deadline, and
+`await persistence.write(...)` raises `WriteRevoked` (`.owner`, `.deadline_s`).
+None of the unit's rows persist. If your Python is stuck rather than the SQL,
+the thread keeps running until the function returns, but every cursor call it
+makes after that raises. Decide what your plugin does on `WriteRevoked`: the
+kernel's persistence logs a WARNING and drops the row.
+
+**Extensions.** `await persistence.load_extension(path, owner="my_plugin")`
+loads a SQLite extension on the write connection, outside any transaction. It
+does not touch `persistence.db`; load it there yourself if you read through it.
+Memory does both and degrades to FTS5-only if the writer's load fails.
+
+**`persistence.db` is read-only.** A write on it fails with `attempt to write a
+readonly database`, so a missed conversion shows up at once. After
+`await persistence.write(...)` returns the commit is done and the next read
+sees it.
+
+**Your own file.** A plugin that wants its own write connection, or a write
+that cannot be made short, uses its own database file (as the markdown
+recall plugin does with `index.db`); the route is for the kernel's file only.
+Opening a read-write connection to `sessions.db` yourself is outside the
+guarantee, and a test in the tree fails on it for bundled plugins.
+
 ## What the kernel exports to plugins
 
 These are the kernel modules and names the bundled plugins (the
@@ -969,7 +1069,8 @@ plugin has no special standing (#1026).
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
-| `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
+| `corvidae.persistence` | `PersistencePlugin` (`.write`, `.load_extension`, `.db` read-only), `add_column_if_missing` (async, for your own connection), `add_column_if_missing_sync` (takes a `WriteCursor`, for use inside a unit), `view_rows`, `decodable_summaries` |
+| `corvidae.session_writer` | `WriteCursor`, `WriteResult`, `WriteRevoked`, `DEFAULT_WRITE_DEADLINE_S`, `MAX_WRITE_DEADLINE_S`, `open_session_store` (see [Writing to sessions.db](#writing-to-sessionsdb)) |
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
@@ -2353,10 +2454,14 @@ Entry point name: `"persistence"`. Implements `on_start`,
 **Config:**
 ```yaml
 daemon:
-  session_db: sessions.db       # path to SQLite database file (default "sessions.db")
+  session_db: sessions.db       # path to SQLite database file (default "sessions.db"; ':memory:' is refused)
   sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
                                 # allowed values: delete, truncate, persist, memory, wal, off
 ```
+
+It also owns the write route every plugin writes `sessions.db` through
+([Writing to sessions.db](#writing-to-sessionsdb)): a read-write writer
+connection and a read-only `db`.
 
 **Without this plugin:** `resolve_conversation` returns no history; conversation
 history is not persisted across restarts.

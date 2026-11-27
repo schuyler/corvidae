@@ -240,6 +240,11 @@ For an in-repo plugin (step 2) the same code goes in
 11. **Transports** (anything that owns channels) subclass `TransportPlugin` and
     every inbound hookimpl opens with `if not self.owns(channel): return`. See
     "Writing a transport" in the guide before starting one.
+12. **Write `sessions.db` only through the write route.** Resolve persistence
+    with `get_dependency(self.pm, "persistence", PersistencePlugin)` and call
+    `.write(fn, owner="<plugin>")` with a synchronous unit; `persistence.db` is
+    read-only, and a plugin that wants its own write connection uses its own
+    file. See "Writing to sessions.db" in the guide.
 
 ## 5. Conventions (AGENTS.md; reviewers check these)
 
