@@ -802,9 +802,12 @@ async def test_the_compaction_miss_names_the_prompt_that_was_dispatched(
     hashing it in the handler would name a different fork's row.
     """
 
+    moved_by = []
+
     async def compacts_and_moves(i, channel):
         if i:
             return
+        moved_by.append(i)
         msgs = channel.conversation.messages
         msgs.append(
             {"role": "user", "content": "the compaction's cut", "_db_id": 88,
@@ -827,8 +830,12 @@ async def test_the_compaction_miss_names_the_prompt_that_was_dispatched(
         await _judged_turn(env, "k337f", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "compacted while the fork ran")
         assert f"fork prompt_sha256={dispatched}" in text, text
-        # The test's own premise: the window really did move under the fork, or
-        # this assertion would also pass on a hash taken in the handler.
+        # The premise, stated as a fact about the test: the compaction callback ran,
+        # and the marker it appends is in the window the fork was abandoned over.
+        # Without those, `!= dispatched` would only show that a turn happened.
+        assert moved_by == [0], moved_by
+        contents = [m.get("content") for m in env.channel.conversation.messages]
+        assert "the compaction's cut" in contents, contents
         assert critique_module.prompt_sha256(
             critique_module._window_blocks(env.channel)
         ).hex() != dispatched
@@ -901,6 +908,10 @@ async def test_a_hash_failure_still_logs_the_skip_without_a_key(
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
         assert "predictive" in text and "trace k337h " in text, text
         assert "prompt_sha256" not in text, text
+        # The line and the record agree about having no key: a failed hash must not
+        # leave a join key behind for a consumer reading records.
+        [rec] = [r for r in caplog.records if 'exceeded critique.fork_timeout' in r.getMessage()]
+        assert rec.fork_prompt_sha256 is None, vars(rec)
     finally:
         await _teardown(env)
 
