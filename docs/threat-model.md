@@ -2364,7 +2364,8 @@ What this does not cover:
 - **Out-of-process writers keep `busy_timeout`.** `corvidae redact`,
   `reconsolidate` and the `goals` CLI open their own connections and hold the
   write lock for their own transactions; the daemon's writer waits up to its
-  5 s `busy_timeout` at `BEGIN`, then the unit fails. Keep their transactions
+  `busy_timeout` (`daemon.sqlite_busy_timeout_ms`, 30 s by default) at
+  `BEGIN`, then the unit fails. Keep their transactions
   short; `corvidae redact` is best run with the daemon stopped (`redaction.md`),
   and `reconsolidate` already refuses the live database.
 - **Non-WAL journal modes.** With `daemon.sqlite_journal_mode` other than

@@ -14,12 +14,14 @@ import json
 import logging
 
 import pytest
+from _optional_extras import optional_extra
 
 from corvidae.channel import ChannelRegistry
-from corvidae.hooks import hookimpl
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
-from corvidae.hooks import create_plugin_manager
-from corvidae_whatsapp import WhatsAppPlugin
+
+with optional_extra("corvidae_whatsapp"):
+    from corvidae_whatsapp import WhatsAppPlugin
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -628,6 +630,37 @@ async def test_a_session_open_notification_is_quiet(tmp_path, caplog):
         with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
             await plugin._on_notification("session", {"linked": True, "reason": "open"})
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert plugin._session_state == "open"
+    finally:
+        await plugin.on_stop()
+        await sidecar.stop()
+
+
+async def test_a_failed_session_marker_warns_even_though_the_link_is_fine(tmp_path, caplog):
+    """#1256: the sidecar's marker is the durable record, and a failed one is
+    the next start reading the wrong state. It must not be an INFO line."""
+    sidecar = FakeSidecar(str(tmp_path / "whatsapp.sock"))
+    await sidecar.start()
+    plugin, _recorder, _pm = await _plugin(tmp_path)
+    try:
+        await _wait_for(lambda: plugin._client is not None)
+        with caplog.at_level(logging.INFO, logger="corvidae.whatsapp"):
+            await plugin._on_notification(
+                "session",
+                {
+                    "linked": True,
+                    "reason": "open",
+                    "marker": "failed",
+                    "marker_error": "EACCES: permission denied",
+                },
+            )
+        [line] = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "session marker" in r.getMessage()
+        ]
+        assert "not written" in line
+        assert "EACCES" in line
+        # The link itself is still recorded as open.
         assert plugin._session_state == "open"
     finally:
         await plugin.on_stop()

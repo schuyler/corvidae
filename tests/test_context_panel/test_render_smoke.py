@@ -9,7 +9,8 @@ routing, scroll rules, colors and chat hand-off of the context section.
 Like tests/test_web_render_smoke.py it is skipped without Playwright, and the
 ``web-smoke`` CI job fails if it is skipped. To run it locally::
 
-    uv run --with playwright pytest tests/test_context_panel/test_render_smoke.py
+    uv run --with playwright --extra context-panel \
+        pytest tests/test_context_panel/test_render_smoke.py
 """
 
 from __future__ import annotations
@@ -23,7 +24,13 @@ import pytest
 # Skip the module cleanly where Playwright isn't installed.
 pytest.importorskip("playwright.async_api")
 
-from context_panel import ContextPanelPlugin  # noqa: E402
+# context_panel is an optional extra too: playwright being present is not
+# evidence that it is. Guarded the same way the file guards playwright, and at
+# module scope because this import runs during collection (#1287).
+from _optional_extras import optional_extra  # noqa: E402
+
+with optional_extra("context_panel"):  # noqa: E402
+    from context_panel import ContextPanelPlugin  # noqa: E402
 from playwright.async_api import Error as PlaywrightError  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 

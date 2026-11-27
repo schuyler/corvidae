@@ -18,6 +18,7 @@ import pytest
 from corvidae.context import MessageType
 
 from .test_memory_consolidation import (
+    EMBED_CONFIG,
     build_consolidation_env,
     fetch_memories,
     fetch_watermark,
@@ -254,8 +255,11 @@ class TestFailureLogging:
         self, tmp_path, caplog
     ):
         path = str(tmp_path / "sessions.db")
+        # The wait is config-resolved (I1), so a short one is asked for the way
+        # an operator would set it rather than by patching a module constant.
+        config = {**EMBED_CONFIG, "daemon": {"sqlite_busy_timeout_ms": 100}}
         memory, persistence, stub, channel, db = await build_consolidation_env(
-            db_path=path
+            config=config, db_path=path
         )
         rowids = await seed_dialog(persistence, channel, DIALOG)
 

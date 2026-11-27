@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 import aiosqlite
 
+from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 from corvidae_cognition.fts import (
     TOKENIZE_CLAUSE,
     create_fts_table,
@@ -147,6 +148,7 @@ class MarkdownIndex:
         db_path: Path,
         get_client: Callable[[], Any],
         get_identity: Callable[[], _EncoderIdentity | None],
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     ) -> None:
         # Accept a single root (backward compat) or a list of roots.
         if isinstance(root, list):
@@ -204,6 +206,7 @@ class MarkdownIndex:
         # A folder-level lock: the index is shared across channels, so
         # reconcile and search serialize on it (not the mixin's per-channel
         # single-flight).
+        self._busy_timeout_ms = busy_timeout_ms
         self._lock = asyncio.Lock()
 
     # -- connection + schema ------------------------------------------------
@@ -226,6 +229,13 @@ class MarkdownIndex:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             db = await aiosqlite.connect(self._db_path)
             db.row_factory = aiosqlite.Row
+            # Before journal_mode: that statement is itself a write on a
+            # database another writer may hold, and until this pragma lands
+            # the connection is on sqlite3's inherited 5 s default
+            # (corvidae#1211).
+            await db.execute(
+                f"PRAGMA busy_timeout={self._busy_timeout_ms}"
+            )
             await db.execute("PRAGMA journal_mode=WAL")
             self._db = db
             return db
@@ -520,8 +530,17 @@ class MarkdownIndex:
 
             for path, (size, mtime_ns) in files.items():
                 prev = current.get(path)
-                if prev is not None and prev[0] == size and prev[1] == mtime_ns:
-                    continue  # unchanged: the stat check is a shortcut
+                if (
+                    prev is not None
+                    and prev[0] == size
+                    and prev[1] == mtime_ns
+                    and prev[2]
+                ):
+                    # Unchanged: the stat check is a shortcut. An empty hash means
+                    # a batch failed before this file's vectors landed, so the
+                    # shortcut must not take it -- that skip is what kept #1203
+                    # permanent.
+                    continue
                 await self._reconcile_file(db, path, size, mtime_ns, prev)
 
             # Missing files: in the manifest, not in the walk.
@@ -533,6 +552,63 @@ class MarkdownIndex:
                         continue
                 await self._delete_file(db, path)
             await db.commit()
+            await self._repair_missing_vectors(db, files)
+
+    async def _repair_missing_vectors(
+        self, db: aiosqlite.Connection, files: dict[str, tuple[int, int]]
+    ) -> None:
+        """Re-embed the files whose chunks have no vector, then report (#1203).
+
+        The sentinel this module writes only marks batches that fail from now
+        on. Rows written before it carry their real hash and their walk stat, so
+        they satisfy the shortcut in ``reconcile`` and would never be retried --
+        which is exactly the state the issue was filed from (707 chunks, five
+        paths, real hashes). Keyed on the vector row, not on the hash, so those
+        hosts heal on their next reconcile.
+        """
+        if not self._vec_available:
+            return
+        try:
+            async with db.execute(
+                "SELECT DISTINCT c.path FROM chunks c LEFT JOIN chunks_vec v "
+                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
+            ) as cursor:
+                paths = [r["path"] for r in await cursor.fetchall()]
+        except Exception:  # no vector table is not a reconcile failure
+            return
+        for path in paths:
+            stat = files.get(path)
+            if stat is None:
+                continue  # not in this walk: the prune already removed it
+            # prev None forces a re-chunk and a re-embed; a failure writes the
+            # sentinel again, so the retry continues next time.
+            await self._reconcile_file(db, path, stat[0], stat[1], None)
+        await self._warn_missing_vectors(db)
+
+    async def _warn_missing_vectors(self, db: aiosqlite.Connection) -> None:
+        """Say how many chunks have no vector; say they are being retried (#1203).
+
+        The degradation is invisible to callers otherwise: those chunks are
+        reachable only through the FTS5 half of the search.
+        """
+        if not self._vec_available:
+            return
+        try:
+            async with db.execute(
+                "SELECT count(*) AS n FROM chunks c LEFT JOIN chunks_vec v "
+                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception:  # a missing table is not a reconcile failure
+            return
+        missing = row["n"] if row else 0
+        if missing:
+            logger.warning(
+                "markdown recall: %d chunks have no vector (FTS5-only); their "
+                "files are left unsettled and are re-embedded on the next "
+                "reconcile",
+                missing,
+            )
 
     async def _rebuild_all(
         self, db: aiosqlite.Connection, files: dict[str, tuple[int, int]]
@@ -594,6 +670,7 @@ class MarkdownIndex:
         await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
         await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
+        await self._warn_missing_vectors(db)
 
     async def _reconcile_file(
         self,
@@ -633,8 +710,17 @@ class MarkdownIndex:
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
         vectors = await self._embed([c["text"] for c in chunks], "document")
+        if self._vec_available and any(v is None for v in vectors):
+            # The chunks are written but their vectors are not, so this file is
+            # NOT settled: recording its real hash would let the next reconcile
+            # take the mtime-only branch and leave those chunks un-embedded for
+            # good (#1203). An empty hash is never a sha256, so the file is
+            # re-indexed until an embedding succeeds.
+            settled_hash = ""
+        else:
+            settled_hash = content_hash
         await self._replace_file_chunks(
-            db, path, size, mtime_ns, content_hash, chunks, vectors
+            db, path, size, mtime_ns, settled_hash, chunks, vectors
         )
 
     async def _replace_file_chunks(

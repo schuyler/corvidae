@@ -1164,7 +1164,7 @@ overran.
 
 | Connection | Opened by | Used for |
 |---|---|---|
-| writer (`PersistencePlugin.writer`) | `open_session_store`, plain `sqlite3`, `isolation_level=None`, `check_same_thread=False`, `busy_timeout` 5000 ms (`WRITER_BUSY_TIMEOUT_MS`) | every write: persistence, scheduler, metrics, acp, memory, retention, goals, fork_log |
+| writer (`PersistencePlugin.writer`) | `open_session_store`, plain `sqlite3`, `isolation_level=None`, `check_same_thread=False`, `busy_timeout` from `daemon.sqlite_busy_timeout_ms` (default 30000 ms, `DEFAULT_BUSY_TIMEOUT_MS`), set before the journal mode and schema | every write: persistence, scheduler, metrics, acp, memory, retention, goals, fork_log |
 | reader (`PersistencePlugin.db`) | `open_session_store`, aiosqlite, `file:...?mode=ro` URI, `isolation_level=None` | every read; a write attempted on it fails with `attempt to write a readonly database` |
 | critique probe | `ReadOnlyProbe`, aiosqlite, `file:...?mode=ro` URI | read only |
 
@@ -1282,8 +1282,8 @@ attributes for the raw connection is outside the guarantee, which is against
 accidental wedging. Out-of-process writers (`corvidae redact`, `reconsolidate`,
 the `goals` CLI) keep `busy_timeout` and short transactions, and are exempt from
 the route. With a journal mode other than WAL, an unexhausted reader cursor can
-block the writer's `COMMIT` (up to `busy_timeout`, 5 s, the same as the
-default deadline), so the unit fails or, more often, is revoked, with the ERROR
+block the writer's `COMMIT` (up to `busy_timeout`, 30 s by default, longer
+than the 5 s default deadline), so the unit fails or, more often, is revoked, with the ERROR
 naming its owner rather than the reader; WAL has no such
 conflict ([configuration.md](configuration.md#daemon--daemon-level-settings)).
 A test scans the daemon's modules for any other `sqlite3.connect` or

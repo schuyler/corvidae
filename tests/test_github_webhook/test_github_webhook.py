@@ -11,8 +11,11 @@ from __future__ import annotations
 import logging
 
 import pytest
+from _optional_extras import optional_extra
 from fake_clock import install_kernel_clock
-from github_webhook import GithubWebhookPlugin
+
+with optional_extra("github_webhook"):
+    from github_webhook import GithubWebhookPlugin
 
 from corvidae.channel import ChannelRegistry
 from corvidae.channels.webhook import WebhookDelivery, WebhookPlugin

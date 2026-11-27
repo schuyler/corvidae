@@ -84,7 +84,6 @@ import math
 import re
 import logging
 import random
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
@@ -2235,12 +2234,26 @@ class CritiquePlugin(CorvidaePlugin):
         # while the channel was still busy from one that hit after it.
         forking = False
         try:
+            # The two warnings below report a span measured on the event loop's
+            # own clock, read *before* the timer is armed. Not a
+            # `time.monotonic()` read inside the block, for two reasons. The
+            # timer is armed by the loop when the context is entered, so a clock
+            # started after that leaves the gap uncounted: on a stalled runner
+            # the gap can be the whole allowance, and a fork that never got a
+            # turn logs "after 0.0s" — the exact thing this line exists to rule
+            # out (#1304). And one clock for arming and for measuring is what
+            # makes the printed number mean what it says. Reading before the
+            # `async with` errs the safe way: it can only over-report. Normally
+            # that is the microseconds of entering the context; on a stalled
+            # runner it is the stall, which is wall time the fork stage really
+            # did occupy, so the slow-fork warning calling it slow is honest.
+            # The span measured from this stamp is what the deadline bounds —
+            # the quiet wait plus every request — because a warning that says
+            # only "exceeded the timeout" cannot tell a slow fork from a hung
+            # one (#1272).
+            loop = asyncio.get_running_loop()
+            started = loop.time()
             async with asyncio.timeout(timeout) as deadline:
-                # Wall time from here, because this is what the deadline bounds:
-                # the quiet wait plus every request. A warning that says only
-                # "exceeded the timeout" cannot tell a slow fork from a hung
-                # one (#1272).
-                started = time.monotonic()
                 if idle:
                     await self._wait_quiet(agent, channel)
                 forking = True
@@ -2301,12 +2314,12 @@ class CritiquePlugin(CorvidaePlugin):
             # Only the deadline's own expiry is a timeout miss; a TimeoutError
             # from inside the request is a fork failure like any other.
             if isinstance(exc, TimeoutError) and deadline.expired():
-                waited = time.monotonic() - started
+                waited = loop.time() - started
                 reason = (
                     f"the fork exceeded critique.fork_timeout ({timeout} s) "
-                    f"after {waited:.1f}s" if forking
+                    f"after {waited:.3f}s" if forking
                     else f"the channel stayed busy past critique.fork_timeout "
-                         f"({timeout} s) after {waited:.1f}s")
+                         f"({timeout} s) after {waited:.3f}s")
                 for lens in lenses:
                     self._skip_lens(channel, lens, trace_id, reason)
                 return None
@@ -2317,12 +2330,13 @@ class CritiquePlugin(CorvidaePlugin):
                     exc_info=True,
                 )
             return None
-        elapsed = time.monotonic() - started
+        elapsed = loop.time() - started
         if elapsed > timeout * SLOW_FORK_FRACTION:
             # The fork still counted; this is the early signal, so the line says
-            # what the allowance was instead of leaving that to be known.
+            # what the allowance was instead of leaving that to be known. Three
+            # decimals, so a small allowance is still expressible (#1304).
             logger.warning(
-                "critique lens fork %s for trace %s on channel %s was slow: %.1fs of"
+                "critique lens fork %s for trace %s on channel %s was slow: %.3fs of"
                 " the %s s allowed by critique.fork_timeout",
                 "+".join(lenses), trace_id, channel.id, elapsed, timeout,
                 extra={"channel": channel.id, "trace_id": trace_id},

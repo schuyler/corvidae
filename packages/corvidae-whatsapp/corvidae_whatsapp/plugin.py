@@ -253,6 +253,20 @@ class WhatsAppPlugin(TransportPlugin):
             # `reason` is `open` or `loggedOut`. Reading a `state` key here
             # silently turned every notification into "unknown", so a
             # logged-out link never produced the WARNING R5 asks for.
+            # Since #1256 the frame also carries `marker` (`written`, `removed`
+            # or `failed`, with `marker_error`): the sidecar's session record,
+            # not the link. A failure there means this process works and the
+            # next start will believe the wrong thing, so it is never a debug
+            # line.
+            marker = params.get("marker")
+            if marker == "failed":
+                logger.warning(
+                    "whatsapp: the session marker was not %s (%s); the link "
+                    "itself is unaffected, but the next start will read the "
+                    "wrong session state",
+                    "written" if params.get("linked") else "removed",
+                    params.get("marker_error") or "no detail reported",
+                )
             linked = bool(params.get("linked", False))
             reason = params.get("reason") or ("open" if linked else "unknown")
             if reason != self._session_state:

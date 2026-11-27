@@ -193,6 +193,8 @@ async def test_appraisal_stage2_is_keyed_by_channel(env: Env, caplog: pytest.Log
     env.channel.conversation = window_of(env.channel.id, [41, 42])
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is the heater the culprit?", annotations={})
+    # The reply row stage 2 cuts its fork at (#341).
+    env.appraisal._record_reply(env.channel, "k")
 
     await env.appraisal._run_stage2(env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
 

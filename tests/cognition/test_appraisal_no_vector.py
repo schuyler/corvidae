@@ -54,6 +54,8 @@ async def _fork_once(tmp_path, offer=None, reply=_REPLY):
     )
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="what did we agree?", annotations={})
+    # The reply row stage 2 cuts its fork at (#341), as on_agent_response notes it.
+    env.appraisal._record_reply(env.channel, "k")
     try:
         await env.appraisal._run_stage2(
             env.channel, "k", "what did we agree?", "we agreed on Tuesday", None)

@@ -159,7 +159,11 @@ test("an open connection is reported as a session notification", async () => {
   await adapter.start();
   sock.handlers["connection.update"]({ connection: "open", self: { jid: "5550000@s.whatsapp.net" } });
   assert.deepEqual(events, [
-    { jsonrpc: "2.0", method: "session", params: { linked: true, reason: "open" } },
+    {
+      jsonrpc: "2.0",
+      method: "session",
+      params: { linked: true, reason: "open", marker: "written" },
+    },
   ]);
   assert.deepEqual(adapter.status(), {
     linked: true,
@@ -183,7 +187,7 @@ test("a logged-out close reports the fix and stops retrying", async () => {
   assert.deepEqual(events.at(-1), {
     jsonrpc: "2.0",
     method: "session",
-    params: { linked: false, reason: "loggedOut" },
+    params: { linked: false, reason: "loggedOut", marker: "removed" },
   });
   assert.equal(adapter.stopped, true);
   assert.equal(adapter.timer, null);
@@ -821,5 +825,60 @@ test("a pairing that was started and then abandoned still asks to pair after a r
     },
   );
   await second.close();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});
+
+test("a marker that cannot be written is reported, not swallowed (#1256)", async () => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-mkfail-"));
+  const missing = path.join(dir, "no-such-dir", "session.json");
+  const errors = [];
+  const sock = fakeSocket();
+  const { adapter, logs } = makeAdapter(sock, {
+    sessionMarker: missing,
+    logger: { info: () => {}, warn: (m) => logs.warnings.push(m), error: (m) => errors.push(m) },
+  });
+  const events = [];
+  adapter.onNotify((frame) => events.push(frame));
+  await adapter.start();
+  sock.handlers["connection.update"]({ connection: "open", self: { jid: "5550000@s.whatsapp.net" } });
+
+  const session = events.find((e) => e.method === "session");
+  assert.equal(session.params.linked, true, "the link is real even when the record is not");
+  assert.equal(session.params.marker, "failed");
+  assert.match(session.params.marker_error, /ENOENT|no such file/i);
+  assert.match(errors.join("\n"), /could not write the session marker/);
+  // The state the marker exists to protect is still true for THIS process.
+  assert.equal(adapter.status().linked, true);
+  await adapter.close();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});
+
+test("a marker that cannot be removed is reported, not swallowed (#1256)", async () => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-rmfail-"));
+  const marker = path.join(dir, "session.json");
+  // A non-empty directory at the marker path: unlink fails with EISDIR/EPERM.
+  await fs.promises.mkdir(marker);
+  await fs.promises.writeFile(path.join(marker, "occupied"), "x");
+  const errors = [];
+  const sock = fakeSocket();
+  const { adapter } = makeAdapter(sock, {
+    sessionMarker: marker,
+    logger: { info: () => {}, warn: () => {}, error: (m) => errors.push(m) },
+  });
+  const events = [];
+  adapter.onNotify((frame) => events.push(frame));
+  await adapter.start();
+  sock.handlers["connection.update"]({
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
+  });
+
+  const session = events.find((e) => e.method === "session");
+  assert.equal(session.params.linked, false);
+  assert.equal(session.params.marker, "failed", "a marker left behind is reported");
+  assert.match(errors.join("\n"), /could not remove the session marker/);
+  // Left on disk, which is the failure the report exists to make visible.
+  assert.ok(await fs.promises.stat(marker).then(() => true, () => false));
+  await adapter.close();
   await fs.promises.rm(dir, { recursive: true, force: true });
 });

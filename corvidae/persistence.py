@@ -10,6 +10,10 @@ Config:
       sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
                                     # allowed values: delete, truncate, persist,
                                     # memory, wal, off
+      sqlite_busy_timeout_ms: 30000 # ms the write route's writer waits for an
+                                    # out-of-process writer's lock before giving up
+                                    # (default 30000); also the markdown index's
+                                    # wait. Must be 1..600000.
 """
 
 import json
@@ -36,6 +40,61 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
+
+#: Default write-lock wait for the session write route's writer connection (the
+#: only in-daemon writer on sessions.db, #1211): how long a unit's BEGIN waits
+#: for an out-of-process writer such as an offline CLI. The markdown index uses
+#: the same value on its own index.db. Out-of-process tools (the goals and
+#: redact CLIs, reconsolidate) connect on their own.
+DEFAULT_BUSY_TIMEOUT_MS = 30_000
+
+#: A wait outside this window is a mistake, not a policy: 0 or a negative value
+#: disables busy handling entirely (worse than the inherited 5 s), and SQLite
+#: clamps anything past INT_MAX.
+BUSY_TIMEOUT_BOUNDS = (1, 600_000)
+
+
+def busy_timeout_ms_from_config(config: dict) -> int:
+    """Resolve ``daemon.sqlite_busy_timeout_ms``, or the default when unusable.
+
+    Applied to the session write route's writer connection, which carries every
+    in-daemon write to the session database (#1211), and to the markdown index's
+    own index.db, so one config key sets one wait. Out-of-process tools connect
+    on their own and are not covered.
+
+    Types are checked before conversion: ``int()`` would accept ``True`` as 1 ms
+    and truncate ``1.5``, and ``int(float("inf"))`` raises OverflowError, which
+    must not abort startup. A digit string is accepted because that is what a
+    YAML scalar yields. 0 and negatives are rejected: they disable busy
+    handling, which is worse than the 5 s default this replaces.
+    """
+    daemon = config.get("daemon")
+    raw = (daemon if isinstance(daemon, dict) else {}).get(
+        "sqlite_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS
+    )
+    low, high = BUSY_TIMEOUT_BOUNDS
+    value: int | None
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        # bool first: True is an int subclass, and True is not a timeout.
+        value = None
+    elif isinstance(raw, str):
+        # Let int() decide: str.isdigit() is true for "²", and lstrip("+-")
+        # accepts "++5"; both then raise ValueError inside us, and this runs
+        # in on_start with no caller to catch it.
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = None
+    else:
+        value = raw
+    if value is None or not low <= value <= high:
+        logger.warning(
+            "daemon.sqlite_busy_timeout_ms %r is unusable (want an integer from "
+            "%d to %d ms); using %d ms",
+            raw, low, high, DEFAULT_BUSY_TIMEOUT_MS,
+        )
+        return DEFAULT_BUSY_TIMEOUT_MS
+    return value
 
 
 async def add_column_if_missing(
@@ -382,8 +441,20 @@ class PersistencePlugin(CorvidaePlugin):
                     "file path in agent.yaml"
                 )
             base_dir = config.get("_base_dir", Path("."))
+            # A writer that inherits sqlite3.connect's 5.0 s default gives up
+            # while an out-of-process writer (an offline CLI) holds the WAL
+            # write lock (corvidae#1211). The wait is bounded, not removed,
+            # and open_session_store sets it before journal_mode and the
+            # schema, both of which are writes.
+            busy_ms = busy_timeout_ms_from_config(config)
             self.db, self.writer = await open_session_store(
-                Path(base_dir) / db_path, journal_mode=journal_mode
+                Path(base_dir) / db_path,
+                journal_mode=journal_mode,
+                busy_timeout_ms=busy_ms,
+            )
+            logger.info(
+                "SQLite busy timeout set to %d ms", busy_ms,
+                extra={"busy_timeout_ms": busy_ms},
             )
             # Report the mode in effect, which SQLite may refuse to change.
             async with self.db.execute("PRAGMA journal_mode") as cursor:

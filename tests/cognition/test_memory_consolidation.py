@@ -25,7 +25,7 @@ from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin, RubricPrior
-from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.persistence import PersistencePlugin, busy_timeout_ms_from_config, init_db
 from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
 
 
@@ -99,7 +99,11 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     # is honoured when no path is given.
     if db_path == ":memory:":
         db_path = config.get("daemon", {}).get("session_db")
-    db, reader, writer = await open_test_store(db_path)
+    # The writer's wait comes from daemon.sqlite_busy_timeout_ms, as on_start
+    # resolves it in the daemon.
+    db, reader, writer = await open_test_store(
+        db_path, busy_timeout_ms=busy_timeout_ms_from_config(config)
+    )
 
     pm = create_plugin_manager()
     # Kernel plugins the memory plugin resolves with get_dependency (#1180).

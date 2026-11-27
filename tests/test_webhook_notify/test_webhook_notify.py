@@ -15,6 +15,8 @@ import logging
 from pathlib import Path
 
 import pytest
+from _optional_extras import optional_extra
+from fake_clock import install_kernel_clock
 
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry
@@ -24,9 +26,9 @@ from corvidae.provenance import frame
 from corvidae.spill import SPILL_NAME, NotificationSpill
 from corvidae.tool import Tool
 from corvidae.tool_collection import ToolCollectionPlugin
-from fake_clock import install_kernel_clock
 
-from webhook_notify import WebhookNotifyPlugin
+with optional_extra("webhook_notify"):
+    from webhook_notify import WebhookNotifyPlugin
 
 TARGETS = {"github": ["irc:#a", "irc:#b"], "siri": ["irc:#c"]}
 
@@ -527,3 +529,124 @@ async def test_a_channel_listed_twice_is_notified_once(tmp_path):
     await plugin._deliver(delivery({"n": 1}))
 
     assert [c["channel"] for c in rec.calls] == ["irc:#a"]
+
+
+# ---------------------------------------------------------------------------
+# #853: a failed flush keeps its digest, and on_stop stops a running one
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_flush_keeps_its_deliveries_and_does_not_spend_the_slot(
+    tmp_path, caplog
+):
+    """AC: a flush whose send raises restores its deliveries and the cap slot."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": {"channels": ["irc:#a"], "max_notifications": 1,
+                                 "per_seconds": 30}},
+    })
+    real_notify = plugin._notify
+
+    async def refusing(endpoint, deliveries, dropped):
+        raise RuntimeError("the spill service is down")
+
+    plugin._notify = refusing
+    with caplog.at_level(logging.WARNING, logger="webhook_notify"):
+        await plugin._deliver(delivery({"n": 1}))
+        await settle()
+
+    state = plugin._state["github"]
+    assert [d.payload for d in state.buffer] == [{"n": 1}], "the digest was lost"
+    assert list(state.flushes) == [], "a failed send must not spend a cap slot"
+    assert any("did not accept a digest" in r.getMessage() for r in caplog.records)
+
+    # With the service back, the next window sends what was kept.
+    plugin._notify = real_notify
+    await plugin._deliver(delivery({"n": 2}))
+    await settle()
+    text = rec.calls[-1]["text"]
+    assert '"n":1' in text and '"n":2' in text
+
+
+async def test_on_stop_cancels_a_flush_that_is_already_running(tmp_path):
+    """AC: a flush in flight at shutdown is stopped, not finished."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def gated(endpoint, deliveries, dropped):
+        started.set()
+        await gate.wait()
+
+    plugin._notify = gated
+    await plugin._deliver(delivery({"n": 1}))
+    await asyncio.wait_for(started.wait(), 2)
+    await plugin.on_stop()
+    gate.set()
+    await settle()
+
+    assert rec.calls == [], "nothing may be sent after on_stop returns"
+    assert [d.payload for d in plugin._state["github"].buffer] == [{"n": 1}], (
+        "a cancelled flush puts its deliveries back rather than losing them"
+    )
+
+
+async def test_a_delivery_after_on_stop_is_buffered_and_never_armed(tmp_path):
+    """AC: a late delivery does not arm a timer into a stopped plugin."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    await plugin.on_stop()
+    await plugin._deliver(delivery({"n": 1}))
+    await settle()
+
+    state = plugin._state["github"]
+    assert rec.calls == []
+    assert state.window is None
+    assert [d.payload for d in state.buffer] == [{"n": 1}]
+
+
+async def test_a_restored_digest_over_max_buffered_drops_the_oldest_and_counts_it(
+    tmp_path, caplog
+):
+    """AC1's overflow branch: a digest that no longer fits is dropped oldest-first.
+
+    The buffer only fills during the send, so the flush is gated: two deliveries
+    are taken, a third arrives while the send is in flight, and the restore has
+    to drop one to respect ``max_buffered``.
+    """
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05, "max_buffered": 2},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+    real_notify = plugin._notify
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def refusing(endpoint, deliveries, dropped):
+        started.set()
+        await gate.wait()
+        raise RuntimeError("the spill service is down")
+
+    plugin._notify = refusing
+    await plugin._deliver(delivery({"n": 0}))
+    await plugin._deliver(delivery({"n": 1}))
+    await asyncio.wait_for(started.wait(), 2)
+    await plugin._deliver(delivery({"n": 2}))  # lands while the flush is in flight
+    with caplog.at_level(logging.WARNING, logger="webhook_notify"):
+        gate.set()
+        await settle()
+
+    state = plugin._state["github"]
+    assert [d.payload for d in state.buffer] == [{"n": 1}, {"n": 2}], "oldest dropped"
+    assert state.dropped == 1 and state.pending_dropped == 1
+    assert any("counted 1 dropped" in r.getMessage() for r in caplog.records)
+
+    plugin._notify = real_notify
+    await plugin._deliver(delivery({"n": 3}))
+    await settle()
+    assert '"n":0' not in rec.calls[-1]["text"]

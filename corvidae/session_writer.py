@@ -32,8 +32,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_WRITE_DEADLINE_S: float = 5.0
 # Largest deadline any caller may ask for (schema units use it).
 MAX_WRITE_DEADLINE_S: float = 30.0
-# How long the writer waits on an out-of-process writer's lock at BEGIN.
-WRITER_BUSY_TIMEOUT_MS: int = 5000
 
 # Unit lifecycle states, written only under the unit's lock.
 _RUNNING = "running"
@@ -200,8 +198,15 @@ class SessionWriter:
         self._last_unit: _Unit | None = None
 
     @classmethod
-    def open(cls, path: str | Path) -> "SessionWriter":
-        """Open the writer connection, refusing a non-serialized SQLite (R6)."""
+    def open(
+        cls, path: str | Path, *, busy_timeout_ms: int | None = None
+    ) -> "SessionWriter":
+        """Open the writer connection, refusing a non-serialized SQLite (R6).
+
+        ``busy_timeout_ms`` is how long a unit's BEGIN waits for an
+        out-of-process writer's lock; None means
+        ``corvidae.persistence.DEFAULT_BUSY_TIMEOUT_MS``.
+        """
         # Read at call time so tests can patch it.
         level = sqlite3.threadsafety
         if level != 3:
@@ -211,12 +216,24 @@ class SessionWriter:
                 "a stalled plugin safely — run corvidae on a Python whose "
                 "sqlite3 module is built with SQLITE_THREADSAFE=1"
             )
+        # Local import: persistence imports this module at load time.
+        if busy_timeout_ms is None:
+            from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
+
+            busy_timeout_ms = DEFAULT_BUSY_TIMEOUT_MS
         conn = sqlite3.connect(
             str(path),
             isolation_level=None,
             check_same_thread=False,
-            timeout=WRITER_BUSY_TIMEOUT_MS / 1000,
+            timeout=busy_timeout_ms / 1000,
         )
+        # The wait is the first statement on the connection, ahead of
+        # journal_mode and the schema, which are writes themselves (#1291).
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        except BaseException:
+            conn.close()
+            raise
         return cls(conn)
 
     def _lock(self) -> asyncio.Lock:
@@ -519,17 +536,21 @@ class SessionWriter:
 
 
 async def open_session_store(
-    path: str | Path, *, journal_mode: str = "wal"
+    path: str | Path,
+    *,
+    journal_mode: str = "wal",
+    busy_timeout_ms: int | None = None,
 ) -> tuple[aiosqlite.Connection, SessionWriter]:
     """Open writer, apply journal mode, run schema, then open the reader.
 
-    The mode is applied before the reader exists because leaving WAL while
-    another connection is open fails with "database is locked".
+    The writer's busy timeout (``busy_timeout_ms``, None for the default) is
+    set first. The mode is applied before the reader exists because leaving
+    WAL while another connection is open fails with "database is locked".
     """
     # Local import: persistence imports this module for its constants.
     from corvidae.persistence import MESSAGE_LOG_SCHEMA
 
-    writer = SessionWriter.open(path)
+    writer = SessionWriter.open(path, busy_timeout_ms=busy_timeout_ms)
     try:
         await writer.set_journal_mode(journal_mode)
 
