@@ -15,20 +15,23 @@ import json
 import random
 
 import aiosqlite
-import corvidae_cognition.memory as memory_module
 import pytest
-from corvidae_cognition.memory import (
-    DEFAULT_CONSOLIDATION_FORK_PROMPT,
-    DEFAULT_ENTRY_TARGET_TOKENS,
-    CatchupSegment,
-    _dialog_ids,
-    _fork_range_sentence,
-    _measured_size,
-    _merge_overlapping_segments,
-    build_catchup_segments,
-    consolidation_instruction,
-    logger,
-)
+from _optional_extras import optional_extra
+
+with optional_extra("corvidae_cognition"):
+    import corvidae_cognition.memory as memory_module
+    from corvidae_cognition.memory import (
+        DEFAULT_CONSOLIDATION_FORK_PROMPT,
+        DEFAULT_ENTRY_TARGET_TOKENS,
+        CatchupSegment,
+        _dialog_ids,
+        _fork_range_sentence,
+        _measured_size,
+        _merge_overlapping_segments,
+        build_catchup_segments,
+        consolidation_instruction,
+        logger,
+    )
 
 import corvidae.context as context_module
 from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
