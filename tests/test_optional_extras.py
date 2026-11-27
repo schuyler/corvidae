@@ -224,6 +224,27 @@ def _re_raise_guard_names(node: ast.Try) -> frozenset[str]:
     return frozenset(vouched)
 
 
+def _importorskip_name(node: ast.stmt) -> str | None:
+    """The package a module-scope ``pytest.importorskip("…")`` vouches for.
+
+    ``importorskip`` at module scope stands the whole module down when the
+    package is missing, which is the same outcome ``optional_extra`` gives, so
+    an import below it is guarded in fact even though it is not in the house
+    spelling (#1317). Only a literal argument can be read statically; anything
+    computed is left as debt rather than assumed safe.
+    """
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return None
+    func = node.value.func
+    name = getattr(func, "attr", None) or getattr(func, "id", None)
+    if name != "importorskip" or not node.value.args:
+        return None
+    arg = node.value.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value.split(".")[0]
+    return None
+
+
 def _import_time_imports(tree: ast.Module):
     """Yield ``(lineno, top_level_name, guarded_names)`` for import-time imports.
 
@@ -237,18 +258,25 @@ def _import_time_imports(tree: ast.Module):
     """
 
     def walk(nodes, guarded):
+        # Guards accumulate in statement order: a module-scope importorskip
+        # vouches for the imports below it, not for the ones above it.
+        scope = set(guarded)
         for node in nodes:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 continue
             if isinstance(node, ast.If) and _is_type_checking(node.test):
                 continue
+            vouched = _importorskip_name(node)
+            if vouched is not None:
+                scope.add(vouched)
+                continue
             if isinstance(node, ast.With):
-                yield from walk(node.body, guarded | _guarded_names(node))
+                yield from walk(node.body, frozenset(scope) | _guarded_names(node))
                 continue
             if isinstance(node, ast.Try):
-                yield from walk(node.body, guarded | _re_raise_guard_names(node))
+                yield from walk(node.body, frozenset(scope) | _re_raise_guard_names(node))
                 for branch in [*[h.body for h in node.handlers], node.orelse, node.finalbody]:
-                    yield from walk(branch, guarded)
+                    yield from walk(branch, frozenset(scope))
                 continue
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 if isinstance(node, ast.ImportFrom) and node.level:
@@ -258,9 +286,9 @@ def _import_time_imports(tree: ast.Module):
                         top = alias.name.split(".")[0]
                     else:
                         top = (node.module or "").split(".")[0]
-                    yield node.lineno, top, guarded
+                    yield node.lineno, top, frozenset(scope)
                 continue
-            yield from walk(list(ast.iter_child_nodes(node)), guarded)
+            yield from walk(list(ast.iter_child_nodes(node)), frozenset(scope))
 
     yield from walk(tree.body, frozenset())
 
@@ -417,7 +445,6 @@ _UNGUARDED_DEBT = frozenset({
     "tests/cognition/test_memory_window_exclusion.py:corvidae_cognition",
     "tests/cognition/fork_log_store.py:corvidae_cognition",
     "tests/cognition/test_plugin_shutdown_wired.py:corvidae_cognition",
-    "tests/cognition/test_probe.py:corvidae_cognition",
     "tests/cognition/test_prompt_routing.py:corvidae_cognition",
     "tests/cognition/test_recall_contribution.py:corvidae_cognition",
     "tests/cognition/test_reconsolidate.py:corvidae_cognition",
@@ -434,7 +461,6 @@ _UNGUARDED_DEBT = frozenset({
     # corvidae_restart — 1
     "tests/corvidae_restart/test_restart.py:corvidae_restart",
     # packages/corvidae-vision — 1
-    "packages/corvidae-vision/tests/test_vision.py:corvidae_vision",
     # packages/rss-reader — 1
     "packages/rss-reader/tests/test_rss_reader.py:rss_reader",
     # test_alignment — 1
@@ -567,3 +593,45 @@ def test_a_stale_ledger_entry_warns_rather_than_fails(monkeypatch):
     )
     with pytest.warns(UserWarning, match="stale _UNGUARDED_DEBT"):
         test_no_new_unguarded_extra_imports()
+
+
+def _imports_of(source: str):
+    return list(_import_time_imports(ast.parse(source)))
+
+
+def test_module_scope_importorskip_vouches_for_its_package():
+    """#1317: ``pytest.importorskip("<pkg>")`` at module scope is a guard.
+
+    It stands the whole module down when the package is missing, which is the
+    outcome ``optional_extra`` gives; only the spelling differs.
+    """
+    entries = _imports_of(
+        "import pytest\n"
+        "pytest.importorskip('corvidae_vision')\n"
+        "from corvidae_vision import Vision\n"
+    )
+    [(lineno, _name, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    assert lineno == 3
+    assert "corvidae_vision" in guarded
+
+
+def test_importorskip_for_a_different_package_vouches_for_nothing():
+    """A skip on one package must not launder an import of another."""
+    entries = _imports_of(
+        "import pytest\n"
+        "pytest.importorskip('playwright.async_api')\n"
+        "from corvidae_vision import Vision\n"
+    )
+    [(_, _, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    assert "corvidae_vision" not in guarded
+
+
+def test_importorskip_vouches_only_for_the_imports_below_it():
+    """Order matters: a skip after the import cannot have guarded it."""
+    entries = _imports_of(
+        "from corvidae_vision import Vision\n"
+        "import pytest\n"
+        "pytest.importorskip('corvidae_vision')\n"
+    )
+    [(_, _, guarded)] = [e for e in entries if e[1] == "corvidae_vision"]
+    assert "corvidae_vision" not in guarded
