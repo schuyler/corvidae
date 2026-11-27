@@ -111,11 +111,23 @@ def _normalize_value(owner: str, where: str, value: Any) -> Any:
     )
 
 
+def _plain_str(owner: str, value: Any, what: str) -> str:
+    """Copy a str (or str subclass) to a plain str, or raise naming the owner."""
+    # A non-str here would fail inside str.__str__ with a message naming
+    # neither the unit's owner nor the remedy.
+    if not isinstance(value, str):
+        raise TypeError(
+            f"write unit from {owner}: {what} must be a str, got "
+            f"{type(value).__name__}; pass SQL text and string parameter names"
+        )
+    return str.__str__(value)
+
+
 def _normalize_params(owner: str, params: Any) -> Any:
     """Materialize one parameter set as a tuple or plain dict of plain values."""
     if isinstance(params, Mapping):
         return {
-            str.__str__(k): _normalize_value(owner, repr(k), v)
+            _plain_str(owner, k, "a parameter name"): _normalize_value(owner, repr(k), v)
             for k, v in params.items()
         }
     return tuple(
@@ -149,7 +161,7 @@ class WriteCursor:
         """Run one statement and return every row it produced."""
         # Normalize before the lock so only SQLite runs under it.
         owner = self._unit.owner
-        sql = str.__str__(sql)
+        sql = _plain_str(owner, sql, "the SQL statement")
         norm = _normalize_params(owner, params)
         self._enter()
         try:
@@ -165,7 +177,7 @@ class WriteCursor:
         """Run one DML statement per parameter set."""
         # Materialize the iterable and every set before the lock.
         owner = self._unit.owner
-        sql = str.__str__(sql)
+        sql = _plain_str(owner, sql, "the SQL statement")
         sets = [_normalize_params(owner, p) for p in list(seq)]
         self._enter()
         try:
@@ -235,7 +247,26 @@ class SessionWriter:
             async with self._lock():
                 return await self._run_unit(fn, owner, deadline_s)
 
-        return await asyncio.shield(asyncio.ensure_future(locked()))
+        return await self._shielded(locked())
+
+    @staticmethod
+    async def _shielded(coro: Any) -> Any:
+        """Await ``coro`` as a task a cancelled caller cannot cut short.
+
+        The task keeps the writer lock until its blocking work ends. If the
+        caller was cancelled, nobody awaits the task, so a done-callback
+        retrieves its exception (already logged where it arose) instead of
+        leaving "Task exception was never retrieved" noise.
+        """
+        task = asyncio.ensure_future(coro)
+
+        # Consume an outcome nobody is left to await.
+        def _retrieve(t: asyncio.Future) -> None:
+            if not t.cancelled() and t.exception() is not None:
+                logger.debug("write task ended with %r after its caller left", t.exception())
+
+        task.add_done_callback(_retrieve)
+        return await asyncio.shield(task)
 
     async def _run_unit(
         self, fn: Callable[[WriteCursor], T], owner: str, deadline_s: float
@@ -446,9 +477,14 @@ class SessionWriter:
             finally:
                 self._conn.enable_load_extension(False)
 
-        async with self._lock():
-            logger.debug("loading sqlite extension %s for %s", path, owner)
-            await self._blocking(load)
+        # Shielded like write(): a cancelled caller must not free the lock
+        # while the blocking load still runs on the connection.
+        async def locked() -> None:
+            async with self._lock():
+                logger.debug("loading sqlite extension %s for %s", path, owner)
+                await self._blocking(load)
+
+        await self._shielded(locked())
 
     async def set_journal_mode(self, mode: str) -> str:
         """Apply a journal mode on the writer and return the mode in effect."""
@@ -456,8 +492,12 @@ class SessionWriter:
             row = self._conn.execute(f"PRAGMA journal_mode={mode}").fetchone()
             return str(row[0]) if row else mode
 
-        async with self._lock():
-            return await self._blocking(apply)
+        # Shielded for the same reason as load_extension.
+        async def locked() -> str:
+            async with self._lock():
+                return await self._blocking(apply)
+
+        return await self._shielded(locked())
 
     async def close(self) -> None:
         """Wait for the in-flight unit, then close the connection."""

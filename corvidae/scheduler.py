@@ -1163,7 +1163,7 @@ class SchedulerPlugin(CorvidaePlugin):
             created_at = self._clock.now()
 
             # One unit: the cap count and the insert, so both see one state.
-            def insert(cur: WriteCursor) -> int | str:
+            def insert(cur: WriteCursor) -> int | None:
                 count = cur.execute(
                     "SELECT COUNT(*) FROM schedule WHERE channel_id = ? AND enabled = 1 "
                     "AND created_by = 'tool'",

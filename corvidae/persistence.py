@@ -385,9 +385,13 @@ class PersistencePlugin(CorvidaePlugin):
             self.db, self.writer = await open_session_store(
                 Path(base_dir) / db_path, journal_mode=journal_mode
             )
+            # Report the mode in effect, which SQLite may refuse to change.
+            async with self.db.execute("PRAGMA journal_mode") as cursor:
+                row = await cursor.fetchone()
+            actual_mode = row[0] if row else journal_mode
             logger.info(
-                "SQLite journal mode set to %s", journal_mode,
-                extra={"journal_mode": journal_mode},
+                "SQLite journal mode set to %s", actual_mode,
+                extra={"journal_mode": actual_mode},
             )
 
         # Seed the idle tracker: every channel with history is quiet since its
