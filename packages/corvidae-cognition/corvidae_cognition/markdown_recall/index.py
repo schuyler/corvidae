@@ -594,6 +594,22 @@ class MarkdownIndex:
         await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
         await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
+        # The degradation is invisible to callers: make it a line with a number
+        # in it, and say what happens next (#1203).
+        if self._vec_available:
+            async with db.execute(
+                "SELECT count(*) AS n FROM chunks c LEFT JOIN chunks_vec v "
+                "ON v.rowid = c.rowid WHERE v.rowid IS NULL"
+            ) as cursor:
+                row = await cursor.fetchone()
+            missing = row["n"] if row else 0
+            if missing:
+                logger.warning(
+                    "markdown recall: %d chunks have no vector (FTS5-only); their "
+                    "files are left unsettled and are re-embedded on the next "
+                    "reconcile",
+                    missing,
+                )
 
     async def _reconcile_file(
         self,
@@ -633,8 +649,17 @@ class MarkdownIndex:
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
         vectors = await self._embed([c["text"] for c in chunks], "document")
+        if self._vec_available and any(v is None for v in vectors):
+            # The chunks are written but their vectors are not, so this file is
+            # NOT settled: recording its real hash would let the next reconcile
+            # take the mtime-only branch and leave those chunks un-embedded for
+            # good (#1203). An empty hash is never a sha256, so the file is
+            # re-indexed until an embedding succeeds.
+            settled_hash = ""
+        else:
+            settled_hash = content_hash
         await self._replace_file_chunks(
-            db, path, size, mtime_ns, content_hash, chunks, vectors
+            db, path, size, mtime_ns, settled_hash, chunks, vectors
         )
 
     async def _replace_file_chunks(

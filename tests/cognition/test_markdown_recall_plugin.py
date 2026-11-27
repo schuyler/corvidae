@@ -282,3 +282,47 @@ async def test_single_root_backward_compat(build, tmp_path):
     from pathlib import Path
     assert isinstance(env.source._root, Path)
     await env.source.on_stop()
+
+
+async def test_a_failed_embedding_leaves_the_file_unsettled(build, tmp_path, monkeypatch):
+    """#1203: a file whose vectors failed must not be recorded as settled.
+
+    The manifest hash is what the next reconcile compares, so writing the real
+    hash after a failed batch is what made the loss permanent: the file looked
+    indexed and its chunks stayed FTS5-only forever.
+    """
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha beta gamma content"})
+    env = await build(
+        {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}},
+        root,
+    )
+    await env.source.on_start(
+        {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    )
+    await env.source._startup_task
+    index = env.source._index
+    db = index._db
+
+    async def failing(texts, kind):
+        return [None] * len(texts)
+
+    seen = {}
+
+    async def capture(db_, path, size, mtime_ns, content_hash, chunks, vectors):
+        seen["hash"] = content_hash
+        seen["vectors"] = vectors
+
+    monkeypatch.setattr(index, "_embed", failing)
+    monkeypatch.setattr(index, "_vec_available", True)
+    monkeypatch.setattr(index, "_replace_file_chunks", capture)
+
+    data = (root / "a.md").read_bytes()
+    st = (root / "a.md").stat()
+    await index._reconcile_file(db, "a.md", st.st_size, st.st_mtime_ns, None)
+
+    assert seen["vectors"] and all(v is None for v in seen["vectors"])
+    assert seen["hash"] == "", (
+        "a failed embedding must leave the file unsettled so the next reconcile "
+        "re-embeds it; a real hash here is #1203's permanent loss"
+    )
