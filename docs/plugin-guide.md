@@ -951,6 +951,13 @@ As a last-resort safety net, `execute_tool_call` detects a sync callable registe
 A plugin writes the kernel's `sessions.db` as a unit: a synchronous function
 the kernel runs in one transaction on a worker thread, under a deadline.
 
+**Upgrading a plugin (#1211).** `persistence.db` is read-only now. A plugin
+that wrote through it, or opened its own read-write connection to
+`sessions.db`, fails at its first write with `attempt to write a readonly
+database` (or keeps writing through its own connection, outside the deadline).
+Move each write into a unit as below, or move the plugin's tables to its own
+database file.
+
 ```python
 from corvidae.hooks import get_dependency
 from corvidae.persistence import PersistencePlugin
