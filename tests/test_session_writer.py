@@ -251,7 +251,7 @@ async def test_close_is_bounded_when_a_statement_ignores_interrupt(
     """
     import corvidae.session_writer as sw
 
-    monkeypatch.setattr(sw, "CLOSE_REVOKE_BOUND_S", 0.2)
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
     writer = SessionWriter.open(tmp_path / "sessions.db")
     unit = sw._Unit("stuck-owner", 0.2)
     unit.state = sw._RUNNING
@@ -294,5 +294,44 @@ async def test_close_is_bounded_when_a_statement_ignores_interrupt(
     message = errors[0].getMessage()
     assert "stuck-owner" in message
     assert "ignores interrupt" in message
+    assert still_open
+    assert writer._closed is True
+
+
+async def test_close_is_bounded_when_the_route_lock_itself_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1315 review: the lock wait has to be bounded, not only the revoke.
+
+    A statement that ignores ``interrupt()`` keeps its shielded unit task — and
+    therefore the route lock — alive forever, so ``close()`` would block before
+    reaching any bound behind the lock. This holds the route lock the way that
+    case does and requires ``close()`` to return on its own bound.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+
+    lock = writer._lock()
+    await lock.acquire()  # the stuck unit's shielded task would hold this
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(writer.close(), timeout=3.0)
+        elapsed = time.monotonic() - started
+        still_open = writer._conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        lock.release()
+        writer._conn.close()
+
+    assert elapsed < 1.0, elapsed
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == "corvidae.session_writer"
+    ]
+    assert len(errors) == 1
+    assert "write route was still held" in errors[0].getMessage()
     assert still_open
     assert writer._closed is True
