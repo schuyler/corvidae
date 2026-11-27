@@ -27,6 +27,7 @@ import asyncio
 import json
 import re
 import logging
+import time as time_module
 
 import pytest
 
@@ -446,6 +447,183 @@ async def test_r5_5_the_deadline_warning_says_how_long_the_fork_waited(tmp_path,
         m = re.search(r"after (\d+\.\d+)s", text)
         assert m, f"the warning must state its own elapsed time: {text!r}"
         assert 0.05 <= float(m.group(1)) < 3.0, text
+    finally:
+        await _teardown(env)
+
+
+class _ScriptedTime:
+    """`time` as the reporting code would see it after a runner stall: every
+    `monotonic()` read moves by `step`, so a span measured across two reads
+    collapses to `step` no matter how long the wait really was. Everything else
+    on the module delegates to the real thing, so the shim can only bite the
+    module's own `time` reads — which at this head is none, the reporting code
+    being on the loop clock. That absence is the thing this guard keeps: if a
+    monotonic-based report comes back, this is the object that notices. The event
+    loop's clock, which `asyncio.timeout` arms and compares against, is
+    untouched."""
+
+    def __init__(self, step: float, start: float = 1_000.0) -> None:
+        self.step = step
+        self.now = start
+
+    def monotonic(self) -> float:
+        self.now += self.step
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time_module, name)
+
+
+async def test_r5_5_a_stall_cannot_make_a_full_wait_log_as_no_wait(tmp_path, caplog, monkeypatch):
+    """The logged wait is measured on the clock the deadline armed from (#1304).
+
+    `started` was a `time.monotonic()` read *after* entering `asyncio.timeout`,
+    so a stall between arming and that read spends the allowance before the
+    measurement begins: `deadline.expired()` is true while the reported span is
+    ~0, and the line says "after 0.0s" for a fork that was never given a turn —
+    the exact confusion (#1272) the line exists to rule out. The scripted clock
+    stands in for that stall as the reporting code experiences it.
+    """
+    async def hangs(i, channel):
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    monkeypatch.setattr(critique_module, "time", _ScriptedTime(step=0.0002), raising=False)
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kds", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        m = re.search(r"after (\d+\.\d+)s", text)
+        assert m, f"the warning must state its own elapsed time: {text!r}"
+        assert float(m.group(1)) >= 0.05, (
+            "a full timeout must not be reported as a shorter wait; the report "
+            f"comes from a clock that can start after the timer: {text!r}"
+        )
+    finally:
+        await _teardown(env)
+
+
+class _StalledDeadline:
+    """The real deadline, entered normally and then left with the loop blocked.
+
+    `asyncio.timeout` arms when the context is entered; the stall that follows
+    stands in for a runner that does not get back to the coroutine until the
+    allowance is gone — the #1304 pathology, injected instead of waited for.
+    """
+
+    def __init__(self, inner, stall: float) -> None:
+        self.inner = inner
+        self.stall = stall
+
+    async def __aenter__(self):
+        await self.inner.__aenter__()
+        time_module.sleep(self.stall)
+        return self.inner
+
+    async def __aexit__(self, *exc):
+        return await self.inner.__aexit__(*exc)
+
+    def expired(self) -> bool:
+        return self.inner.expired()
+
+
+class _StallingAsyncio:
+    """The `asyncio` name as critique sees it, with a stall in the first deadline.
+
+    Only this module's attribute is replaced, so no other plugin's timers and no
+    test helper's `asyncio` calls are affected. Everything except `timeout`
+    delegates to the real module.
+    """
+
+    def __init__(self, stall: float) -> None:
+        self.stall = stall
+        self.armed = False
+
+    def timeout(self, delay: float):
+        inner = asyncio.timeout(delay)
+        if self.armed:
+            return inner
+        self.armed = True
+        return _StalledDeadline(inner, self.stall)
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
+@pytest.mark.parametrize("stall,lo,hi", [(0.02, 0.016, 0.05), (0.10, 0.08, 0.15)])
+async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(
+    tmp_path, caplog, monkeypatch, stall, lo, hi
+):
+    """The reported wait covers the whole span the deadline bounded (#1304).
+
+    A stall between arming and the fork's first statement is injected here
+    rather than hoped for. A stopwatch started inside the block — on either
+    clock — reports a wait near zero for a fork that never ran: below the
+    allowance and far below the wall time the loop really lost.
+
+    Two stall sizes rather than one, because a magnitude window alone is
+    satisfiable by a fabricated constant. The bounds here have no value in
+    common across the pair — 0.016..0.05 against 0.08..0.15 — so the only way
+    through is to report something that moves with the time actually lost.
+    """
+    async def hangs(i, channel):
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.02}})
+    monkeypatch.setattr(critique_module, "asyncio", _StallingAsyncio(stall=stall))
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kdp", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        m = re.search(r"critique\.fork_timeout \(\S+ s\) after (\d+\.\d{3})s", text)
+        assert m, (
+            "the warning must print its own elapsed, to three decimals, after the "
+            f"allowance it named: {text!r}"
+        )
+        waited = float(m.group(1))
+        assert lo <= waited <= hi, (
+            f"a {stall}s stall must be reported as that much of the 0.02 s allowance, "
+            f"not {waited}: {text!r}"
+        )
+    finally:
+        await _teardown(env)
+
+
+async def test_r5_5_a_small_allowance_is_logged_with_digits_that_can_say_it(tmp_path, caplog):
+    """`fork_timeout` below 0.05 s is real config, so the line must be able to
+    print it: one decimal rounds any such allowance to "0.0s", which is the same
+    text a stalled measurement produces and tells a reader nothing (#1304)."""
+    async def hangs(i, channel):
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.002}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "kdm", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        m = re.search(r"critique\.fork_timeout \(\S+ s\) after (\d+\.\d{3})s", text)
+        assert m, (
+            "one decimal cannot express a 0.002 s allowance, so the elapsed field "
+            f"must carry three decimals: {text!r}"
+        )
+        waited = float(m.group(1))
+        # This guard's property is the rendering; the span relation belongs to
+        # the injected-stall guard. The ceiling keeps a scaled number out.
+        assert 0.002 <= waited <= 0.5, (
+            f"the printed wait is no plausible expiry of a 0.002 s allowance: {text!r}"
+        )
     finally:
         await _teardown(env)
 
