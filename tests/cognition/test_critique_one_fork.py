@@ -24,6 +24,7 @@ tests/test_fork_read_only_tools.py.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import logging
@@ -882,7 +883,15 @@ def test_a_window_that_cannot_be_hashed_yields_no_key_rather_than_a_raise():
     # Positive control: the same call on a window that can be serialized keys it.
     hashable = type("C", (), {"conversation": type("V", (), {"messages": [
         {"role": "user", "content": "m1"}]})})()
-    assert critique_module._dispatched_prompt_sha(hashable) is not None
+    # Not merely non-None: the join only works if the key is the bytes fork_log
+    # writes, computed here independently of the helper's own code path.
+    want = hashlib.sha256(
+        json.dumps(
+            critique_module._window_blocks(hashable),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()
+    ).digest()
+    assert critique_module._dispatched_prompt_sha(hashable) == want
 
 
 async def test_a_hash_failure_still_logs_the_skip_without_a_key(
@@ -893,7 +902,10 @@ async def test_a_hash_failure_still_logs_the_skip_without_a_key(
     not the caller's exception.
     """
 
+    calls = []
+
     def raiser(messages):
+        calls.append(len(messages))
         raise TypeError("not JSON serializable")
 
     async def hangs(i, channel):
@@ -912,6 +924,9 @@ async def test_a_hash_failure_still_logs_the_skip_without_a_key(
         # leave a join key behind for a consumer reading records.
         [rec] = [r for r in caplog.records if 'exceeded critique.fork_timeout' in r.getMessage()]
         assert rec.fork_prompt_sha256 is None, vars(rec)
+        # And the failure really happened on this path: without the call the line
+        # would read the same if the skip path had stopped hashing altogether.
+        assert calls, "the timeout skip never asked for a key"
     finally:
         await _teardown(env)
 
