@@ -2333,6 +2333,44 @@ checked.
 - **Cost.** A held draft normally costs one extra turn per exchange (a deferred stub and another gate's veto each add one), and a
   late refusal costs none (it is delivered as a late check at the next turn).
 
+### 31. A plugin can no longer stall persistence by holding the sessions.db write lock (#1211)
+
+An in-process plugin used to be able to open a write transaction on
+`sessions.db` and await a model call inside it, holding SQLite's one write lock
+for as long as the call took. Persistence, the scheduler, metrics and memory
+all queue behind that lock, so five such stalls (11-09 to 11-26) stopped the
+daemon's writes for hours with nothing in the log naming the holder. Now every
+daemon write is a short synchronous unit with a deadline (default 5 s, at most
+30 s) on the kernel's write route ([design.md](design.md#the-session-write-route)):
+a unit that overruns is interrupted and rolled back, its later calls raise, and
+an ERROR line names the owning plugin and the deadline. The reader is
+read-only, so a plugin that still tries a write on `persistence.db` fails at
+once.
+
+What this does not cover:
+
+- **The abandoned thread keeps running.** A revoked unit's Python keeps going
+  until its function returns. It can no longer write, but it still holds a
+  thread and whatever it holds outside SQLite. Nothing counts or caps these
+  (#1295), and a plugin that queues stalling units delays later ones by queue
+  depth times the deadline.
+- **In-process plugins are still trusted code** (principle 9). A plugin that
+  reaches into private attributes for the raw connection, or opens its own
+  read-write connection to `sessions.db`, is outside the guarantee. The route
+  protects against accidental wedging, not a hostile plugin. A plugin that wants
+  its own write connection uses its own database file.
+- **A hung disk is not a plugin stall.** A statement that ignores `interrupt()`
+  keeps the revoker waiting, and shutdown waits with it.
+- **Out-of-process writers keep `busy_timeout`.** `corvidae redact`,
+  `reconsolidate` and the `goals` CLI open their own connections and hold the
+  write lock for their own transactions; the daemon's writer waits up to its
+  `busy_timeout` (`daemon.sqlite_busy_timeout_ms`, 30 s by default) at
+  `BEGIN`, then the unit fails. Keep their transactions
+  short; `corvidae redact` is best run with the daemon stopped (`redaction.md`),
+  and `reconsolidate` already refuses the live database.
+- **Non-WAL journal modes.** With `daemon.sqlite_journal_mode` other than
+  `wal`, an open reader cursor can block the writer's `COMMIT`.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

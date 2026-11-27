@@ -158,17 +158,18 @@ async def test_a_large_prune_runs_in_batches(monkeypatch):
     new = await add_retrieval(db, now - 1 * DAY, [mem])
 
     monkeypatch.setattr(retention_module, "RETENTION_PRUNE_BATCH", 2)
-    # The prune is the only writer here, so counting its transactions is what
+    # The prune is the only writer here, so counting its write units is what
     # an interleaved writer would see as chances to commit.
     batches = 0
-    real_write_txn = memory._write_txn
+    persistence = memory._persistence()
+    real_write = persistence.write
 
-    def counting_write_txn():
+    async def counting_write(fn, **kwargs):
         nonlocal batches
         batches += 1
-        return real_write_txn()
+        return await real_write(fn, **kwargs)
 
-    monkeypatch.setattr(memory, "_write_txn", counting_write_txn)
+    monkeypatch.setattr(persistence, "write", counting_write)
 
     await run_retention_job(memory, now=now)
 

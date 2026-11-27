@@ -91,7 +91,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.persistence import busy_timeout_ms_from_config
+from corvidae.persistence import PersistencePlugin
 from corvidae_cognition.fork_log import ForkRecorder
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.held import HeldContext
@@ -833,7 +833,7 @@ class CritiquePlugin(CorvidaePlugin):
     """
 
     # trace owns the hook critique reports its outcomes on (#1179).
-    depends_on = frozenset({"task", "llm", "trace", "held"})
+    depends_on = frozenset({"task", "llm", "trace", "held", "persistence"})
     optional_depends_on = frozenset({"appraisal"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
@@ -895,10 +895,10 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
+        # Persistence resolves lazily: it has not started during on_init.
         self._fork_log = ForkRecorder(
-            config.get("daemon", {}).get("session_db", "sessions.db"),
+            lambda: get_dependency(self.pm, "persistence", PersistencePlugin),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
-            busy_timeout_ms=busy_timeout_ms_from_config(config),
         )
         self._last_fork_point = {}
         # A key #1078 or #1126 removed fails startup, naming the key that

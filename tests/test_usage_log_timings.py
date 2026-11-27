@@ -5,6 +5,7 @@ import logging
 import aiosqlite
 import pytest
 
+from helpers import attach_store, open_test_store
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.metrics import UsageLogPlugin
@@ -69,7 +70,7 @@ async def _setup(db, *, registry=None):
     """
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
     if registry is not None:
         pm.register(registry, name="registry")
@@ -233,11 +234,14 @@ class TestUsageLogMigration:
             migrated = {row[1] for row in await cursor.fetchall()}
 
         # A table created fresh by the same plugin, for the column-set comparison.
-        async with aiosqlite.connect(":memory:") as fresh_db:
+        fresh_db, _reader, _writer = await open_test_store()
+        try:
             fresh_pm = await _setup(fresh_db)
             await _fire_timed_response(fresh_pm, request_id="fresh")
             async with fresh_db.execute("PRAGMA table_info(usage_log)") as cursor:
                 fresh = {row[1] for row in await cursor.fetchall()}
+        finally:
+            await fresh_db.close()
 
         assert migrated == fresh
 

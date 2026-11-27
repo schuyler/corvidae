@@ -24,7 +24,7 @@ from corvidae.task import Task, TaskPlugin, TaskQueue
 from corvidae.tool import ToolContext
 
 from corvidae.outbound import OutboundMessage
-from helpers import add_kernel_held, build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts
+from helpers import add_kernel_held, build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts, open_test_store
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -641,8 +641,7 @@ class TestNoTaskQueueLogsError:
         """No TaskPlugin registered -> log error and don't crash."""
         import logging
 
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -653,7 +652,7 @@ class TestNoTaskQueueLogsError:
 
         # Register PersistencePlugin with injected in-memory DB
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -704,8 +703,7 @@ class TestNoTaskQueueLogsError:
 class TestNoTaskQueueEmitsToolResult:
     async def test_no_task_queue_returns_error_tool_result_to_model(self):
         """Without a TaskQueue the model must still get a tool result, not silence."""
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -715,7 +713,7 @@ class TestNoTaskQueueEmitsToolResult:
         # No TaskPlugin registered on purpose.
 
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -777,15 +775,14 @@ async def _no_queue_setup(
 ):
     """Build an Agent with no TaskPlugin, scripted LLM replies and a raising
     on_notify. Returns (plugin, channel, db, mock_client)."""
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
+    db, _reader, _writer = await open_test_store()
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
     pm.ahook.send = AsyncMock()
     pm.ahook.on_agent_response = AsyncMock()
     persistence = PersistencePlugin(pm)
-    persistence.db = db
+    persistence.db, persistence.writer = _reader, _writer
     persistence._registry = registry
     pm.register(persistence, name="persistence")
     if peer_first:

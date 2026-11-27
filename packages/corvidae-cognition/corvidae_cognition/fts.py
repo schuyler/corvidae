@@ -19,6 +19,8 @@ from typing import Final
 
 import aiosqlite
 
+from corvidae.session_writer import WriteCursor
+
 logger = logging.getLogger("corvidae.fts")
 
 # One tokenizer for all three tables. remove_diacritics 1 keeps unicode61's
@@ -146,6 +148,27 @@ async def create_fts_table(db: aiosqlite.Connection, table: str, ddl: str) -> No
     """
     try:
         await db.execute(ddl)
+    except sqlite3.OperationalError as exc:
+        logger.error(
+            "%s: cannot create the keyword-search index on SQLite %s (%s): the "
+            "trigram tokenizer with remove_diacritics needs SQLite 3.45 or "
+            "newer — run corvidae on a Python linked against SQLite 3.45+ "
+            "(the container image and uv's Python are)",
+            table, sqlite3.sqlite_version, type(exc).__name__,
+            exc_info=True,
+        )
+        raise
+
+
+def create_fts_table_sync(cur: WriteCursor, table: str, ddl: str) -> None:
+    """Execute ``ddl`` for FTS table ``table`` inside a write unit.
+
+    Same contract as :func:`create_fts_table`: a CREATE ... IF NOT EXISTS
+    that logs an ERROR naming the table and the SQLite floor, then
+    re-raises, when the build cannot make a trigram table.
+    """
+    try:
+        cur.execute(ddl)
     except sqlite3.OperationalError as exc:
         logger.error(
             "%s: cannot create the keyword-search index on SQLite %s (%s): the "

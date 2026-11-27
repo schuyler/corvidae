@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from helpers import add_kernel_held, add_kernel_registry, memory_turn
+from helpers import attach_store, fresh_session_db_path, add_kernel_held, add_kernel_registry, memory_turn
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
@@ -31,6 +31,7 @@ from corvidae.llm_plugin import LLMPlugin
 from tests.cognition.trace_helpers import TraceRecorder, add_trace
 from fake_clock import install_kernel_clock
 from helpers import stub_llm_config, with_chat_llm
+from .vec_seed import load_vec_for_seed
 from corvidae_cognition.memory import SQLITE_VEC_KNN_MAX, MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
@@ -109,14 +110,17 @@ async def build_retrieval_env(config=None, db_path=":memory:"):
     Returns (memory, embedder, channel, conv, db).
     """
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(db_path)
+    # The write route needs a file; ":memory:" gets a fresh temp one.
+    if db_path == ":memory:":
+        db_path = fresh_session_db_path()
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
     # Kernel clock and idle tracker, which memory resolves in on_start (#1180).
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
     # Memory reports its retrieval profile through on_trace_record.
     add_trace(pm)
@@ -145,6 +149,7 @@ async def build_retrieval_env(config=None, db_path=":memory:"):
     channel = Channel(transport="irc", scope="#electronics")
     conv = ContextWindow(channel.id)
     channel.conversation = conv
+    await load_vec_for_seed(db)
     return memory, embedder, channel, conv, db
 
 
@@ -669,10 +674,14 @@ class TestRetrievalLogSimilarity:
         # shape and rerun the schema pass twice at once, as two first
         # retrievals after a deferred start would.
         memory._schema_ready = False
-        await db.execute("ALTER TABLE retrieval_log DROP COLUMN top_similarity")
-        await db.commit()
+        await memory._persistence().write(
+            lambda cur: cur.execute(
+                "ALTER TABLE retrieval_log DROP COLUMN top_similarity"
+            ),
+            owner="test",
+        )
         results = await asyncio.gather(memory._ensure_schema(), memory._ensure_schema())
-        assert all(r is db for r in results)
+        assert all(r is memory._resolve_db() for r in results)
         async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
             cols = {row[1] for row in await cursor.fetchall()}
         assert "top_similarity" in cols

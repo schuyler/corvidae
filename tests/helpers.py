@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 import time
+from pathlib import Path
 
 import pytest
 import aiosqlite
@@ -30,6 +31,72 @@ def sent(pm, kind: type) -> list[tuple[object, object]]:
 def sent_texts(pm, kind: type) -> list[str]:
     """Return the ``text`` of every sent event of ``kind``, in call order."""
     return [event.text for _channel, event in sent(pm, kind)]
+
+
+def fresh_session_db_path() -> str:
+    """A new ``sessions.db`` path in a private temp dir (removed at exit).
+
+    For configs that need a ``daemon.session_db`` and have no ``tmp_path``;
+    the route refuses ``:memory:``.
+    """
+    import atexit
+    import shutil
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="corvidae-test-")
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    return str(Path(tmp) / "sessions.db")
+
+
+async def attach_store(db: aiosqlite.Connection, *, busy_timeout_ms: int | None = None):
+    """Open a reader and writer on the file ``db`` is connected to.
+
+    ``db`` must be a file-backed autocommit connection that already holds the
+    schema. Returns ``(reader, writer)`` for ``persistence.db, persistence.writer``.
+    Closing ``db`` afterwards also closes both, so existing teardown stays one call.
+    ``busy_timeout_ms`` is the writer's wait (None: the daemon's default).
+    """
+    from corvidae.session_writer import open_session_store
+
+    # The file under ``db`` (PRAGMA database_list: seq, name, file).
+    async with db.execute("PRAGMA database_list") as cur:
+        path = [row[2] for row in await cur.fetchall() if row[1] == "main"][0]
+    reader, writer = await open_session_store(path, busy_timeout_ms=busy_timeout_ms)
+    original_close = db.close
+
+    async def close_all() -> None:
+        # Close the reader and writer with the seeding connection.
+        try:
+            await reader.close()
+        finally:
+            try:
+                await writer.close()
+            finally:
+                await original_close()
+
+    db.close = close_all  # type: ignore[method-assign]
+    return reader, writer
+
+
+async def open_test_store(
+    db_path: str | Path | None = None, *, busy_timeout_ms: int | None = None
+):
+    """A seeded session store for a hand-built persistence plugin.
+
+    Returns ``(db, reader, writer)``: ``db`` is a read-write autocommit seeding
+    connection on a file (a fresh temp dir when ``db_path`` is None or
+    ``":memory:"``), ``reader`` and ``writer`` come from ``attach_store``;
+    ``busy_timeout_ms`` is passed to the writer.
+    """
+    from corvidae.persistence import init_db
+
+    # No path given: a private temp dir, removed at interpreter exit.
+    if db_path is None or str(db_path) == ":memory:":
+        db_path = fresh_session_db_path()
+    db = await aiosqlite.connect(str(db_path), isolation_level=None)
+    await init_db(db)
+    reader, writer = await attach_store(db, busy_timeout_ms=busy_timeout_ms)
+    return db, reader, writer
 
 
 async def build_plugin_and_channel(
@@ -72,8 +139,7 @@ async def build_plugin_and_channel(
     if agent_defaults is None:
         agent_defaults = _AGENT_DEFAULTS
 
-    db = await aiosqlite.connect(db_path)
-    await init_db(db)
+    db, reader, writer = await open_test_store(db_path)
 
     pm = create_plugin_manager()
     registry = ChannelRegistry()
@@ -91,7 +157,7 @@ async def build_plugin_and_channel(
     await task_plugin.on_start(config={})
 
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = reader, writer
     persistence._registry = registry
     pm.register(persistence, name="persistence")
 
@@ -456,9 +522,8 @@ async def acp_agent_env(agent_defaults: dict):
     registry = ChannelRegistry(agent_defaults)
     pm.register(registry, name="registry")
     persistence = PersistencePlugin(pm)
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-    persistence.db = db
+    db, reader, writer = await open_test_store()
+    persistence.db, persistence.writer = reader, writer
     pm.register(persistence, name="persistence")
     plugin = AcpPlugin()
     pm.register(plugin, name="acp")

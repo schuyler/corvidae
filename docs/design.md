@@ -1144,24 +1144,150 @@ CREATE TABLE message_log (
 CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ```
 
-Plugins keep their own tables on the same connection, created lazily on
-first use because the `on_start` broadcast is concurrent: `memory` and
-friends ([MemoryPlugin](cognition.md#memoryplugin)), `usage_log` (UsageLogPlugin), and `schedule`
-([SchedulerPlugin](#schedulerplugin)).
+Plugins keep their own tables in the same file, created lazily on first use
+because the `on_start` broadcast is concurrent: `memory` and friends
+([MemoryPlugin](cognition.md#memoryplugin)), `usage_log` (UsageLogPlugin), and
+`schedule` ([SchedulerPlugin](#schedulerplugin)). They create and write them
+through the write route below.
 
-**Connections to the database file.** Most plugins write on the one
-persistence connection (`PersistencePlugin.db`). The others:
+### The session write route
 
-| Connection | Opened by | Writes |
+Every write to `sessions.db` goes through one kernel object,
+`SessionWriter` (`corvidae/session_writer.py`), which `PersistencePlugin` owns
+and exposes as `persistence.write(fn, owner=..., deadline_s=...)`. It exists
+because a plugin that held a write transaction open across a model call stopped
+persistence for hours, five times, and nothing in the log said who. The route
+bounds how long any in-process writer can hold the lock and names the one that
+overran.
+
+**Connections.** The persistence plugin opens the file twice, a writer and a reader, and only the writer writes; critique's probe opens a third, read-only connection:
+
+| Connection | Opened by | Used for |
 |---|---|---|
-| persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, retrieval_candidate, goals, ...) |
-| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `memory_prompt`, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
-| critique probe | critique's `on_start` | read only (`message_fts` probes) |
+| writer (`PersistencePlugin.writer`) | `open_session_store`, plain `sqlite3`, `isolation_level=None`, `check_same_thread=False`, `busy_timeout` from `daemon.sqlite_busy_timeout_ms` (default 30000 ms, `DEFAULT_BUSY_TIMEOUT_MS`), set before the journal mode and schema | every write: persistence, scheduler, metrics, acp, memory, retention, goals, fork_log |
+| reader (`PersistencePlugin.db`) | `open_session_store`, aiosqlite, `file:...?mode=ro` URI, `isolation_level=None` | every read; a write attempted on it fails with `attempt to write a readonly database` |
+| critique probe | `ReadOnlyProbe`, aiosqlite, `file:...?mode=ro` URI | read only |
 
-Only the memory write connection is isolated for atomicity: a commit on
-the persistence connection can't land inside a memory transaction, and a
-rollback there can't discard another plugin's pending row. WAL lets
-readers on the persistence connection see a committed record at once.
+The reader is in autocommit so a stray failed write cannot leave it holding a
+stale snapshot that pins WAL checkpoints. No plugin holds the writer
+connection: a unit receives a `WriteCursor`, and `load_extension` is a method
+on the route.
+After `await persistence.write(...)` returns, the commit is done, so the next
+read on the reader sees it (WAL). A read that decides a write runs inside the
+unit, not before it.
+
+**A unit.** `write(fn, owner=, deadline_s=)` takes a synchronous `fn(cur)`. One
+unit runs at a time: `write` takes an asyncio lock (FIFO) for the whole life of
+the unit, and time spent queued neither holds an SQLite lock nor counts against
+the deadline. The unit runs on a fresh daemon worker thread:
+
+1. `BEGIN IMMEDIATE`, bounded by the writer's `busy_timeout`, which matters
+   only to an out-of-process writer. The deadline clock starts when `BEGIN`
+   succeeds. A `BEGIN` that fails returns its exception at once.
+2. `fn(cursor)`. Because `fn` is synchronous it cannot await a model call
+   while it holds the lock.
+3. `COMMIT` and the return value of `fn`, or `ROLLBACK` and `fn`'s exception,
+   unchanged.
+
+`deadline_s` defaults to 5 s (`DEFAULT_WRITE_DEADLINE_S`) and must be in
+`(0, 30]` (`MAX_WRITE_DEADLINE_S`); anything else raises `ValueError` naming the
+owner and the range. Each plugin's schema routine runs as a unit at the
+maximum (acp's one-table `CREATE TABLE IF NOT EXISTS` rides in its upsert unit
+at the default), since an index or `ALTER` on a large table can outlast the default.
+Cancelling the caller does not cut a unit short: it commits or is revoked at
+its deadline as usual and the result is dropped, so there is one way a unit
+ends, not a third.
+
+**Revocation.** A unit that has not finished at its deadline is revoked, on a
+separate daemon thread so it cannot queue behind other stuck work:
+
+1. The unit is flagged revoked.
+2. The revoker calls `interrupt()` on the connection and tries for the unit's
+   lock until it has it. `interrupt()` aborts a running statement (a long
+   recursive CTE ends in about a millisecond); with no statement running it
+   does nothing, so it repeats.
+3. Holding the lock, it rolls back (SQLite does not roll back an interrupted
+   transaction by itself) and marks the unit revoked. If the worker had in fact
+   finished, `write` returns that outcome and nothing is logged, except a
+   rollback the revoker's own interrupt caused on `COMMIT`, which counts as
+   revoked.
+4. One ERROR line names the owner and the deadline (`write unit from 'memory'
+   overran its 5 s deadline on sessions.db; rolled back and revoked ...`),
+   with `owner` and `deadline_s` as record fields.
+5. The caller gets `WriteRevoked` (`.owner`, `.deadline_s`), and the next unit
+   starts on a new thread.
+
+The worker's cursor is poisoned: every later `execute` from the stalled `fn`
+raises `WriteRevoked`, and when `fn` returns the worker sees the flag and
+touches nothing, so it cannot commit part of a revoked unit or end the next
+unit's transaction. A cursor kept past a unit that finished normally raises
+`RuntimeError` ("used after its unit ended"). The abandoned thread runs until
+`fn` returns; it is a daemon thread, so it cannot hold the process open.
+
+Why the cross-thread `ROLLBACK` is safe: the revoker issues it only while
+holding the unit's lock, which every statement of the unit takes too, and on a
+serialized SQLite build the connection's own mutex covers the rest. The writer
+refuses to open otherwise: `SessionWriter.open` raises a `RuntimeError` naming
+`sqlite3.threadsafety` and saying to run on a Python whose `sqlite3` is built
+with `SQLITE_THREADSAFE=1`.
+
+**Input normalization.** A cursor method normalizes its arguments before it
+takes the lock, so no plugin-controlled Python (a lazy iterator, a `Mapping`
+subclass, `__conform__`) runs while the worker holds it, where `interrupt()`
+could not reach it. `sql` becomes a plain `str`; `executemany` takes any iterable of
+parameter sets, materialized into a list, each a tuple or a dict with `str` keys; every value must be
+`None`, `int`, `float`, `str` or `bytes`. A `bytearray` or `memoryview` is
+copied to `bytes`; a subclass of a plain type is copied to its base type; an
+`enum.Enum` member binds by its `.value`, so `MessageType.CONTEXT` is stored as
+`'context'`. Anything else raises `TypeError` naming the owner, the parameter
+and its type. There is no `executescript`: CPython's issues an implicit
+`COMMIT` that would end the kernel's transaction mid-unit, so a script is one
+`execute` per statement. A unit that issues `BEGIN`, `COMMIT` or `ROLLBACK`
+itself is a contract violation; it is not blocked.
+
+**`load_extension`.** `persistence.load_extension(path, owner=)` loads a SQLite
+extension on the writer, on a worker thread under the same lock and outside any
+transaction. The reader is not touched; a plugin that needs the extension there
+loads it itself. Memory loads sqlite-vec on both and runs FTS5-only if the
+writer's load fails ([cognition.md](cognition.md#memoryplugin)).
+
+**Startup and shutdown.** `PersistencePlugin.on_start` validates
+`daemon.sqlite_journal_mode`, refuses `daemon.session_db: ":memory:"` (two
+connections cannot share a private in-memory database), resolves the path
+against `_base_dir` and calls `open_session_store(path, journal_mode=)`. That
+function, in order: opens the writer (which creates the file and runs the
+`threadsafety` check), applies the journal mode on the writer, runs the schema
+unit, and only then opens the reader. The mode is applied before the reader
+exists because leaving WAL with another connection open fails with `database
+is locked`. A writer and reader injected for tests must be injected as a pair
+(`persistence.db, persistence.writer = await open_session_store(...)`); a half
+injection raises `RuntimeError` naming the missing attribute. Before `on_start`,
+`persistence.write` and `load_extension` raise `RuntimeError` ("session writer
+is not open"); plugins resolve persistence lazily at use, since `on_start` order
+is not guaranteed.
+
+`on_stop` closes the reader, then `writer.close()`, which waits for the
+in-flight unit (bounded by its deadline). If a unit is still running because its
+awaiting task was cancelled at shutdown, `close()` interrupts and rolls it back
+first, with a WARNING naming the owner, because closing the connection under a
+running worker crashes the interpreter.
+
+**Limits.** An abandoned thread costs a thread, and whatever it holds outside
+SQLite, until `fn` returns; nothing counts or caps them (#1295). A statement
+that ignores `interrupt()`, such as a read on a hung disk, keeps the revoker
+waiting, and `close()` waits with it. A plugin that queues several stalling
+units delays later ones by queue depth times the deadline, each revocation
+logged. In-process plugins are trusted code: one that reaches into private
+attributes for the raw connection is outside the guarantee, which is against
+accidental wedging. Out-of-process writers (`corvidae redact`, `reconsolidate`,
+the `goals` CLI) keep `busy_timeout` and short transactions, and are exempt from
+the route. With a journal mode other than WAL, an unexhausted reader cursor can
+block the writer's `COMMIT` (up to `busy_timeout`, 30 s by default, longer
+than the 5 s default deadline), so the unit fails or, more often, is revoked, with the ERROR
+naming its owner rather than the reader; WAL has no such
+conflict ([configuration.md](configuration.md#daemon--daemon-level-settings)).
+A test scans the daemon's modules for any other `sqlite3.connect` or
+`aiosqlite.connect` and fails on one that is not on its allowlist.
 
 ## Agent
 
@@ -2086,11 +2212,14 @@ persistence. Registered as the `"persistence"` entry point. Declares
 `depends_on = set()`.
 
 `PersistencePlugin.on_start` reads `daemon.session_db` from config (default
-`"sessions.db"`), opens the database with `aiosqlite.connect`, and runs schema
-creation. `on_stop` closes the connection.
+`"sessions.db"`, resolved against `_base_dir`), opens the writer and the
+read-only reader with `open_session_store`, and runs schema creation as the
+first write unit (see [The session write route](#the-session-write-route)).
+`on_stop` closes both.
 
-`PersistencePlugin.db` is public for test injection: setting `persistence.db`
-before `on_start` causes the `if self.db is None:` guard to skip the open.
+`PersistencePlugin.db` (the read-only reader) and `PersistencePlugin.writer`
+are public for test injection: set both before `on_start` and the open is
+skipped. Setting only one raises `RuntimeError`.
 
 ### resolve_conversation
 
@@ -2142,7 +2271,8 @@ Strips `_message_type` from the message dict before inserting into `message_log`
 
 Implements `on_compaction` (broadcast). Called after `replace_with_summary()`.
 Determines the timestamp boundary from the most-recent non-retained row, inserts
-the summary row with `timestamp = boundary - 1e-6`, and commits.
+the summary row with `timestamp = boundary - 1e-6`, in one write unit that also
+reads the boundary.
 
 **Graceful degradation:** without `PersistencePlugin`, `resolve_conversation` returns
 no history and conversation events are not persisted.
@@ -3429,7 +3559,7 @@ recurring jobs and operator-declared periodic jobs (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
 `depends_on = {"registry", "persistence", "clock"}`.
 
-**Rows.** One `schedule` table on the persistence connection. A row is a
+**Rows.** One `schedule` table in `sessions.db`, written through the write route. A row is a
 due time, an optional interval, a target channel id, the text, and an
 origin (`reminder`; `heartbeat` is still accepted so old configs load, but
 the heartbeat is now cognition's `HeartbeatPlugin`, started on system idle).
@@ -5690,7 +5820,7 @@ CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
 MemoryPlugin        → "persistence", "llm", "clock", "idle", "trace"; soft-uses "agent", "registry" for forks  (cognition extra)
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)                                (cognition extra)
-CritiquePlugin      → "task", "llm", "trace", "held"; soft-uses "agent" for forks                  (cognition extra)
+CritiquePlugin      → "task", "llm", "trace", "held", "persistence"; soft-uses "agent" for forks                  (cognition extra)
 TracePlugin         → none; optional "outcome_log" (startup warning only)          (cognition extra)
 OutcomeLogPlugin    → "persistence", "trace"                                      (cognition extra)
 AppraisalPlugin     → "persistence", "trace"; soft-uses "agent" for forks                  (cognition extra)

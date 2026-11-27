@@ -10,31 +10,42 @@ Config:
       sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
                                     # allowed values: delete, truncate, persist,
                                     # memory, wal, off
-      sqlite_busy_timeout_ms: 30000 # ms a writer waits for this database's write
-                                    # lock before giving up (default 30000); the same
-                                    # value is applied as SQLite's busy_timeout on every
-                                    # in-daemon writer for it. 0 fails fast.
+      sqlite_busy_timeout_ms: 30000 # ms the write route's writer waits for an
+                                    # out-of-process writer's lock before giving up
+                                    # (default 30000); also the markdown index's
+                                    # wait. Must be 1..600000.
 """
 
 import json
 import logging
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.provenance import PROVENANCE_KEY, decode as decode_provenance
+from corvidae.session_writer import (
+    DEFAULT_WRITE_DEADLINE_S,
+    SessionWriter,
+    WriteCursor,
+    open_session_store,
+)
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
-#: Default write-lock wait for every in-daemon writer on the session database:
-#: the conversation writer, the fork log, the markdown index, and memory's
-#: dedicated write connection, which is opened on this same file. Out-of-process
-#: tools (the goals and redact CLIs, reconsolidate) connect on their own.
+#: Default write-lock wait for the session write route's writer connection (the
+#: only in-daemon writer on sessions.db, #1211): how long a unit's BEGIN waits
+#: for an out-of-process writer such as an offline CLI. The markdown index uses
+#: the same value on its own index.db. Out-of-process tools (the goals and
+#: redact CLIs, reconsolidate) connect on their own.
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
 
 #: A wait outside this window is a mistake, not a policy: 0 or a negative value
@@ -46,10 +57,10 @@ BUSY_TIMEOUT_BOUNDS = (1, 600_000)
 def busy_timeout_ms_from_config(config: dict) -> int:
     """Resolve ``daemon.sqlite_busy_timeout_ms``, or the default when unusable.
 
-    Shared by every in-daemon writer on the session database -- the conversation
-    writer, the fork log, the markdown index, and memory's dedicated write
-    connection, which is opened on this same file -- so one config key sets one
-    wait. Out-of-process tools connect on their own and are not covered.
+    Applied to the session write route's writer connection, which carries every
+    in-daemon write to the session database (#1211), and to the markdown index's
+    own index.db, so one config key sets one wait. Out-of-process tools connect
+    on their own and are not covered.
 
     Types are checked before conversion: ``int()`` would accept ``True`` as 1 ms
     and truncate ``1.5``, and ``int(float("inf"))`` raises OverflowError, which
@@ -109,24 +120,42 @@ async def add_column_if_missing(
         logger.debug("%s.%s added concurrently by another caller", table, column)
 
 
-async def init_db(db: aiosqlite.Connection) -> None:
-    """Create message_log table and index.
+def add_column_if_missing_sync(
+    cur: WriteCursor, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` unless present; the write-unit version.
 
-    Creates the message_log table if it doesn't exist, plus an index on
-    (channel_id, timestamp) for efficient per-channel queries ordered by time.
+    Same contract as :func:`add_column_if_missing`, for use inside a unit.
+    Inside the unit nothing else writes, so no duplicate-column race exists.
     """
-    await db.execute(
-        """CREATE TABLE IF NOT EXISTS message_log (
+    existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table})").rows}
+    if column in existing:
+        return
+    cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+# The message_log schema as one statement per entry (units run one execute
+# each; a script would commit the kernel's transaction).
+MESSAGE_LOG_SCHEMA: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS message_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             message TEXT NOT NULL,
             timestamp REAL NOT NULL,
             message_type TEXT NOT NULL DEFAULT 'message'
-        )"""
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_log_channel ON message_log (channel_id, timestamp)"
-    )
+        )""",
+    "CREATE INDEX IF NOT EXISTS idx_log_channel ON message_log (channel_id, timestamp)",
+)
+
+
+async def init_db(db: aiosqlite.Connection) -> None:
+    """Create message_log table and index on a read-write connection.
+
+    Runs :data:`MESSAGE_LOG_SCHEMA`. Kept for tests that seed a read-write
+    connection; the daemon creates the schema through the write route.
+    """
+    for stmt in MESSAGE_LOG_SCHEMA:
+        await db.execute(stmt)
     await db.commit()
 
 
@@ -344,8 +373,10 @@ class PersistencePlugin(CorvidaePlugin):
 
     Attributes:
         pm: Plugin manager instance (set in on_init via CorvidaePlugin).
-        db: aiosqlite.Connection, opened in on_start, closed in on_stop.
-            Public for test injection (same pattern as former Agent.db).
+        db: read-only aiosqlite.Connection (the reader), opened in on_start,
+            closed in on_stop. Public for test injection.
+        writer: the SessionWriter, the only read-write connection. Public for
+            test injection; inject it together with ``db``.
     """
 
     depends_on = frozenset()
@@ -354,49 +385,85 @@ class PersistencePlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self.db: aiosqlite.Connection | None = None
+        self.writer: SessionWriter | None = None
+
+    async def write(
+        self,
+        fn: Callable[[WriteCursor], T],
+        *,
+        owner: str,
+        deadline_s: float = DEFAULT_WRITE_DEADLINE_S,
+    ) -> T:
+        """Run ``fn`` as a write unit on the session database."""
+        if self.writer is None:
+            raise RuntimeError(
+                f"session writer is not open (write from {owner}); "
+                "PersistencePlugin.on_start has not run yet"
+            )
+        return await self.writer.write(fn, owner=owner, deadline_s=deadline_s)
+
+    async def load_extension(self, path: str, *, owner: str) -> None:
+        """Load a SQLite extension on the writer connection."""
+        if self.writer is None:
+            raise RuntimeError(
+                f"session writer is not open (load_extension from {owner}); "
+                "PersistencePlugin.on_start has not run yet"
+            )
+        await self.writer.load_extension(path, owner=owner)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        # Open SQLite database (only if not already injected for testing)
-        opened_here = self.db is None
-        if opened_here:
-            db_path = config.get("daemon", {}).get("session_db", "sessions.db")
-            base_dir = config.get("_base_dir", Path("."))
-            self.db = await aiosqlite.connect(str(Path(base_dir) / db_path))
-
-        # A writer that inherits sqlite3.connect's 5.0 s default gives up while
-        # another connection still holds the WAL write lock, and every give-up
-        # drops a conversation row (corvidae#1211). The wait is bounded, not
-        # removed: a holder that never commits still costs a failed write.
-        # It lands before the first write on this connection -- init_db's schema
-        # and migrations are writes too -- which is the ordering
-        # markdown_recall/index.py already uses for journal_mode.
-        busy_ms = busy_timeout_ms_from_config(config)
-        async with self.db.execute(f"PRAGMA busy_timeout={busy_ms}") as cursor:
-            row = await cursor.fetchone()
-        logger.info(
-            "SQLite busy timeout set to %d ms", row[0] if row else busy_ms,
-            extra={"busy_timeout_ms": row[0] if row else busy_ms},
-        )
-
-        if opened_here:
-            await init_db(self.db)
-
-        # Set journal mode (WAL by default for concurrent access)
-        journal_mode = config.get("daemon", {}).get("sqlite_journal_mode", "wal").lower()
-        if journal_mode not in _ALLOWED_JOURNAL_MODES:
-            allowed = ", ".join(sorted(_ALLOWED_JOURNAL_MODES))
-            raise ValueError(
-                f"Invalid sqlite_journal_mode: {journal_mode!r} "
-                f"(accepted values: {allowed})"
+        # Injection is a pair: a half-injected store would be silently
+        # replaced by one opened from config.
+        if (self.db is None) != (self.writer is None):
+            missing = "writer" if self.writer is None else "db"
+            raise RuntimeError(
+                f"PersistencePlugin.{missing} is not set but the other half "
+                "is; inject both (db, writer) from open_session_store or neither"
             )
-        async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
-            row = await cursor.fetchone()
-        actual_mode = row[0] if row else journal_mode
-        logger.info(
-            "SQLite journal mode set to %s", actual_mode,
-            extra={"journal_mode": actual_mode},
-        )
+        if self.db is None:
+            # Validate the journal mode before touching the file.
+            daemon_cfg = config.get("daemon", {})
+            journal_mode = daemon_cfg.get("sqlite_journal_mode", "wal").lower()
+            if journal_mode not in _ALLOWED_JOURNAL_MODES:
+                allowed = ", ".join(sorted(_ALLOWED_JOURNAL_MODES))
+                raise ValueError(
+                    f"Invalid sqlite_journal_mode: {journal_mode!r} "
+                    f"(accepted values: {allowed})"
+                )
+            db_path = daemon_cfg.get("session_db", "sessions.db")
+            # Two connections cannot share a private in-memory database.
+            if str(db_path) == ":memory:":
+                raise ValueError(
+                    "Config error: daemon.session_db is ':memory:', which the "
+                    "session write route cannot use (the reader and writer "
+                    "are separate connections) — set daemon.session_db to a "
+                    "file path in agent.yaml"
+                )
+            base_dir = config.get("_base_dir", Path("."))
+            # A writer that inherits sqlite3.connect's 5.0 s default gives up
+            # while an out-of-process writer (an offline CLI) holds the WAL
+            # write lock (corvidae#1211). The wait is bounded, not removed,
+            # and open_session_store sets it before journal_mode and the
+            # schema, both of which are writes.
+            busy_ms = busy_timeout_ms_from_config(config)
+            self.db, self.writer = await open_session_store(
+                Path(base_dir) / db_path,
+                journal_mode=journal_mode,
+                busy_timeout_ms=busy_ms,
+            )
+            logger.info(
+                "SQLite busy timeout set to %d ms", busy_ms,
+                extra={"busy_timeout_ms": busy_ms},
+            )
+            # Report the mode in effect, which SQLite may refuse to change.
+            async with self.db.execute("PRAGMA journal_mode") as cursor:
+                row = await cursor.fetchone()
+            actual_mode = row[0] if row else journal_mode
+            logger.info(
+                "SQLite journal mode set to %s", actual_mode,
+                extra={"journal_mode": actual_mode},
+            )
 
         # Seed the idle tracker: every channel with history is quiet since its
         # last row, so channel watches fire after a restart with no traffic.
@@ -419,8 +486,13 @@ class PersistencePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        if self.db:
-            await self.db.close()
+        # Close the reader, then the writer (waits for the in-flight unit).
+        try:
+            if self.db:
+                await self.db.close()
+        finally:
+            if self.writer:
+                await self.writer.close()
 
     @hookimpl(trylast=True)
     async def resolve_conversation(self, channel) -> list[dict] | None:
@@ -526,17 +598,22 @@ class PersistencePlugin(CorvidaePlugin):
         ts = time.time()
         # Strip internal window tags (must not be written to the JSON column)
         clean = _strip_internal_keys(message)
-        try:
-            cursor = await self.db.execute(
+        payload = json.dumps(clean)
+
+        # One unit: the insert, returning its rowid.
+        def insert(cur: WriteCursor) -> int | None:
+            return cur.execute(
                 "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
                 "VALUES (?, ?, ?, ?)",
-                (channel.id, json.dumps(clean), ts, message_type),
-            )
-            rowid = cursor.lastrowid
-            await self.db.commit()
+                (channel.id, payload, ts, message_type),
+            ).lastrowid
+
+        try:
+            rowid = await self.write(insert, owner="persistence")
         except Exception:
-            # A locked or failing DB must not stall the turn; the window still
-            # holds the message, and the next event retries the write.
+            # A locked, revoked or failing write must not stall the turn.
+            # Nothing retries it: the window keeps the message in memory, but
+            # the row is lost, so it will not survive a restart.
             logger.warning(
                 "failed to persist conversation event for channel %s",
                 channel.id,
@@ -557,23 +634,26 @@ class PersistencePlugin(CorvidaePlugin):
         The compacted_ids parameter is ignored here — it exists for
         consolidation consumers (MemoryPlugin).
         """
-        if retain_count > 0:
-            async with self.db.execute(
-                "SELECT timestamp FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary' "
-                "ORDER BY id DESC LIMIT 1 OFFSET ?",
-                (channel.id, retain_count - 1),
-            ) as cursor:
-                row = await cursor.fetchone()
-            summary_ts = row[0] - 1e-6 if row else time.time()
-        else:
-            summary_ts = time.time()
-
         # Strip internal window tags if present
         clean = _strip_internal_keys(summary_msg)
-        await self.db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
-            "VALUES (?, ?, ?, ?)",
-            (channel.id, json.dumps(clean), summary_ts, "summary"),
-        )
-        await self.db.commit()
+        payload = json.dumps(clean)
+
+        # One unit: find the boundary timestamp and insert the summary.
+        def insert(cur: WriteCursor) -> None:
+            if retain_count > 0:
+                rows = cur.execute(
+                    "SELECT timestamp FROM message_log "
+                    "WHERE channel_id = ? AND message_type != 'summary' "
+                    "ORDER BY id DESC LIMIT 1 OFFSET ?",
+                    (channel.id, retain_count - 1),
+                ).rows
+                summary_ts = rows[0][0] - 1e-6 if rows else time.time()
+            else:
+                summary_ts = time.time()
+            cur.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, ?)",
+                (channel.id, payload, summary_ts, "summary"),
+            )
+
+        await self.write(insert, owner="persistence")

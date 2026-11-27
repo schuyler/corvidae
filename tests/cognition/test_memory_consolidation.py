@@ -17,14 +17,15 @@ import aiosqlite
 import pytest
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_registry
+from helpers import add_kernel_registry, open_test_store
+from .vec_seed import load_vec_for_seed
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin, RubricPrior
-from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.persistence import PersistencePlugin, busy_timeout_ms_from_config, init_db
 from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
 
 
@@ -92,18 +93,24 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     also holds a forks-off FakeForkAgent under ``agent`` (view-capable).
     """
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(db_path)
-    await init_db(db)
-    if db_path != ":memory:":
-        # Same journal mode the daemon runs the persistence connection in.
-        await db.execute("PRAGMA journal_mode=wal")
+    # A file-backed store (a fresh temp file for ":memory:", which the write
+    # route refuses): ``db`` seeds, the reader/writer pair is what plugins see.
+    # A config that names its session DB (the fork_log tests read that file)
+    # is honoured when no path is given.
+    if db_path == ":memory:":
+        db_path = config.get("daemon", {}).get("session_db")
+    # The writer's wait comes from daemon.sqlite_busy_timeout_ms, as on_start
+    # resolves it in the daemon.
+    db, reader, writer = await open_test_store(
+        db_path, busy_timeout_ms=busy_timeout_ms_from_config(config)
+    )
 
     pm = create_plugin_manager()
     # Kernel plugins the memory plugin resolves with get_dependency (#1180).
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = reader, writer
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -128,6 +135,8 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     prior.score = AsyncMock(return_value=0.7)
     memory.importance_prior = prior
 
+    # Tests read memory_vec through the seeding connection.
+    await load_vec_for_seed(db)
     channel = Channel(transport="irc", scope="#test")
     return memory, persistence, stub, channel, db
 
@@ -197,7 +206,7 @@ class TestCompactionTrigger:
         assert await fetch_watermark(db, channel.id) == rowids[-1]
         # The vec row landed alongside.
         if memory._vec_available:
-            async with db.execute("SELECT count(*) FROM memory_vec") as cursor:
+            async with persistence.db.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 1
         await db.close()
 
@@ -297,7 +306,7 @@ class TestEmbeddingDegradation:
         assert len(records) == 1
         assert records[0]["embedded"] == 0
         if memory._vec_available:
-            async with db.execute("SELECT count(*) FROM memory_vec") as cursor:
+            async with persistence.db.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 0
         # The failure was logged, not raised.
         assert any("embed" in rec.message.lower() for rec in caplog.records)

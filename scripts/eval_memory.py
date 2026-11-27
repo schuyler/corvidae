@@ -146,6 +146,7 @@ async def run_live_evaluation(args) -> None:
     from corvidae.llm_plugin import LLMPlugin
     from corvidae.metrics import UsageLogPlugin
     from corvidae.persistence import PersistencePlugin, init_db
+    from corvidae.session_writer import open_session_store
 
     if not args.base_url or not args.model:
         print("--live requires --base-url and --model", file=sys.stderr)
@@ -183,12 +184,15 @@ async def run_live_evaluation(args) -> None:
         "memory": {},
     }
 
-    db = await aiosqlite.connect(scratch.name)
+    # ``db`` seeds the scratch DB (autocommit); plugins get the reader and the
+    # write route's writer, as in the daemon.
+    db = await aiosqlite.connect(scratch.name, isolation_level=None)
     await init_db(db)
+    reader, writer = await open_session_store(scratch.name)
 
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = reader, writer
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -283,7 +287,7 @@ async def run_live_evaluation(args) -> None:
 
     # Per-stage token cost from usage_log (§6's currency).
     try:
-        async with db.execute(
+        async with reader.execute(
             "SELECT stage, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens) "
             "FROM usage_log GROUP BY stage"
         ) as cursor:
@@ -303,6 +307,8 @@ async def run_live_evaluation(args) -> None:
               "reserved; LLM-judged scoring is out-of-band only (§6).")
 
     await llm.on_stop()
+    await reader.close()
+    await writer.close()
     await db.close()
     print(f"\nScratch DB retained at {scratch.name}")
 
@@ -722,6 +728,7 @@ async def run_snapshot_evaluation(
     from corvidae.llm_plugin import LLMPlugin
     from corvidae.persistence import PersistencePlugin
     from corvidae.runtime import Runtime
+    from corvidae.session_writer import SessionWriter, open_session_store
 
     run_at = time.time()
 
@@ -739,6 +746,7 @@ async def run_snapshot_evaluation(
         fail(f"eval_memory: {exc}")
 
     db: aiosqlite.Connection | None = None
+    writer: SessionWriter | None = None
     llm: LLMPlugin | None = None
     llm_start_reached = False
     try:
@@ -747,10 +755,12 @@ async def run_snapshot_evaluation(
 
         # Plugin setup on the copy; a ValueError here is a config problem.
         try:
-            db = await aiosqlite.connect(str(snapshot_db))
+            # The copy opens through the write route: a read-only reader for
+            # scoring and the writer memory's schema pass needs.
+            db, writer = await open_session_store(snapshot_db)
             pm = create_plugin_manager()
             persistence = PersistencePlugin()
-            persistence.db = db
+            persistence.db, persistence.writer = db, writer
             pm.register(persistence, name="persistence")
 
             # Memory goes before the LLM plugin so register_llm_stages reaches
@@ -942,14 +952,15 @@ async def run_snapshot_evaluation(
                 await llm.on_stop()
             except Exception:
                 logger.warning("eval_memory: stopping LLM clients failed", exc_info=True)
-        if db is not None:
-            try:
-                await db.close()
-            except Exception:
-                logger.warning(
-                    "eval_memory: closing the snapshot copy %s failed", snapshot_db,
-                    exc_info=True,
-                )
+        for handle in (db, writer):
+            if handle is not None:
+                try:
+                    await handle.close()
+                except Exception:
+                    logger.warning(
+                        "eval_memory: closing the snapshot copy %s failed",
+                        snapshot_db, exc_info=True,
+                    )
 
 
 def snapshot_arg_error(args: argparse.Namespace) -> str | None:

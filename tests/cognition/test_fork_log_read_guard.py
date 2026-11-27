@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.cognition.fork_log_store import close_log, open_log
 from corvidae_cognition.fork_log import ForkLog, digest_of
 
 pytestmark = pytest.mark.timeout(30)
@@ -40,12 +41,12 @@ CHILD = [*PARENT, {"role": "user", "content": "u2"}]
 
 @pytest.fixture
 async def log(tmp_path):
-    log = ForkLog(str(tmp_path / "sessions.db"))
+    log = await open_log(tmp_path / "sessions.db")
     await log.open()
     try:
         yield log
     finally:
-        await log.close()
+        await close_log(log)
 
 
 async def _chain_with_parent(log: ForkLog) -> tuple[int, int]:
@@ -69,13 +70,13 @@ async def _chain_with_parent(log: ForkLog) -> tuple[int, int]:
 
 
 async def _set_claim(log: ForkLog, fork_id: int, claim: int) -> None:
-    db = await log._conn()
+    db = log.seed_db
     await db.execute("UPDATE fork_log SET chain_from = ? WHERE id = ?", (claim, fork_id))
     await db.commit()
 
 
 async def _drop_digest_rows(log: ForkLog, fork_id: int) -> None:
-    db = await log._conn()
+    db = log.seed_db
     await db.execute("DELETE FROM fork_digest WHERE fork_id = ?", (fork_id,))
     await db.commit()
 
@@ -123,7 +124,7 @@ async def test_a_root_whose_ordinals_skip_a_slot_is_refused(log):
         messages=PARENT,
         digests=[digest_of(b) for b in PARENT],
     )
-    db = await log._conn()
+    db = log.seed_db
     # Ordinals can't be shifted: fork_digest has a UNIQUE (fork_id, ordinal)
     # index, which is itself worth knowing. Losing the head row is the way the
     # chain ends up starting at 1.
@@ -163,7 +164,7 @@ async def test_a_gap_after_the_first_ordinal_is_refused(log):
         messages=PARENT,
         digests=[digest_of(b) for b in PARENT],
     )
-    db = await log._conn()
+    db = log.seed_db
     await db.execute("DELETE FROM fork_digest WHERE fork_id = ? AND ordinal = 1", (root,))
     await db.commit()
     assert await log.resolve_chain(root) is None
@@ -187,7 +188,7 @@ async def test_a_chain_shorter_than_the_row_claims_is_refused(log):
         messages=CHILD,
         digests=[digest_of(b) for b in CHILD],
     )
-    db = await log._conn()
+    db = log.seed_db
     # a digest row lost to damage or a partial write
     await db.execute(
         "DELETE FROM fork_digest WHERE fork_id = ? AND ordinal = ?", (root, 3)
@@ -201,7 +202,7 @@ async def test_rows_written_before_block_count_existed_are_backfilled(tmp_path):
     import aiosqlite
 
     path = str(tmp_path / "legacy.db")
-    log = ForkLog(path)
+    log = await open_log(path)
     await log.open()
     fork_id = await log.record(
         stage="appraisal",
@@ -209,7 +210,7 @@ async def test_rows_written_before_block_count_existed_are_backfilled(tmp_path):
         messages=CHILD,
         digests=[digest_of(b) for b in CHILD],
     )
-    await log.close()
+    await close_log(log)
 
     # Rewind the row to what an older build wrote: no count, digests intact.
     db = await aiosqlite.connect(path)
@@ -217,9 +218,9 @@ async def test_rows_written_before_block_count_existed_are_backfilled(tmp_path):
     await db.commit()
     await db.close()
 
-    log = ForkLog(path)
+    log = await open_log(path)
     await log.open()
     try:
         assert len(await log.resolve_chain(fork_id)) == len(CHILD)
     finally:
-        await log.close()
+        await close_log(log)

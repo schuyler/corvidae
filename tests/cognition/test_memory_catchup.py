@@ -109,9 +109,11 @@ class Env:
 
     async def watermark_at(self, row_id: int) -> None:
         """Move the consolidation watermark to ``row_id``."""
-        mem_db = await self.memory._ensure_schema()
-        await self.memory._set_watermark(mem_db, self.channel.id, row_id)
-        await mem_db.commit()
+        await self.memory._ensure_schema()
+        await self.memory._persistence().write(
+            lambda cur: self.memory._set_watermark(cur, self.channel.id, row_id),
+            owner="test",
+        )
 
     async def corrupt(self, row_id: int) -> None:
         """Make a stored row undecodable (as a hand edit or an old version

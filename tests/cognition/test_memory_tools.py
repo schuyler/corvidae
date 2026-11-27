@@ -32,7 +32,7 @@ import pytest
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.tools.memory_tools'
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_held, add_kernel_registry
+from helpers import attach_store, fresh_session_db_path, add_kernel_held, add_kernel_registry
 from corvidae_cognition.memory_tools import MemoryToolsPlugin
 
 from corvidae.channel import Channel
@@ -42,6 +42,7 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
+from .vec_seed import load_vec_for_seed
 
 
 DIMS = 32
@@ -84,7 +85,7 @@ class StubEmbedClient:
 async def build_tools_env(config=None):
     """Full pm: persistence + llm(stub) + held store + memory + memory_tools."""
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
@@ -92,7 +93,7 @@ async def build_tools_env(config=None):
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -115,6 +116,7 @@ async def build_tools_env(config=None):
     pm.register(memory_tools, name="memory_tools")
     await memory_tools.on_init(pm=pm, config=config)
 
+    await load_vec_for_seed(db)
     return memory, memory_tools, db
 
 
@@ -701,7 +703,7 @@ class TestMessageFtsBackfill:
     async def test_preexisting_rows_indexed_by_backfill(self):
         """Rows in message_log before MemoryPlugin starts are indexed by backfill."""
         # Build a fresh DB with message_log rows (no FTS yet)
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
 
         # Insert messages before memory schema (no FTS triggers yet)
@@ -722,7 +724,7 @@ class TestMessageFtsBackfill:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
 
         llm = LLMPlugin()
@@ -753,7 +755,7 @@ class TestMessageFtsBackfill:
         skips already-indexed rows and does not hit FTS5 rowid uniqueness error.
         (Design review cosmetic finding #3 — verified empirically, SQLite 3.47.1.)
         """
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
 
         # Insert 10 messages
@@ -775,7 +777,7 @@ class TestMessageFtsBackfill:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         llm = LLMPlugin()
         pm.register(llm, name="llm")

@@ -50,6 +50,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiosqlite
 
+from corvidae.session_writer import MAX_WRITE_DEADLINE_S, WriteCursor
 from corvidae.channel import (
     Channel,
     ChannelNotReady,
@@ -742,6 +743,21 @@ class SchedulerPlugin(CorvidaePlugin):
         persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
         return persistence.db
 
+    async def _write_ops(self, ops: list[tuple[str, tuple]]) -> None:
+        """Run ``ops`` (SQL, params) as one write unit; no-op when empty."""
+        if not ops:
+            return
+        from corvidae.persistence import PersistencePlugin
+
+        persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+        # One unit: every statement in the transaction the old code committed.
+        def unit(cur: WriteCursor) -> None:
+            for sql, params in ops:
+                cur.execute(sql, params)
+
+        await persistence.write(unit, owner="scheduler")
+
     async def _ensure_schema(self) -> aiosqlite.Connection | None:
         """Create the schedule table on first use; None while the DB is closed.
 
@@ -752,9 +768,18 @@ class SchedulerPlugin(CorvidaePlugin):
         if db is None:
             return None
         if not self._schema_ready:
-            await db.execute(SCHEDULE_DDL)
-            await db.execute(SCHEDULE_INDEX_DDL)
-            await db.commit()
+            from corvidae.persistence import PersistencePlugin
+
+            persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+            # Schema unit: DDL one statement at a time, at the schema deadline.
+            def schema(cur: WriteCursor) -> None:
+                cur.execute(SCHEDULE_DDL)
+                cur.execute(SCHEDULE_INDEX_DDL)
+
+            await persistence.write(
+                schema, owner="scheduler", deadline_s=MAX_WRITE_DEADLINE_S
+            )
             self._schema_ready = True
         return db
 
@@ -837,6 +862,7 @@ class SchedulerPlugin(CorvidaePlugin):
             specs[spec.name] = spec
 
         now = self._clock.now()
+        ops: list[tuple[str, tuple]] = []
         async with self._db_lock:
             existing = {r.name: r for r in await self._fetch(db, "created_by = 'config'", ())}
 
@@ -846,13 +872,13 @@ class SchedulerPlugin(CorvidaePlugin):
                 row = existing.get(name)
                 if row is None:
                     next_fire = spec.first_fire(now, self._tz)
-                    await db.execute(
+                    ops.append((
                         "INSERT INTO schedule (name, channel_id, origin, text, next_fire_at, "
                         "interval_seconds, created_at, created_by, enabled, schedule_spec) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, 'config', 1, ?)",
                         (name, spec.channel_id, spec.origin, spec.text, next_fire,
                          spec.interval_seconds, now, schedule_spec),
-                    )
+                    ))
                     logger.info(
                         "scheduler: config job inserted",
                         extra={"job": name, "next_fire_at": _log_time(next_fire, self._tz)},
@@ -860,13 +886,13 @@ class SchedulerPlugin(CorvidaePlugin):
                     continue
                 reschedule = row.schedule_spec != schedule_spec or not row.enabled
                 next_fire = spec.first_fire(now, self._tz) if reschedule else row.next_fire_at
-                await db.execute(
+                ops.append((
                     "UPDATE schedule SET channel_id = ?, origin = ?, text = ?, "
                     "interval_seconds = ?, next_fire_at = ?, schedule_spec = ?, "
                     "enabled = 1, disabled_reason = NULL WHERE id = ?",
                     (spec.channel_id, spec.origin, spec.text, spec.interval_seconds,
                      next_fire, schedule_spec, row.id),
-                )
+                ))
                 if reschedule:
                     self._stale_overdue.pop(row.id, None)
                     logger.info(
@@ -878,14 +904,15 @@ class SchedulerPlugin(CorvidaePlugin):
             for name, row in existing.items():
                 if name in specs or name in protected or not row.enabled:
                     continue
-                await db.execute(
+                ops.append((
                     "UPDATE schedule SET enabled = 0, disabled_reason = 'removed_from_config' "
                     "WHERE id = ?",
                     (row.id,),
-                )
+                ))
                 self._stale_overdue.pop(row.id, None)
                 logger.info("scheduler: config job disabled (removed from config)", extra={"job": name})
-            await db.commit()
+            # One unit for the whole sync, as one transaction before.
+            await self._write_ops(ops)
 
     async def _catch_up(self) -> None:
         """Apply the startup catch-up policy to rows that came due while the
@@ -900,6 +927,7 @@ class SchedulerPlugin(CorvidaePlugin):
         if db is None:
             return
         now = self._clock.now()
+        ops: list[tuple[str, tuple]] = []
         async with self._db_lock:
             overdue_rows = await self._fetch(db, "enabled = 1 AND next_fire_at <= ?", (now,))
             for row in overdue_rows:
@@ -912,10 +940,10 @@ class SchedulerPlugin(CorvidaePlugin):
                         logger.info("scheduler: overdue reminder will fire late",
                                     extra={"schedule_id": row.id, "overdue_s": round(overdue)})
                     else:
-                        await db.execute(
+                        ops.append((
                             "UPDATE schedule SET enabled = 0, disabled_reason = 'missed' WHERE id = ?",
                             (row.id,),
-                        )
+                        ))
                         logger.info("scheduler: reminder missed while daemon was down",
                                     extra={"schedule_id": row.id, "overdue_s": round(overdue)})
                 elif cron_expr is not None:
@@ -924,9 +952,9 @@ class SchedulerPlugin(CorvidaePlugin):
                         parse_cron(cron_expr),
                         datetime.fromtimestamp(now, self._tz), self._tz,
                     ).timestamp()
-                    await db.execute(
+                    ops.append((
                         "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (next_fire, row.id),
-                    )
+                    ))
                     logger.info("scheduler: cron job skipped ahead after downtime",
                                 extra={"schedule_id": row.id,
                                        "next_fire_at": _log_time(next_fire, self._tz)})
@@ -936,13 +964,14 @@ class SchedulerPlugin(CorvidaePlugin):
                 else:
                     # Recurring (interval), more than a slot behind: skip ahead, no replay.
                     next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
-                    await db.execute(
+                    ops.append((
                         "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (next_fire, row.id),
-                    )
+                    ))
                     logger.info("scheduler: recurring job skipped ahead after downtime",
                                 extra={"schedule_id": row.id,
                                        "next_fire_at": _log_time(next_fire, self._tz)})
-            await db.commit()
+            # One unit for all catch-up updates, as one transaction before.
+            await self._write_ops(ops)
 
     # ------------------------------------------------------------------
     # Timer
@@ -1033,11 +1062,11 @@ class SchedulerPlugin(CorvidaePlugin):
         async with self._db_lock:
             cron_expr = _cron_expr_from_spec(row.schedule_spec)
             if row.interval_seconds is None and cron_expr is None:
-                cursor = await db.execute(
+                sql = (
                     "UPDATE schedule SET enabled = 0, disabled_reason = 'fired', "
-                    "last_fired_at = ? WHERE id = ? AND enabled = 1",
-                    (now, row.id),
+                    "last_fired_at = ? WHERE id = ? AND enabled = 1"
                 )
+                params: tuple = (now, row.id)
             else:
                 if cron_expr is not None:
                     next_fire = cron_next_fire(
@@ -1046,13 +1075,21 @@ class SchedulerPlugin(CorvidaePlugin):
                     ).timestamp()
                 else:
                     next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
-                cursor = await db.execute(
+                sql = (
                     "UPDATE schedule SET next_fire_at = ?, last_fired_at = ? "
-                    "WHERE id = ? AND enabled = 1",
-                    (next_fire, now, row.id),
+                    "WHERE id = ? AND enabled = 1"
                 )
-            await db.commit()
-        if cursor.rowcount == 0:
+                params = (next_fire, now, row.id)
+            from corvidae.persistence import PersistencePlugin
+
+            persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+
+            # One unit: the conditional UPDATE; its rowcount is the CAS result.
+            def record(cur: WriteCursor) -> int:
+                return cur.execute(sql, params).rowcount
+
+            rowcount = await persistence.write(record, owner="scheduler")
+        if rowcount == 0:
             logger.info("scheduler: row disabled before it fired; skipped",
                         extra={"schedule_id": row.id})
             return
@@ -1120,26 +1157,32 @@ class SchedulerPlugin(CorvidaePlugin):
         async with self._db_lock:
             # Cap check and insert under one lock so concurrent tool calls
             # in a batch cannot both slip under the limit.
-            async with db.execute(
-                "SELECT COUNT(*) FROM schedule WHERE channel_id = ? AND enabled = 1 "
-                "AND created_by = 'tool'",
-                (channel_id,),
-            ) as cursor:
-                (count,) = await cursor.fetchone()
-            if count >= self._max_per_channel:
-                raise ValueError(
-                    f"this conversation already has {count} pending reminders and jobs "
-                    f"(limit {self._max_per_channel}, scheduler.max_reminders_per_channel); "
-                    f"cancel one first"
-                )
-            # Origin is always 'reminder': a tool never chooses it (#814).
-            cursor = await db.execute(
-                "INSERT INTO schedule (channel_id, origin, text, next_fire_at, created_at, "
-                "created_by, enabled, schedule_spec) VALUES (?, 'reminder', ?, ?, ?, 'tool', 1, ?)",
-                (channel_id, text, fire_at, self._clock.now(), schedule_spec),
-            )
-            row_id = cursor.lastrowid
-            await db.commit()
+            from corvidae.persistence import PersistencePlugin
+
+            persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
+            created_at = self._clock.now()
+
+            # One unit: the cap count and the insert, so both see one state.
+            def insert(cur: WriteCursor) -> int | None:
+                count = cur.execute(
+                    "SELECT COUNT(*) FROM schedule WHERE channel_id = ? AND enabled = 1 "
+                    "AND created_by = 'tool'",
+                    (channel_id,),
+                ).rows[0][0]
+                if count >= self._max_per_channel:
+                    raise ValueError(
+                        f"this conversation already has {count} pending reminders and jobs "
+                        f"(limit {self._max_per_channel}, scheduler.max_reminders_per_channel); "
+                        f"cancel one first"
+                    )
+                # Origin is always 'reminder': a tool never chooses it (#814).
+                return cur.execute(
+                    "INSERT INTO schedule (channel_id, origin, text, next_fire_at, created_at, "
+                    "created_by, enabled, schedule_spec) VALUES (?, 'reminder', ?, ?, ?, 'tool', 1, ?)",
+                    (channel_id, text, fire_at, created_at, schedule_spec),
+                ).lastrowid
+
+            row_id = await persistence.write(insert, owner="scheduler")
         self.wake()
         return row_id
 
@@ -1180,11 +1223,10 @@ class SchedulerPlugin(CorvidaePlugin):
             if cron_expr is not None:
                 spec = f"cron={cron_expr};tz={self._tz_name}"
                 next_fire = self._cron_next(cron_expr)
-            await db.execute(
+            await self._write_ops([(
                 "UPDATE schedule SET text = ?, schedule_spec = ?, next_fire_at = ? WHERE id = ?",
                 (new_text, spec, next_fire, row_id),
-            )
-            await db.commit()
+            )])
         self.wake()
         logger.info("scheduler: job updated",
                     extra={"schedule_id": row_id, "channel": channel_id})
@@ -1214,11 +1256,10 @@ class SchedulerPlugin(CorvidaePlugin):
                         f"\"{row.name}\" and cannot be cancelled from here.")
             if not row.enabled:
                 return f"Reminder #{row_id} is not pending ({row.disabled_reason})."
-            await db.execute(
+            await self._write_ops([(
                 "UPDATE schedule SET enabled = 0, disabled_reason = 'cancelled' WHERE id = ?",
                 (row_id,),
-            )
-            await db.commit()
+            )])
             self._stale_overdue.pop(row_id, None)
         self.wake()
         return f"Cancelled reminder #{row_id}."

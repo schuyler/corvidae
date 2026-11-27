@@ -14,6 +14,7 @@ import pytest
 from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
+from helpers import attach_store, open_test_store
 from corvidae.hooks import create_plugin_manager
 
 
@@ -58,11 +59,12 @@ async def _make_plugin_with_db(db=None):
     plugin = PersistencePlugin(pm)
 
     if db is None:
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, reader, writer = await open_test_store()
+    else:
+        reader, writer = await attach_store(db)
 
-    # Inject DB so on_start skips the real open
-    plugin.db = db
+    # Inject the pair so on_start skips the real open
+    plugin.db, plugin.writer = reader, writer
 
     return plugin, registry, db
 
@@ -105,14 +107,14 @@ class TestOnStart:
 
         plugin = PersistencePlugin(pm)
 
-        pre_injected = await aiosqlite.connect(":memory:")
-        await init_db(pre_injected)
-        plugin.db = pre_injected
+        pre_injected, reader, writer = await open_test_store()
+        plugin.db, plugin.writer = reader, writer
 
         config = {"daemon": {"session_db": str(tmp_path / "should_not_open.db")}}
         await plugin.on_start(config=config)
 
-        assert plugin.db is pre_injected
+        assert plugin.db is reader
+        assert plugin.writer is writer
 
         await pre_injected.close()
 
@@ -164,21 +166,27 @@ class TestOnStart:
 
 class TestOnStop:
     async def test_on_stop_closes_db(self):
-        """on_stop must close the db connection."""
-        plugin, _registry, db = await _make_plugin_with_db()
+        """on_stop must close the reader and the writer."""
+        plugin, _registry, _db = await _make_plugin_with_db()
 
         closed = []
-        original_close = db.close
+        original_reader_close = plugin.db.close
+        original_writer_close = plugin.writer.close
 
-        async def spy_close():
-            closed.append(True)
-            await original_close()
+        async def spy_reader_close():
+            closed.append("reader")
+            await original_reader_close()
 
-        db.close = spy_close
+        async def spy_writer_close():
+            closed.append("writer")
+            await original_writer_close()
+
+        plugin.db.close = spy_reader_close
+        plugin.writer.close = spy_writer_close
 
         await plugin.on_stop()
 
-        assert closed, "db.close() was not called"
+        assert closed == ["reader", "writer"], "reader/writer close() not called"
 
     async def test_on_stop_with_no_db_does_not_crash(self):
         """on_stop must be a no-op when db is None."""
@@ -577,7 +585,7 @@ class TestHookIntegration:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        plugin.db = db
+        plugin.db, plugin.writer = await attach_store(db)
         plugin._registry = registry
         pm.register(plugin, name="persistence")
 
@@ -602,7 +610,7 @@ class TestHookIntegration:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        plugin.db = db
+        plugin.db, plugin.writer = await attach_store(db)
         pm.register(plugin, name="persistence")
 
         channel = _make_channel(registry)
@@ -788,7 +796,8 @@ async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
     for mode in ("delete", "truncate", "persist", "memory", "wal", "off"):
         assert mode in message
 
-    await plugin.db.close()
+    # Validation fails before any store opens.
+    assert plugin.db is None and plugin.writer is None
 
 # ---------------------------------------------------------------------------
 # Degradation: corrupt rows and failed writes must not abort the turn
@@ -995,7 +1004,7 @@ class TestPersistenceDegradation:
         async def locked(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(db, "execute", locked)
+        monkeypatch.setattr(plugin.writer, "write", locked)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
             result = await plugin.persist_message(
@@ -1095,137 +1104,135 @@ def test_decode_message_row_returns_dict_for_valid_input():
     assert decode_message_row(1, raw, "c") == {"role": "user", "content": "hi"}
 
 
+async def test_on_start_refuses_memory_session_db(tmp_path):
+    """``:memory:`` is a config error naming the key and the remedy."""
+    from corvidae.persistence import PersistencePlugin
+
+    plugin = PersistencePlugin(create_plugin_manager())
+    with pytest.raises(ValueError) as excinfo:
+        await plugin.on_start(config={"daemon": {"session_db": ":memory:"}})
+
+    message = str(excinfo.value)
+    assert "daemon.session_db" in message
+    assert "file path" in message
+
+
+async def test_on_start_refuses_half_injection(db):
+    """Injecting only ``db`` raises, naming the missing ``writer``."""
+    from corvidae.persistence import PersistencePlugin
+
+    plugin = PersistencePlugin(create_plugin_manager())
+    plugin.db = db
+    with pytest.raises(RuntimeError) as excinfo:
+        await plugin.on_start(config={})
+
+    assert "writer" in str(excinfo.value)
+    assert "inject both" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # TestBusyTimeout
 # ---------------------------------------------------------------------------
+
+
+async def _writer_busy_timeout(plugin) -> int:
+    """The busy_timeout in force on the write route's writer connection."""
+    return await plugin.write(
+        lambda cur: cur.execute("PRAGMA busy_timeout").rows[0][0], owner="test"
+    )
 
 
 class TestBusyTimeout:
     async def test_on_start_sets_busy_timeout_by_default(self, tmp_path):
         """A held write lock must cost a bounded wait, not a 5 s default.
 
-        aiosqlite forwards sqlite3.connect's timeout=, whose Python default is
-        5.0 s; every writer on this file otherwise gives up after ~5 s while
-        another connection holds the write lock (corvidae#1211).
+        sqlite3.connect's timeout= defaults to 5.0 s; the writer otherwise gives
+        up after ~5 s while an out-of-process writer holds the write lock
+        (corvidae#1211). The default is 30000 ms, written as a literal so a
+        zeroed DEFAULT_BUSY_TIMEOUT_MS cannot pass.
         """
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
-        registry = _make_registry()
-        pm.register(registry, name="registry")
-
+        pm.register(_make_registry(), name="registry")
         plugin = PersistencePlugin(pm)
-        db_path = str(tmp_path / "busy_default.db")
-        config = {"daemon": {"session_db": db_path}}
+        config = {"daemon": {"session_db": str(tmp_path / "busy_default.db")}}
 
         await plugin.on_start(config=config)
-
-        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
-            row = await cursor.fetchone()
-        actual_ms = row[0]
-
-        await plugin.db.close()
+        try:
+            actual_ms = await _writer_busy_timeout(plugin)
+        finally:
+            await plugin.on_stop()
 
         assert actual_ms == 30000
 
-    async def test_on_start_respects_sqlite_busy_timeout_config_override(self, tmp_path):
-        """daemon.sqlite_busy_timeout_ms override is applied by on_start."""
+    async def test_the_configured_wait_reaches_the_writer(self, tmp_path):
+        """daemon.sqlite_busy_timeout_ms is the writer connection's busy_timeout."""
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
-        registry = _make_registry()
-        pm.register(registry, name="registry")
-
+        pm.register(_make_registry(), name="registry")
         plugin = PersistencePlugin(pm)
-        db_path = str(tmp_path / "busy_override.db")
         config = {
             "daemon": {
-                "session_db": db_path,
+                "session_db": str(tmp_path / "busy_override.db"),
                 "sqlite_busy_timeout_ms": 1234,
             }
         }
 
         await plugin.on_start(config=config)
-
-        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
-            row = await cursor.fetchone()
-        actual_ms = row[0]
-
-        await plugin.db.close()
+        try:
+            actual_ms = await _writer_busy_timeout(plugin)
+        finally:
+            await plugin.on_stop()
 
         assert actual_ms == 1234
 
-    async def test_on_start_applies_the_wait_to_an_injected_connection(self, tmp_path):
-        """A connection a test built still gets the daemon's wait.
-
-        The connect/init_db pair is split by an ``opened_here`` flag so the PRAGMA
-        lands here too. Without that, an injected connection -- which is how every
-        plugin-level test opens the file, and how a re-opened DB would be handed
-        over -- would exercise a writer with no bound at all.
-        """
-        from corvidae.persistence import PersistencePlugin
-
-        pm = create_plugin_manager()
-        pm.register(_make_registry(), name="registry")
-        plugin = PersistencePlugin(pm)
-        db_path = str(tmp_path / "injected.db")
-        plugin.db = await aiosqlite.connect(db_path)
-        await init_db(plugin.db)
-
-        await plugin.on_start(config={
-            "daemon": {
-                "session_db": db_path,
-                "sqlite_busy_timeout_ms": 2222,
-            }
-        })
-
-        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
-            actual_ms = (await cursor.fetchone())[0]
-        await plugin.db.close()
-
-        assert actual_ms == 2222
-
-    async def test_on_start_applies_the_wait_before_the_schema_writes(
+    async def test_busy_timeout_precedes_journal_mode_on_the_writer(
         self, tmp_path, monkeypatch
     ):
-        """The DDL is a write, so it must not run on the inherited default (N4).
+        """Journal mode and the schema are writes, so the wait lands first.
 
-        ``on_start`` used to call ``init_db`` (schema + migrations, committed
-        there) before setting the PRAGMA, which left the boot-time writes on
-        sqlite3's 5.0 s handler — the same ordering this change fixed in
-        ``markdown_recall/index.py``, where the PRAGMA precedes
-        ``journal_mode`` for exactly this reason.
+        Setting the journal mode and running the schema each need the write
+        lock; until the PRAGMA lands the connection would wait on whatever
+        it inherited. A trace callback installed at connect records every
+        statement the writer runs, in order.
         """
-        import corvidae.persistence as persistence_module
+        import sqlite3
+
         from corvidae.persistence import PersistencePlugin
 
-        seen = {}
-        real_init_db = persistence_module.init_db
+        db_path = tmp_path / "ordering.db"
+        statements: list[str] = []
+        real_connect = sqlite3.connect
 
-        async def spy(db):
-            async with db.execute("PRAGMA busy_timeout") as cursor:
-                seen["busy_ms"] = (await cursor.fetchone())[0]
-            return await real_init_db(db)
+        # Trace only the writer: the first connection opened on this path.
+        def tracing_connect(database, *args, **kwargs):
+            conn = real_connect(database, *args, **kwargs)
+            if database == str(db_path) and not statements:
+                statements.append("<connect>")
+                conn.set_trace_callback(statements.append)
+            return conn
 
-        monkeypatch.setattr(persistence_module, "init_db", spy)
+        monkeypatch.setattr(sqlite3, "connect", tracing_connect)
 
         pm = create_plugin_manager()
         pm.register(_make_registry(), name="registry")
         plugin = PersistencePlugin(pm)
         await plugin.on_start(config={
-            "daemon": {
-                "session_db": str(tmp_path / "ordering.db"),
-                "sqlite_busy_timeout_ms": 7777,
-            }
+            "daemon": {"session_db": str(db_path), "sqlite_busy_timeout_ms": 7777},
         })
+        try:
+            final_ms = await _writer_busy_timeout(plugin)
+        finally:
+            await plugin.on_stop()
 
-        async with plugin.db.execute("PRAGMA busy_timeout") as cursor:
-            final_ms = (await cursor.fetchone())[0]
-        await plugin.db.close()
-
-        assert seen.get("busy_ms") == 7777, (
-            "init_db ran before the PRAGMA: the schema writes were unbounded"
-        )
+        busy = [i for i, s in enumerate(statements) if "busy_timeout" in s]
+        journal = [i for i, s in enumerate(statements) if "journal_mode" in s]
+        create = [i for i, s in enumerate(statements) if s.lstrip().upper().startswith("CREATE")]
+        assert busy and journal and create, statements
+        assert "7777" in statements[busy[0]], statements[busy[0]]
+        assert busy[0] < journal[0] < create[0], statements
         assert final_ms == 7777
 
 

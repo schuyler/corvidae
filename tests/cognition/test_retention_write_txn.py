@@ -1,10 +1,9 @@
-"""Retention's memory-table writes run in memory's write transaction (#257).
+"""Retention's memory-table writes run as write units on the route (#257, #1211).
 
-Demotion, re-promotion and the vec backfill each are one
-``BEGIN IMMEDIATE`` .. ``COMMIT`` (``MemoryPlugin._write_txn``) on memory's
-dedicated write connection, so another plugin's commit on the persistence
-connection cannot land retention's partial work and a mid-batch failure
-leaves no row changed.
+Demotion, re-promotion and the vec backfill each are one unit
+(``persistence.write(fn, owner="memory")``: one ``BEGIN IMMEDIATE`` ..
+``COMMIT``), so a mid-batch failure leaves no row changed and another
+writer's commit cannot land retention's partial work.
 """
 
 import logging
@@ -17,7 +16,7 @@ from corvidae_cognition.retention import run_retention_job
 from .test_memory_consolidation import build_consolidation_env
 from .test_memory_retention import fetch_memory, vec_row_exists
 from .test_memory_retention import seed_memory_row as _seed
-from .test_memory_write_conn import count, hook_execute, is_write_sql, stop
+from .test_memory_write_conn import _FailingCursor, count, stop
 
 DAY = 86400.0
 NOW = time.time()
@@ -25,7 +24,7 @@ OLD = NOW - 400 * DAY  # far past grace, decayed well below demote_below
 
 
 async def env(tmp_path):
-    """File-DB memory env (a write connection needs a file) with vec."""
+    """File-DB memory env (the write route needs a file) with vec."""
     memory, persistence, stub, channel, db = await build_consolidation_env(
         db_path=str(tmp_path / "sessions.db")
     )
@@ -45,26 +44,30 @@ async def seed_memory_row(db, channel_id, summary, **kw):
             "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
             (mid, sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0])),
         )
-        await db.commit()
     return mid
 
 
-def fail_nth_write(db, nth, prefix=None):
-    """Hook that commits on the shared connection before every write
-    statement and raises at the nth (1-based) matching write."""
-    state = {"seen": 0, "stray": 0}
+def fail_nth_write(persistence, nth, prefix=None):
+    """Make the nth (1-based) statement starting with ``prefix`` (any
+    statement when None) inside a unit raise; ``state["units"]`` counts the
+    units that went through the route."""
+    state = {"seen": 0, "units": 0}
 
-    async def before(sql):
-        if not is_write_sql(sql):
-            return
-        await db.commit()  # a stray commit on the shared connection
-        state["stray"] += 1
-        if prefix is None or sql.startswith(prefix):
-            state["seen"] += 1
-            if state["seen"] == nth:
-                raise RuntimeError("injected failure")
+    class _Nth(_FailingCursor):
+        def _check(self, sql):
+            if prefix is None or sql.startswith(prefix):
+                state["seen"] += 1
+                if state["seen"] == nth:
+                    raise RuntimeError("injected failure")
 
-    return before, state
+    real = persistence.write
+
+    async def write(fn, **kwargs):
+        state["units"] += 1
+        return await real(lambda cur: fn(_Nth(cur, None)), **kwargs)
+
+    persistence.write = write
+    return state
 
 
 class TestDemotionAtomic:
@@ -75,32 +78,30 @@ class TestDemotionAtomic:
                                   created_at=OLD)
             for i in range(3)
         ]
-        before, state = fail_nth_write(db, 2, "UPDATE memory SET indexed = 0")
-        hook_execute(await memory._write_conn(), before)
+        state = fail_nth_write(memory._persistence(), 2, "UPDATE memory SET indexed = 0")
 
         with pytest.raises(RuntimeError, match="injected"):
             await run_retention_job(memory, now=NOW)
 
-        assert state["stray"] >= 1  # the write ran on the write connection
+        assert state["units"] >= 1  # the write ran as a unit on the route
         for mid in ids:
             row = await fetch_memory(db, mid)
             assert (row["indexed"], row["embedded"]) == (1, 1)
             assert await vec_row_exists(db, mid)
         await stop(memory, db)
 
-    async def test_success_with_interleaved_commits_is_complete(self, tmp_path):
+    async def test_success_through_the_route_is_complete(self, tmp_path):
         memory, stub, channel, db = await env(tmp_path)
         ids = [
             await seed_memory_row(db, channel.id, f"old {i}", importance=0.3,
                                   created_at=OLD)
             for i in range(3)
         ]
-        before, state = fail_nth_write(db, 10_000)
-        hook_execute(await memory._write_conn(), before)
+        state = fail_nth_write(memory._persistence(), 10_000)
 
         await run_retention_job(memory, now=NOW)
 
-        assert state["stray"] >= 3
+        assert state["units"] >= 1
         for mid in ids:
             assert (await fetch_memory(db, mid))["indexed"] == 0
             assert not await vec_row_exists(db, mid)
@@ -115,13 +116,12 @@ class TestRepromotionAtomic:
                                   indexed=0, embedded=0, created_at=NOW)
             for i in range(3)
         ]
-        before, state = fail_nth_write(db, 2, "UPDATE memory SET indexed = 1")
-        hook_execute(await memory._write_conn(), before)
+        state = fail_nth_write(memory._persistence(), 2, "UPDATE memory SET indexed = 1")
 
         with pytest.raises(RuntimeError, match="injected"):
             await run_retention_job(memory, now=NOW)
 
-        assert state["stray"] >= 1
+        assert state["units"] >= 1
         for mid in ids:
             assert (await fetch_memory(db, mid))["indexed"] == 0
         await stop(memory, db)
@@ -137,27 +137,38 @@ class TestBackfillAtomic:
         ]
         stub.embed_result = [[1.0, 0.0, 0.0, 0.0]] * 3
         before_vec = await count(db, "memory_vec")
-        before, state = fail_nth_write(db, 2, "INSERT INTO memory_vec")
-        hook_execute(await memory._write_conn(), before)
+        state = fail_nth_write(memory._persistence(), 2, "INSERT INTO memory_vec")
 
         await run_retention_job(memory, now=NOW)  # backfill logs its failure
 
-        assert state["stray"] >= 1
+        assert state["units"] >= 1
         assert await count(db, "memory_vec") == before_vec
         for mid in ids:
             assert (await fetch_memory(db, mid))["embedded"] == 0
         await stop(memory, db)
 
-    async def test_embedding_is_computed_outside_the_transaction(self, tmp_path):
+    async def test_embedding_is_computed_outside_the_unit(self, tmp_path):
         memory, stub, channel, db = await env(tmp_path)
         await seed_memory_row(db, channel.id, "fresh", importance=0.9,
                               embedded=0, created_at=NOW)
-        wdb = await memory._write_conn()
+        persistence = memory._persistence()
+        real_write = persistence.write
+        in_unit = {"open": False}
+
+        async def write(fn, **kwargs):
+            # True from the moment a unit is submitted until it returns.
+            in_unit["open"] = True
+            try:
+                return await real_write(fn, **kwargs)
+            finally:
+                in_unit["open"] = False
+
+        persistence.write = write
         seen = []
         real_embed = stub.embed
 
         async def embed(texts, kind=None):
-            seen.append(wdb.in_transaction)  # no write lock held over the await
+            seen.append(in_unit["open"])  # no write lock held over the await
             return await real_embed(texts, kind=kind)
 
         stub.embed = embed
@@ -167,7 +178,7 @@ class TestBackfillAtomic:
         assert seen == [False]
         await stop(memory, db)
 
-    async def test_success_with_interleaved_commits_is_complete(self, tmp_path):
+    async def test_success_through_the_route_is_complete(self, tmp_path):
         memory, stub, channel, db = await env(tmp_path)
         ids = [
             await seed_memory_row(db, channel.id, f"fresh {i}", importance=0.9,
@@ -175,8 +186,7 @@ class TestBackfillAtomic:
             for i in range(2)
         ]
         stub.embed_result = [[1.0, 0.0, 0.0, 0.0]] * 2
-        before, state = fail_nth_write(db, 10_000)
-        hook_execute(await memory._write_conn(), before)
+        fail_nth_write(memory._persistence(), 10_000)
 
         await run_retention_job(memory, now=NOW)
 
@@ -187,40 +197,24 @@ class TestBackfillAtomic:
 
 
 def mutate_before_txn(memory, db, nth, sql, params=()):
-    """Wrap ``memory._write_txn`` so ``sql`` commits on the shared connection
-    just before the nth (1-based) write transaction opens: after the pass's
-    candidate SELECT, before its write, and never inside the txn (which
+    """Wrap ``persistence.write`` so ``sql`` commits on the seeding connection
+    just before the nth (1-based) unit is submitted: after the pass's
+    candidate SELECT, before its write, and never inside the unit (which
     holds the write lock)."""
-    real = memory._write_txn
+    persistence = memory._persistence()
+    real = persistence.write
     state = {"calls": 0, "applied": False}
 
-    def wrapped():
-        # Count transactions; mutate only ahead of the one under test.
+    async def write(fn, **kwargs):
+        # Count units; mutate only ahead of the one under test.
         state["calls"] += 1
         if state["calls"] == nth:
-            return _real_ctx(real, db, sql, params, state)
-        return real()
-
-    memory._write_txn = wrapped
-    return state
-
-
-def _real_ctx(real, db, sql, params, state):
-    """Context manager that mutates, then delegates fully to the real txn."""
-    inner = real()
-
-    class _Ctx:
-        async def __aenter__(self):
-            # Commit the mutation before the write lock is taken.
             await db.execute(sql, params)
-            await db.commit()
             state["applied"] = True
-            return await inner.__aenter__()
+        return await real(fn, **kwargs)
 
-        async def __aexit__(self, *exc):
-            return await inner.__aexit__(*exc)
-
-    return _Ctx()
+    persistence.write = write
+    return state
 
 
 class TestDemotionRechecksSelection:
@@ -318,7 +312,7 @@ class TestBackfillRechecksSelection:
         mid = await seed_memory_row(db, channel.id, "fresh", importance=0.9,
                                     embedded=0, created_at=NOW)
         stub.embed_result = [[1.0, 0.0, 0.0, 0.0]]
-        # No demotion/re-promotion candidates: backfill's txn is the 1st.
+        # No demotion/re-promotion candidates: backfill's unit is the 1st.
         state = mutate_before_txn(memory, db, 1, mutation, (mid,))
 
         with caplog.at_level(logging.INFO):

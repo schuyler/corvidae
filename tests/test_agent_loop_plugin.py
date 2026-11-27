@@ -20,7 +20,7 @@ from corvidae.persistence import PersistencePlugin
 from corvidae.tool import ToolRegistry
 
 from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, drain, sent, sent_texts, stub_llm_config
+from helpers import build_plugin_and_channel, drain, sent, sent_texts, stub_llm_config, open_test_store
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -77,10 +77,9 @@ class TestOnStart:
         pm.ahook.on_agent_response = AsyncMock()
 
         # Register PersistencePlugin with injected in-memory DB
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -168,10 +167,9 @@ class TestOnStart:
         pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -209,10 +207,9 @@ class TestOnStart:
         pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -822,8 +819,7 @@ class TestOnMessageCompactionAndConfig:
     async def test_on_message_per_channel_config(self):
         """Two channels with different configs behave according to their
         resolved config (different registers appended to the agent identity)."""
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
+        db, _reader, _writer = await open_test_store()
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({
@@ -836,7 +832,7 @@ class TestOnMessageCompactionAndConfig:
         pm.ahook.on_agent_response = AsyncMock()
 
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = _reader, _writer
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 

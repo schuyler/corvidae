@@ -14,6 +14,7 @@ import importlib.metadata
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
+from corvidae.session_writer import WriteCursor
 from corvidae.runtime import Runtime, run_daemon
 from corvidae.trace import mint_trace_id
 
@@ -486,19 +488,24 @@ class AcpPlugin(TransportPlugin):
 
     async def index_session(self, session_id: str, cwd: str) -> None:
         """Upsert cwd into acp_session_index (fail-soft if no DB)."""
-        db = self._persistence_db()
-        if db is None:
+        if self._persistence_db() is None:
             return
-        try:
-            await db.execute(_ACP_SESSION_INDEX_DDL)
-            await db.execute(
+        persistence = self.pm.get_plugin("persistence")
+        now = time.time()
+
+        # One unit: the DDL and the upsert.
+        def upsert(cur: WriteCursor) -> None:
+            cur.execute(_ACP_SESSION_INDEX_DDL)
+            cur.execute(
                 "INSERT INTO acp_session_index (session_id, cwd, updated_at) "
                 "VALUES (?, ?, ?) "
                 "ON CONFLICT(session_id) DO UPDATE SET "
                 "cwd = excluded.cwd, updated_at = excluded.updated_at",
-                (session_id, cwd, time.time()),
+                (session_id, cwd, now),
             )
-            await db.commit()
+
+        try:
+            await persistence.write(upsert, owner="acp")
         except Exception:
             logger.warning(
                 "failed to upsert acp_session_index",
@@ -517,7 +524,6 @@ class AcpPlugin(TransportPlugin):
         db = self._persistence_db()
         if db is not None:
             try:
-                await db.execute(_ACP_SESSION_INDEX_DDL)
                 if cwd is None:
                     sql = (
                         "SELECT session_id, cwd, updated_at FROM acp_session_index "
@@ -532,6 +538,11 @@ class AcpPlugin(TransportPlugin):
                     params = (cwd,)
                 async with db.execute(sql, params) as cursor:
                     return list(await cursor.fetchall())
+            except sqlite3.OperationalError as exc:
+                # Nothing has been indexed yet: the table does not exist.
+                if "no such table" in str(exc):
+                    return []
+                logger.warning("failed to read acp_session_index", exc_info=True)
             except Exception:
                 logger.warning("failed to read acp_session_index", exc_info=True)
 

@@ -14,7 +14,7 @@ import aiosqlite
 import pytest
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_held, add_kernel_registry
+from helpers import attach_store, fresh_session_db_path, add_kernel_held, add_kernel_registry
 from helpers import memory_turn
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
@@ -71,7 +71,7 @@ class StubChatEmbedClient(StubEmbedClient):
 
 async def build_stack(db_path):
     """One daemon 'process': persistence + llm stubs + held store + memory."""
-    db = await aiosqlite.connect(db_path)
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
@@ -79,7 +79,7 @@ async def build_stack(db_path):
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()

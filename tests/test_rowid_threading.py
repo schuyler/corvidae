@@ -24,7 +24,7 @@ from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import resolve_single_result
 from corvidae.persistence import PersistencePlugin, init_db
 
-from helpers import build_plugin_and_channel, drain
+from helpers import build_plugin_and_channel, drain, attach_store
 from llm_response_fixtures import _make_text_response
 
 
@@ -68,7 +68,7 @@ class TestRowidAttachment:
     async def test_persistence_returns_rowid(self, db):
         """persist_message returns the inserted message_log rowid."""
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         channel = Channel(transport="test", scope="rowid")
         rowid = await persistence.persist_message(
             channel=channel,
@@ -101,7 +101,7 @@ class TestUnderscoreStrips:
     async def test_persisted_json_contains_no_underscore_keys(self, db):
         """Persistence write paths strip every _-prefixed key."""
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         channel = Channel(transport="test", scope="strip")
 
         message = {
@@ -141,7 +141,7 @@ class TestReloadReattachesIds:
     async def test_resolve_conversation_returns_db_ids(self, db):
         """resolve_conversation re-attaches the id column as _db_id."""
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         channel = Channel(transport="test", scope="reload")
 
         rowids = []
@@ -160,7 +160,7 @@ class TestReloadReattachesIds:
     async def test_resolve_conversation_after_summary_carries_ids(self, db):
         """The post-summary reload path also re-attaches ids."""
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         channel = Channel(transport="test", scope="reload2")
 
         await persistence.persist_message(

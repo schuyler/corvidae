@@ -23,7 +23,7 @@ from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.context import ContextWindow
 from corvidae.persistence import init_db
 from corvidae.channel import resolve_system_prompt
-from helpers import add_kernel_held, stub_llm_config
+from helpers import add_kernel_held, stub_llm_config, attach_store
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +889,7 @@ class TestAgentLogging:
 
         # Register PersistencePlugin with injected in-memory DB
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
@@ -953,7 +953,7 @@ class TestAgentLogging:
         pm.register(registry, name="registry")
 
         persistence = PersistencePlugin(pm)
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 

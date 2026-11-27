@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from helpers import open_test_store
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
@@ -34,9 +35,8 @@ async def _init_acp_with_persistence():
     pm.register(registry, name="registry")
 
     persistence = PersistencePlugin(pm)
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-    persistence.db = db
+    db, _reader, _writer = await open_test_store()
+    persistence.db, persistence.writer = _reader, _writer
     pm.register(persistence, name="persistence")
 
     plugin = AcpPlugin()

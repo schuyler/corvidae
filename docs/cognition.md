@@ -235,23 +235,25 @@ the row):
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
-**Write connection and atomicity (#221).** That section is one SQLite
-transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
-only `MemoryPlugin` writes to, opened in `on_start` once the schema
-exists (lazily on first write when the persistence DB wasn't open yet)
-and closed in `on_stop`. It opens the same file as persistence, in the
-journal mode persistence runs in (WAL by default), with sqlite-vec loaded
-when memory uses vectors and `busy_timeout` set from
-`daemon.sqlite_busy_timeout_ms` (the same key the kernel writers read, so one
-file carries one wait policy; `corvidae#1211`). So no other plugin's
-commit can land mid-section and a rollback cannot discard another
-plugin's pending row; a consolidation's effects are all visible or none
-are. Any failure rolls back, then logs a WARNING naming the channel, the
-trigger and the message-id range, saying the range will be retried;
-the watermark hasn't moved, so the next trigger stores exactly one
-record. A failed rollback and a write blocked past the busy timeout (the
-WARNING names the database path and the timeout) are logged too.
-`write_record` (goal retirement) uses the same transaction, as do retention's
+**Write route and atomicity (#221, #1211).** That section is one write unit
+(`BEGIN IMMEDIATE` ... `COMMIT`) on the kernel's session write route
+(`persistence.write(fn, owner="memory")`; see
+[design.md](design.md#the-session-write-route)). Memory has no connection of its
+own: the route runs one unit at a time on the one writer, so no other plugin's
+commit can land mid-section and a rollback cannot discard another plugin's
+pending row; a consolidation's effects are all visible or none are. The model
+and embedding calls happen before the unit, never inside it, and each unit has
+the default 5 s deadline (the schema unit takes the 30 s maximum). A unit that
+overruns is rolled back and the kernel logs an ERROR naming `memory`. Any
+failure rolls back and memory logs a WARNING saying the range is retried on the
+next trigger;
+the watermark hasn't moved, so the next trigger stores exactly one record.
+
+sqlite-vec loads on two connections: memory loads it on the reader itself and on
+the writer with `persistence.load_extension(..., owner="memory")`. If the
+writer's load fails, memory logs a WARNING naming the writer and runs FTS5-only
+until restart, rather than letting `memory_vec` inserts fail inside units.
+`write_record` (goal retirement) uses the same route, as do retention's
 passes (demotion, re-promotion, retrieval-log pruning when
 `memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
 a pruning failure is logged and leaves backfill to run): each batch commits whole
@@ -275,9 +277,7 @@ by hand with `DELETE FROM memory_vec WHERE memory_id = ?` in a sqlite3 that has
 sqlite-vec loaded (`memory_vec` is a vec0 virtual table). The log
 lines count the rows actually written. `_db_lock`
 stays, serializing memory's own writers (consolidation versus goals);
-it no longer carries cross-plugin atomicity. A persistence DB with no
-file (in-memory, tests only) can't be opened twice, so memory's writes
-share the persistence connection there, with a one-time WARNING. The row's `created_at` is the
+it no longer carries cross-plugin atomicity. The row's `created_at` is the
 `message_log.timestamp` of the last row in the source range, i.e. when
 the conversation happened, not when consolidation ran, so history
 consolidated long after the fact is aged correctly by retrieval and
@@ -994,8 +994,8 @@ created only when the extension loads), `retrieval_log`,
 (one-row table persisting `last_run` for the retention job interval), and
 `message_fts` (regular FTS5 table, trigram tokenizer, over `message_log` content, maintained by
 `message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
-redact` — not by `search_memory`, which queries `memory_fts` and `memory_vec`). All on the persistence connection in
-`sessions.db`; `message_log` stays append-only except for the
+redact` — not by `search_memory`, which queries `memory_fts` and `memory_vec`). All in
+`sessions.db`, written through the write route; `message_log` stays append-only except for the
 operator-only redaction tombstone.
 
 The epistemic-calibration prompt fragment (`prompts/memory_calibration.md`)
@@ -1055,6 +1055,19 @@ the recall sources (through `before_compose`), critique's findings and any plugi
 `ponder` tool. The held store is in memory by design: text still held at
 shutdown is dropped, with a WARNING. The reference below has the details.
 
+### Upgrade note: fork history location (#1211)
+
+`fork_log` (the content record of every fork, #1204) now writes through the
+session write route, so its tables live in the same `sessions.db` persistence
+opens, resolved against `_base_dir`. It used to open its own connection on the bare `daemon.session_db` value, not
+joined to `_base_dir`. A daemon that was started with a
+working directory other than the directory holding `agent.yaml` therefore wrote
+its fork history to a file relative to that working directory. That file is left
+where it is and is not migrated; the history in it is not read, and new forks
+land in `sessions.db`.
+`ForkLog` and `ForkRecorder` take a callable that returns the persistence
+plugin instead of a path, and `CritiquePlugin` now depends on `persistence`.
+
 ## Plugin reference
 
 ### MemoryPlugin (`packages/corvidae-cognition/corvidae_cognition/memory.py`)
@@ -1066,7 +1079,7 @@ prompt as a `before_compose` contribution that the held-text store frames and ap
 
 Implements seven hooks and two kernel timers:
 
-- `on_start` — creates the memory schema on the persistence connection
+- `on_start` — creates the memory schema through the write route
   (retried lazily on first use; on_start ordering is LIFO across plugins),
   runs the retention check, then registers the two clock-driven pieces
   below.
@@ -1779,8 +1792,8 @@ the seed CLI running beside the daemon cannot tie two positions. The lock is
 shared by every goal, and a retirement holds it across the record's embedding
 call; retirements are rare, so a per-goal lock is the upgrade if they stop
 being. `set_goal_status` writes without the memory plugin's `_db_lock`, unlike
-the other goal tools; that is harmless while the memory plugin has its own
-write connection, and matters only if it falls back to the shared one.
+the other goal tools; that is harmless because each write is its own unit on the route, which runs
+one at a time.
 
 **Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
 and updates the goal only once that succeeds, so no goal is retired without

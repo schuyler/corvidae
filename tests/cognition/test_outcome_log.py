@@ -190,12 +190,14 @@ class TestUnregisteredChannel:
 
 
 class TestNowhereToWrite:
-    async def test_in_memory_db_writes_nothing_and_warns_once(self, db, tmp_path, monkeypatch, caplog):
-        # An in-memory session DB has no file to sit beside: nothing is
-        # written (not even into the working directory) and the operator is
-        # told once, naming the config key.
+    async def test_in_memory_db_writes_nothing_and_warns_once(self, tmp_path, monkeypatch, caplog):
+        # A session DB handle with no file to sit beside (the write route
+        # refuses ``:memory:``, but outcome_log only reads the handle's
+        # path): nothing is written (not even into the working directory)
+        # and the operator is told once, naming the config key.
         monkeypatch.chdir(tmp_path)
-        plugin = await _setup(db)
+        memory_db = await aiosqlite.connect(":memory:")
+        plugin = await _setup(memory_db)
         with caplog.at_level(logging.WARNING, logger="corvidae.outcome_log"):
             await _fire(plugin.pm, trace_id="t1")
             await _fire(plugin.pm, trace_id="t2")
@@ -203,6 +205,7 @@ class TestNowhereToWrite:
         assert len(warnings) == 1, [r.getMessage() for r in warnings]
         assert "daemon.session_db" in warnings[0].getMessage()
         assert list(tmp_path.iterdir()) == []
+        await memory_db.close()
 
     async def test_write_failure_warns_naming_path_trace_and_remedy(self, file_db, caplog):
         # A failed append is logged with the file, the trace and what to

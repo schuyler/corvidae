@@ -104,8 +104,6 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
     db_path = str(tmp_path / "sessions.db")
     plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
-    # The memory plugin's dedicated writer needs the daemon's WAL mode.
-    await db.execute("PRAGMA journal_mode=wal")
     pm = plugin.pm
     # memory's on_start resolves the kernel clock and idle tracker (#1180).
     install_kernel_clock(pm)

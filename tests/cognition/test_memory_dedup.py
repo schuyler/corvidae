@@ -24,7 +24,7 @@ import aiosqlite
 import pytest
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_registry
+from helpers import attach_store, fresh_session_db_path, add_kernel_registry
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
@@ -134,7 +134,7 @@ _DISTINCT_SUMMARY_B = (
 
 async def build_dedup_env(config=None):
     config = with_chat_llm(config or EMBED_CONFIG_DEDUP)
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
@@ -142,7 +142,7 @@ async def build_dedup_env(config=None):
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()

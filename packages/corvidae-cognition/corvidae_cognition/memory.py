@@ -83,11 +83,9 @@ import hashlib
 import json
 import logging
 import math
-import sqlite3
 import time
 from bisect import bisect_left, bisect_right
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -101,7 +99,6 @@ from corvidae.attribution import (
     reset_attribution,
     set_attribution,
 )
-from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS, busy_timeout_ms_from_config
 from corvidae.prompts import resolve_prompt
 from corvidae.context import (
     ContextWindow,
@@ -132,18 +129,20 @@ from corvidae.llm_plugin import parse_llm_config
 from corvidae_cognition.config_keys import read_count
 from corvidae_cognition.fts import (
     TOKENIZE_CLAUSE,
-    create_fts_table,
+    create_fts_table_sync,
     keyword_query,
     keyword_where,
 )
 from corvidae.persistence import (
-    add_column_if_missing,
+    PersistencePlugin,
+    add_column_if_missing_sync,
     decode_message_row,
     decodable_summaries,
     parse_message_type,
     view_rows,
 )
 
+from corvidae.session_writer import MAX_WRITE_DEADLINE_S, WriteCursor
 from corvidae.channel import ChannelRegistry
 from corvidae.clock import Clock
 from corvidae.idle import IdleTracker
@@ -302,12 +301,9 @@ class RetrievalPool:
     banding_path: str = ""
 
 
-# How long the dedicated memory write connection waits for SQLite's write lock
-# before failing the write (the range is then retried) is not a module constant:
-# it is ``daemon.sqlite_busy_timeout_ms``, resolved in on_init, because this
-# connection is opened on the persistence file and two waits on one file is the
-# split that made corvidae#1211 hard to read. A plugin built without on_init
-# falls back to DEFAULT_BUSY_TIMEOUT_MS, the same number the kernel writers get.
+# Rows per message_fts backfill unit: small enough that one unit stays well
+# inside the write deadline, large enough that a big table is a few dozen units.
+MESSAGE_FTS_BACKFILL_CHUNK = 300
 
 # JSON schema for the consolidation reply (#199, #635). Mirrors what
 # _consolidation_from_text reads: ``entries`` (each needing a narrative) and
@@ -1869,27 +1865,6 @@ def memory_section(memories: list[dict], *, full: bool) -> str | None:
     return f"{MEMORY_HEADER}\n" + "\n".join(lines)
 
 
-def _is_busy_give_up(exc: BaseException) -> bool:
-    """True when ``exc`` is SQLite saying it waited for the write lock and gave up.
-
-    ``sqlite_errorname`` is the precise test: SQLITE_BUSY and its extended
-    SQLITE_BUSY_TIMEOUT both mean a wait ran out, while SQLITE_LOCKED is a table
-    or schema lock that spent no wait at all. Measured on sqlite 3.50.4 with a
-    WAL writer held by an open ``BEGIN IMMEDIATE``: the give-up lands 0.30 s into
-    ``busy_timeout=300`` as SQLITE_BUSY (code 5), message "database is locked".
-    The message check is a floor for a build without the PEP 249 extensions —
-    measured here too, a hand-built ``sqlite3.OperationalError`` carries no
-    ``sqlite_errorname`` at all — and it stays exact rather than a substring
-    match, because a loose one is the bug this replaces.
-    """
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    name = getattr(exc, "sqlite_errorname", "") or ""
-    if name:
-        return name in ("SQLITE_BUSY", "SQLITE_BUSY_TIMEOUT")
-    return str(exc).lower() == "database is locked"
-
-
 class MemoryPlugin(CorvidaePlugin):
     """Plugin that owns the memory store schema (consolidation and retrieval
     are layered on in later work packages of Phase 1a).
@@ -1925,23 +1900,6 @@ class MemoryPlugin(CorvidaePlugin):
         # Set first thing in on_stop: after it, nothing new may be spawned (#663).
         self._stopping = False
         self._schema_ready = False
-        # on_init replaces this with the resolved config key; the fallback keeps
-        # a hand-built plugin bounded on the shared file (corvidae#1211).
-        self._busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
-        # The wait in force on the connection a memory write actually ran on.
-        # Equal to the resolved value for the dedicated connection; read back off
-        # the persistence connection in the no-file fallback, where memory does
-        # not get to choose. _log_busy_give_up names this one, so a WARNING can
-        # never report a timeout that was not in effect.
-        self._write_busy_ms: int = DEFAULT_BUSY_TIMEOUT_MS
-        # Dedicated write connection (#221): opened in on_start once the
-        # schema exists (or lazily on first write), closed in on_stop.
-        # Only MemoryPlugin writes to it, so its transactions are atomic by
-        # construction.
-        self._write_db: aiosqlite.Connection | None = None
-        # True only when memory opened _write_db itself (not the shared fallback).
-        self._owns_write_db = False
-        self._write_path: str = "<unknown>"
         self._vec_available = False
         self._encoder_mismatch = False
         self._embedding_cfg: dict | None = None
@@ -2005,8 +1963,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_pending: bool = False
         # Serializes MemoryPlugin's own writers (consolidation versus goal
         # retirement) so the watermark compare-and-set is race-free within
-        # the process. It no longer carries cross-plugin atomicity: that is
-        # the write connection's BEGIN IMMEDIATE transaction (#221).
+        # the process. It does not carry cross-plugin atomicity: that is the
+        # write route's BEGIN IMMEDIATE transaction around each unit (#1211).
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior: the consolidation reply's own rating,
         # else the rubric (§3.1).
@@ -2030,11 +1988,11 @@ class MemoryPlugin(CorvidaePlugin):
         """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
-        self._busy_timeout_ms = busy_timeout_ms_from_config(config)
+        # The recorder writes through the persistence plugin's write route;
+        # resolved lazily because persistence starts after this on_init.
         self._fork_log = ForkRecorder(
-            config.get("daemon", {}).get("session_db", "sessions.db"),
+            self._persistence,
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
-            busy_timeout_ms=self._busy_timeout_ms,
         )
         # Beat's memory count; heartbeat.memory_limit is the retired spelling.
         self._heartbeat_limit = read_count(
@@ -2190,8 +2148,6 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             db = await self._ensure_schema()
             if db is not None:
-                # Schema exists: open the dedicated write connection.
-                await self._write_conn()
                 self._spawn(self._backfill_message_fts())
                 # Run synchronously so it completes before on_start returns,
                 # preventing races with tests/callers that call run_retention_job
@@ -2238,28 +2194,13 @@ class MemoryPlugin(CorvidaePlugin):
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._tasks.clear()
-        # Close the fork-log connection: ForkLog opens it lazily on the first
-        # record, so any consolidation this process ran leaves an aiosqlite
-        # worker thread that keeps the interpreter alive after the daemon is
-        # asked to exit (the same hazard _write_db below is closed for).
+        # Let the fork recorder release anything it holds (ForkLog.close).
         log = getattr(self, "_fork_log", None)
         if log is not None:
             try:
                 await log.close()
             except Exception:
-                logger.warning("memory fork-log connection failed to close cleanly", exc_info=True)
-        # No task is writing any more: close the dedicated write connection.
-        if self._write_db is not None:
-            write_db, self._write_db = self._write_db, None
-            try:
-                # The in-memory fallback is the persistence connection: not ours.
-                if self._owns_write_db:
-                    await write_db.close()
-            except Exception:
-                logger.warning(
-                    "memory write connection failed to close cleanly",
-                    exc_info=True,
-                )
+                logger.warning("memory fork-log failed to close cleanly", exc_info=True)
 
     # ------------------------------------------------------------------
     # Consolidation triggers (bootstrap-mapping §3.1)
@@ -2665,6 +2606,11 @@ class MemoryPlugin(CorvidaePlugin):
                 rows = await cursor.fetchall()
             if not rows:
                 return
+            # Decode on the loop (pure computation, no DB), then insert in
+            # chunked units so no single unit nears the write deadline on a
+            # large table. A crash between chunks leaves a prefix indexed;
+            # the NOT IN query above picks up the rest on the next run.
+            indexed: list[tuple[int, str]] = []
             for row_id, msg_json, row_channel in rows:
                 # A corrupt row is indexed as empty text (with a warning) so
                 # it is not retried on every start and the rest still index.
@@ -2674,11 +2620,21 @@ class MemoryPlugin(CorvidaePlugin):
                                 "backfill continues",
                 )
                 content = (msg.get("content") if msg is not None else "") or ""
-                await db.execute(
-                    "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
-                    (row_id, content if isinstance(content, str) else ""),
-                )
-            await db.commit()
+                indexed.append((row_id, content if isinstance(content, str) else ""))
+            persistence = self._persistence()
+            for start in range(0, len(indexed), MESSAGE_FTS_BACKFILL_CHUNK):
+                chunk = indexed[start:start + MESSAGE_FTS_BACKFILL_CHUNK]
+
+                def insert_chunk(cur: WriteCursor, chunk=chunk) -> None:
+                    # One chunk lands whole or not at all.
+                    for row_id, text in chunk:
+                        cur.execute(
+                            "INSERT INTO message_fts(rowid, content_text) "
+                            "VALUES (?, ?)",
+                            (row_id, text),
+                        )
+
+                await persistence.write(insert_chunk, owner="memory")
             logger.info("message_fts: backfilled %d rows", len(rows))
         except Exception:
             logger.warning("message_fts backfill failed", exc_info=True)
@@ -2714,15 +2670,15 @@ class MemoryPlugin(CorvidaePlugin):
                 return
 
             # Update last_run before running (prevents double-run on crash restart)
-            if row is None:
-                await db.execute(
-                    "INSERT INTO retention_meta (last_run) VALUES (?)", (now,)
-                )
-            else:
-                await db.execute(
-                    "UPDATE retention_meta SET last_run = ?", (now,)
-                )
-            await db.commit()
+            def stamp_last_run(cur: WriteCursor) -> None:
+                if row is None:
+                    cur.execute(
+                        "INSERT INTO retention_meta (last_run) VALUES (?)", (now,)
+                    )
+                else:
+                    cur.execute("UPDATE retention_meta SET last_run = ?", (now,))
+
+            await self._persistence().write(stamp_last_run, owner="memory")
 
             from corvidae_cognition.retention import run_retention_job
             await run_retention_job(self, now=now)
@@ -3024,12 +2980,16 @@ class MemoryPlugin(CorvidaePlugin):
         if record is None:
             # Pure CONTEXT/system segments advance the watermark
             # without producing a record.
-            async with self._db_lock, self._write_txn() as wdb:
-                current = await self._get_watermark(wdb, channel_id)
-                if current != expected_wm:
+            def advance(cur: WriteCursor) -> bool:
+                # Compare-and-set inside the unit: nothing else moves the
+                # watermark between the read and the write.
+                if self._get_watermark_sync(cur, channel_id) != expected_wm:
                     return False
-                await self._set_watermark(wdb, channel_id, new_wm)
-            return True
+                self._set_watermark(cur, channel_id, new_wm)
+                return True
+
+            async with self._db_lock:
+                return await self._persistence().write(advance, owner="memory")
 
         # The importance prior is offered the consolidated message-id range
         # and the channel (the real one when the registry has it, else a stub
@@ -3079,13 +3039,14 @@ class MemoryPlugin(CorvidaePlugin):
                 for v in embeddings
             ]
 
-        # Atomic commit section: insert, vec row, near-dup merge and
-        # watermark advance are one transaction on the write connection,
-        # so they land together or not at all (#221). The lock keeps
-        # memory's own writers (goal retirement) out meanwhile.
-        async with self._db_lock, self._write_txn() as wdb:
-            current = await self._get_watermark(wdb, channel_id)
-            if current != expected_wm:
+        # Every consolidation record passes through here, so this is where
+        # the stamp learns its trigger; catch-up keeps the one that fell
+        # through to it (#633).
+        stamp = dataclasses.replace(record.stamp, trigger=trigger)
+
+        def commit_unit(cur: WriteCursor) -> tuple[list[int], list[tuple[int, int]]] | None:
+            """Watermark check, inserts and watermark advance as one unit."""
+            if self._get_watermark_sync(cur, channel_id) != expected_wm:
                 # Design (OPT-1a-2): a concurrent consolidation task won
                 # the compare-and-set and advanced the watermark.  Discarding
                 # here is intentional — attempting to consolidate the
@@ -3094,25 +3055,17 @@ class MemoryPlugin(CorvidaePlugin):
                 # winner's range_end remain unconsolidated, but the next
                 # trigger (turn, idle or compaction) sees the updated
                 # watermark and picks them up.
-                logger.debug(
-                    "watermark moved during consolidation; discarding",
-                    extra={"channel_id": channel_id},
-                )
-                return False
-            # Every consolidation record passes through here, so this is
-            # where the stamp learns its trigger; catch-up keeps the one
-            # that fell through to it (#633).
-            stamp = dataclasses.replace(record.stamp, trigger=trigger)
-            memory_ids: list[int] = []
+                return None
+            ids: list[int] = []
             # (memory_id, tokens) of entries over the size target, logged
-            # once the transaction has committed.
-            overruns: list[tuple[int, int]] = []
+            # once the unit has committed.
+            over: list[tuple[int, int]] = []
             for entry, embedding in zip(record.entries, embeddings):
                 # Siblings never merge into each other: their ids are
                 # excluded from the near-dup check (by id, since a sibling
                 # that merged with an older record has a widened range).
-                memory_ids.append(await self._insert_record(
-                    wdb,
+                ids.append(self._insert_record(
+                    cur,
                     channel_id=channel_id,
                     summary=entry.narrative,
                     created_at=created_at,
@@ -3123,15 +3076,30 @@ class MemoryPlugin(CorvidaePlugin):
                     msg_id_end=rows[-1][0],
                     embedding=embedding,
                     stamp=stamp,
-                    exclude_ids=frozenset(memory_ids),
+                    exclude_ids=frozenset(ids),
                 ))
                 # An instruction-written entry past the target is stored
                 # in full; remember it so a warning follows the commit.
                 if stamp.mode in ("fork", "standalone"):
                     tokens = count_tokens(entry.narrative)
                     if tokens > self._entry_target_tokens:
-                        overruns.append((memory_ids[-1], tokens))
-            await self._set_watermark(wdb, channel_id, new_wm)
+                        over.append((ids[-1], tokens))
+            self._set_watermark(cur, channel_id, new_wm)
+            return ids, over
+
+        # Atomic commit section: insert, vec row, near-dup merge and
+        # watermark advance are one unit on the write route, so they land
+        # together or not at all (#221). The lock keeps memory's own
+        # writers (goal retirement) out meanwhile.
+        async with self._db_lock:
+            committed = await self._persistence().write(commit_unit, owner="memory")
+        if committed is None:
+            logger.debug(
+                "watermark moved during consolidation; discarding",
+                extra={"channel_id": channel_id},
+            )
+            return False
+        memory_ids, overruns = committed
         # Committed: one warning per overrunning entry (#686).
         for memory_id, tokens in overruns:
             logger.warning(
@@ -3199,29 +3167,28 @@ class MemoryPlugin(CorvidaePlugin):
             + await self._embed_in_chunks(client, texts[mid:], where)
         )
 
-    async def _insert_record(
-        self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
+    def _insert_record(
+        self, cur: WriteCursor, *, channel_id: str, summary: str,
         created_at: float, importance: float,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
         stamp: RecordStamp, exclude_ids: frozenset[int] = frozenset(),
     ) -> int:
-        """Insert + vec row + near-dup merge on ``db``, the write connection.
+        """Insert + vec row + near-dup merge on ``cur``, inside a write unit.
 
         ``exclude_ids`` are records the near-dup check must skip (the
         siblings this consolidation already inserted).
 
-        The caller holds ``_db_lock`` inside ``_write_txn`` and so owns the
-        commit or rollback. ``stamp`` says how the record was made; its
+        The caller's unit owns the commit or rollback. ``stamp`` says how the record was made; its
         instruction text is stored once in ``memory_prompt``.
         """
         # The instruction text, once per hash (an empty prompt still counts).
         if stamp.prompt is not None:
-            await db.execute(
+            cur.execute(
                 "INSERT OR IGNORE INTO memory_prompt (hash, text) VALUES (?, ?)",
                 (stamp.hash, stamp.prompt),
             )
-        cursor = await db.execute(
+        result = cur.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, topic_tags, participants, "
             "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model, trigger) "
@@ -3242,7 +3209,7 @@ class MemoryPlugin(CorvidaePlugin):
                 stamp.trigger,
             ),
         )
-        memory_id = cursor.lastrowid
+        memory_id = result.lastrowid
 
         # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
         # so the new record is naturally excluded from the results.
@@ -3260,7 +3227,7 @@ class MemoryPlugin(CorvidaePlugin):
         ):
             try:
                 import sqlite_vec as _sv
-                async with db.execute(
+                dup_result = cur.execute(
                     "SELECT v.memory_id, (1.0 - v.distance) as similarity, "
                     "m.channel_id "
                     "FROM (SELECT memory_id, distance FROM memory_vec "
@@ -3272,11 +3239,8 @@ class MemoryPlugin(CorvidaePlugin):
                         _sv.serialize_float32(embedding),
                         VEC_OVERFETCH * 2 + len(exclude_ids),
                     ),
-                ) as dup_cursor:
-                    dup_rows = [
-                        r for r in await dup_cursor.fetchall()
-                        if r[0] not in exclude_ids
-                    ]
+                )
+                dup_rows = [r for r in dup_result.rows if r[0] not in exclude_ids]
                 # Rows are nearest first: the nearest non-sibling merges if
                 # it is over the threshold, and none farther can be.
                 if dup_rows and dup_rows[0][1] >= self._dup_threshold:
@@ -3290,20 +3254,20 @@ class MemoryPlugin(CorvidaePlugin):
 
         if embedding is not None and self._vec_available:
             import sqlite_vec
-            await db.execute(
+            cur.execute(
                 "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                 (memory_id, sqlite_vec.serialize_float32(embedding)),
             )
 
         # If a near-dup was found, fold the old record into the new one.
         if dup_old_id is not None:
-            async with db.execute(
+            old_rows = cur.execute(
                 "SELECT retrieval_count, last_retrieved_at, importance, "
                 "msg_id_start, msg_id_end, created_at, merged_foreign "
                 "FROM memory WHERE id = ?",
                 (dup_old_id,),
-            ) as old_cursor:
-                old_row = await old_cursor.fetchone()
+            ).rows
+            old_row = old_rows[0] if old_rows else None
             if old_row is not None:
                 (old_rc, old_lra, old_importance,
                  old_start, old_end, old_created, old_foreign) = old_row
@@ -3327,7 +3291,7 @@ class MemoryPlugin(CorvidaePlugin):
                 # from the later one. Imported history has newer ids
                 # but older timestamps, so this is not new_end's date.
                 new_created = max(created_at, old_created)
-                await db.execute(
+                cur.execute(
                     "UPDATE memory SET "
                     "retrieval_count = retrieval_count + ?, "
                     "importance = ?, "
@@ -3344,13 +3308,13 @@ class MemoryPlugin(CorvidaePlugin):
                      new_start, new_end, new_created, merged_foreign, memory_id),
                 )
                 # Supersede the old record
-                await db.execute(
+                cur.execute(
                     "UPDATE memory SET superseded_by = ?, indexed = 0, embedded = 0 "
                     "WHERE id = ?",
                     (memory_id, dup_old_id),
                 )
                 if self._vec_available:
-                    await db.execute(
+                    cur.execute(
                         "DELETE FROM memory_vec WHERE memory_id = ?",
                         (dup_old_id,),
                     )
@@ -3365,9 +3329,9 @@ class MemoryPlugin(CorvidaePlugin):
         self, *, channel_id: str, summary: str, created_at: float,
         importance: float, msg_id_start: int, msg_id_end: int,
     ) -> int:
-        """Embed (fail soft to embedded=0), then _insert_record as one
-        transaction on the write connection under _db_lock. Raises (leaving
-        no row) if the DB isn't open or on DB failure; returns memory.id."""
+        """Embed (fail soft to embedded=0), then _insert_record as one unit
+        on the write route under _db_lock. Raises (leaving no row) if the DB
+        isn't open or on DB failure; returns memory.id."""
         if await self._ensure_schema() is None:
             raise RuntimeError("memory database is not open")
         # Embed the summary; failure stores embedded=0 for later backfill.
@@ -3383,15 +3347,17 @@ class MemoryPlugin(CorvidaePlugin):
                 )
             if embedding is not None:
                 embedding = self._check_embedding_width(embedding)
-        async with self._db_lock, self._write_txn() as wdb:
-            memory_id = await self._insert_record(
-                wdb, channel_id=channel_id, summary=summary,
+        def insert(cur: WriteCursor) -> int:
+            return self._insert_record(
+                cur, channel_id=channel_id, summary=summary,
                 created_at=created_at, importance=importance,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
                 embedding=embedding, stamp=DIRECT_STAMP,
             )
-        return memory_id
+
+        async with self._db_lock:
+            return await self._persistence().write(insert, owner="memory")
 
     def _skip_consolidation(
         self, channel_id: str, rows: list[tuple], watermark: int, reason: str,
@@ -3747,85 +3713,87 @@ class MemoryPlugin(CorvidaePlugin):
             duplicate = set(duplicate_keys)
             admitted_ids = [c["id"] for c, key in zip(selected, keys) if key in admitted]
 
-            # Access stats move only for memories that actually entered the window.
-            if admitted_ids:
-                now = time.time()
-                placeholders = ",".join("?" for _ in admitted_ids)
-                await db.execute(
-                    f"UPDATE memory SET retrieval_count = retrieval_count + 1, "
-                    f"last_retrieved_at = ? WHERE id IN ({placeholders})",
-                    (now, *admitted_ids),
-                )
+            def record_retrieval(cur: WriteCursor) -> None:
+                """Access stats, retrieval_log and candidate rows as one unit."""
+                # Access stats move only for memories that actually entered the window.
+                if admitted_ids:
+                    now = time.time()
+                    placeholders = ",".join("?" for _ in admitted_ids)
+                    cur.execute(
+                        f"UPDATE memory SET retrieval_count = retrieval_count + 1, "
+                        f"last_retrieved_at = ? WHERE id IN ({placeholders})",
+                        (now, *admitted_ids),
+                    )
 
-            # Persist the retrieval profile (§3.7's day-one raw stream).
-            log_cursor = await db.execute(
-                "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
-                "top_similarity, hit_count, admitted_count, degraded_to_fts, "
-                "excluded_in_window, banding_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    time.time(),
-                    channel.id,
-                    trace_id,
-                    stash.top_score,
-                    stash.top_similarity,
-                    stash.hit_count,
-                    len(admitted_ids),
-                    1 if pool.degraded else 0,
-                    pool.excluded_in_window,
-                    pool.banding_path,
-                ),
-            )
-            retrieval_id = log_cursor.lastrowid
+                # Persist the retrieval profile (§3.7's day-one raw stream).
+                retrieval_id = cur.execute(
+                    "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
+                    "top_similarity, hit_count, admitted_count, degraded_to_fts, "
+                    "excluded_in_window, banding_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        time.time(),
+                        channel.id,
+                        trace_id,
+                        stash.top_score,
+                        stash.top_similarity,
+                        stash.hit_count,
+                        len(admitted_ids),
+                        1 if pool.degraded else 0,
+                        pool.excluded_in_window,
+                        pool.banding_path,
+                    ),
+                ).lastrowid
 
-            # Log every pool candidate with its outcome (#407). A failure
-            # here must not lose the retrieval_log row or the exchange
-            # profile, so it is caught and warned about on its own.
-            try:
-                rows = []
-                key_of = {c["id"]: key for c, key in zip(selected, keys)}
-                for i, c in enumerate(pool.ranked):
-                    if i >= pool.k:
-                        outcome = "cut"
-                    elif c["id"] not in key_of:
-                        outcome = "dropped_weak"
-                    elif key_of[c["id"]] in admitted:
-                        outcome = "admitted"
-                    elif key_of[c["id"]] in duplicate:
-                        outcome = "dropped_dup"
-                    else:
-                        outcome = "dropped_budget"
-                    rows.append((retrieval_id, c["id"], c["similarity"],
-                                 c["score"], c["band"], i + 1, outcome,
-                                 c["source"], c["z"],
-                                 c.get("vec_rank"), c.get("fts_rank")))
-                # Excluded in-window records carry their would-be rank.
-                for would_be_rank, c in pool.excluded:
-                    rows.append((retrieval_id, c["id"], c["similarity"],
-                                 c["score"], c["band"], would_be_rank,
-                                 "excluded_in_window", c["source"], c["z"],
-                                 c.get("vec_rank"), c.get("fts_rank")))
-                # A memory the redact CLI flagged after it was scored gets no
-                # row (#654): the flag check is part of the insert itself, so
-                # either the flag is visible here or the scrubber, which runs
-                # after the flag commits, deletes the row.
-                await db.executemany(
-                    "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
-                    "similarity, score, band, rank, outcome, source, z, "
-                    "vec_rank, fts_rank) "
-                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
-                    "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
-                    [(*row, row[1]) for row in rows],
-                )
-            except Exception:
-                logger.warning(
-                    "retrieval candidate log failed for channel %s "
-                    "(retrieval_log id %s); some or all of this retrieval's "
-                    "candidate rows are missing, the retrieval and its "
-                    "profile are logged",
-                    channel.id, retrieval_id,
-                    exc_info=True, extra={"channel_id": channel.id},
-                )
-            await db.commit()
+                # Log every pool candidate with its outcome (#407). A failure
+                # here must not lose the retrieval_log row or the exchange
+                # profile, so it is caught and warned about on its own.
+                try:
+                    rows = []
+                    key_of = {c["id"]: key for c, key in zip(selected, keys)}
+                    for i, c in enumerate(pool.ranked):
+                        if i >= pool.k:
+                            outcome = "cut"
+                        elif c["id"] not in key_of:
+                            outcome = "dropped_weak"
+                        elif key_of[c["id"]] in admitted:
+                            outcome = "admitted"
+                        elif key_of[c["id"]] in duplicate:
+                            outcome = "dropped_dup"
+                        else:
+                            outcome = "dropped_budget"
+                        rows.append((retrieval_id, c["id"], c["similarity"],
+                                     c["score"], c["band"], i + 1, outcome,
+                                     c["source"], c["z"],
+                                     c.get("vec_rank"), c.get("fts_rank")))
+                    # Excluded in-window records carry their would-be rank.
+                    for would_be_rank, c in pool.excluded:
+                        rows.append((retrieval_id, c["id"], c["similarity"],
+                                     c["score"], c["band"], would_be_rank,
+                                     "excluded_in_window", c["source"], c["z"],
+                                     c.get("vec_rank"), c.get("fts_rank")))
+                    # A memory the redact CLI flagged after it was scored gets no
+                    # row (#654): the flag check is part of the insert itself, so
+                    # either the flag is visible here or the scrubber, which runs
+                    # after the flag commits, deletes the row.
+                    cur.executemany(
+                        "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
+                        "similarity, score, band, rank, outcome, source, z, "
+                        "vec_rank, fts_rank) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                        "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
+                        [(*row, row[1]) for row in rows],
+                    )
+                except Exception:
+                    logger.warning(
+                        "retrieval candidate log failed for channel %s "
+                        "(retrieval_log id %s); some or all of this retrieval's "
+                        "candidate rows are missing, the retrieval and its "
+                        "profile are logged",
+                        channel.id, retrieval_id,
+                        exc_info=True, extra={"channel_id": channel.id},
+                    )
+
+            await self._persistence().write(record_retrieval, owner="memory")
 
             # Report the retrieval profile on the trace; observe dispatch
             # logs a listener's failure, naming the hook and the plugin.
@@ -4487,11 +4455,19 @@ class MemoryPlugin(CorvidaePlugin):
             row = await cursor.fetchone()
         return row[0] if row else 0
 
-    async def _set_watermark(
-        self, db: aiosqlite.Connection, channel_id: str, message_id: int
+    def _get_watermark_sync(self, cur: WriteCursor, channel_id: str) -> int:
+        """The watermark read inside a write unit (0 when none)."""
+        rows = cur.execute(
+            "SELECT last_message_id FROM consolidation_watermark WHERE channel_id = ?",
+            (channel_id,),
+        ).rows
+        return rows[0][0] if rows else 0
+
+    def _set_watermark(
+        self, cur: WriteCursor, channel_id: str, message_id: int
     ) -> None:
-        """Advance the per-channel watermark (caller commits)."""
-        await db.execute(
+        """Advance the per-channel watermark (the unit commits)."""
+        cur.execute(
             "INSERT INTO consolidation_watermark (channel_id, last_message_id) "
             "VALUES (?, ?) ON CONFLICT(channel_id) "
             "DO UPDATE SET last_message_id = excluded.last_message_id",
@@ -4511,163 +4487,13 @@ class MemoryPlugin(CorvidaePlugin):
         """True when an embedding profile is configured and encoders match."""
         return self._embedding_cfg is not None and not self._encoder_mismatch
 
-    async def _open_write_db(self, shared: aiosqlite.Connection) -> aiosqlite.Connection:
-        """Open the dedicated write connection on the persistence database file.
-
-        Set up like the persistence connection: same file, the journal mode
-        the persistence connection runs in (WAL by default), a bounded
-        busy_timeout, and sqlite-vec when memory uses vectors. Autocommit
-        (isolation_level=None) so transactions are exactly the explicit
-        BEGIN IMMEDIATE .. COMMIT of ``_write_txn``. Returns ``shared`` itself
-        for a database with no file (in-memory), which a second connection
-        cannot open; that connection's wait is the persistence plugin's, so it is
-        read back here rather than assumed.
-        """
-        async with shared.execute("PRAGMA database_list") as cursor:
-            files = [row[2] for row in await cursor.fetchall() if row[1] == "main"]
-        path = files[0] if files else ""
-        if not path:
-            # shortcut: an in-memory persistence DB (tests) keeps memory writes
-            # on the shared connection with no cross-plugin atomicity; a
-            # daemon always has a file, so upgrade only if one ever doesn't.
-            logger.warning(
-                "memory: persistence database has no file; memory writes "
-                "share the persistence connection (not atomic against "
-                "other plugins' commits)"
-            )
-            async with shared.execute("PRAGMA busy_timeout") as cursor:
-                row = await cursor.fetchone()
-            # This connection's wait is the kernel's, not ours; record the real
-            # number so a give-up here cannot name a timeout nobody set.
-            self._write_busy_ms = int(row[0]) if row else self._busy_timeout_ms
-            return shared
-        async with shared.execute("PRAGMA journal_mode") as cursor:
-            row = await cursor.fetchone()
-        journal_mode = str(row[0]) if row else "wal"
-        conn = await aiosqlite.connect(path, isolation_level=None)
-        try:
-            # busy_timeout first: switching journal mode is itself an operation
-            # that can meet SQLITE_BUSY, and a wait installed after it is not in
-            # force for the statement that needed it (corvidae#1211).
-            await conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
-            self._write_busy_ms = int(self._busy_timeout_ms)
-            await conn.execute(f"PRAGMA journal_mode={journal_mode}")
-            if self._vec_available and not await self._load_vec_extension(conn):
-                logger.warning(
-                    "memory: sqlite-vec failed to load on the write connection "
-                    "for %s; vector inserts on it will fail until restart "
-                    "(check the sqlite-vec install)", path,
-                )
-        except BaseException:
-            # Don't leak the half-configured connection's worker thread.
-            await conn.close()
-            raise
-        self._write_path = path
-        return conn
-
-    async def _write_conn(self) -> aiosqlite.Connection | None:
-        """The connection memory record writes use; None when no DB is open yet.
-
-        Opened lazily after the schema exists, because on_start order is
-        LIFO and the persistence DB may not be open at memory's on_start.
-        """
-        if self._write_db is not None:
-            return self._write_db
-        shared = await self._ensure_schema()
-        if shared is None:
-            return None
-        # Re-check: another task may have opened it while the schema ran.
-        if self._write_db is None:
-            self._write_db = await self._open_write_db(shared)
-            self._owns_write_db = self._write_db is not shared
-        return self._write_db
-
-    def _log_busy_give_up(self, exc: BaseException, path: str) -> bool:
-        """Log once when a write gave up on the lock, whatever the statement.
-
-        Every statement of a memory write section calls this through
-        ``_write_txn`` -- ``BEGIN IMMEDIATE``, the body, ``COMMIT`` -- so the same
-        failure cannot be reported twice and cannot go unreported. The number
-        named is the wait in force on the connection the write ran on
-        (``_write_busy_ms``): the config value for the dedicated connection, the
-        persistence connection's own for the no-file fallback. Returns True if it
-        logged.
-
-        Whether an error is such a give-up is the SQLite result code's call, not
-        the message's: ``SQLITE_LOCKED`` ("database table is locked") also contains
-        "locked", and reporting that as a timeout the connection never waited for
-        would be the same kind of unmeasured claim this change set out to remove.
-        """
-        if not _is_busy_give_up(exc):
-            return False
-        logger.warning(
-            "memory write blocked: database %s stayed locked past the %d ms "
-            "busy timeout; the write will be retried on the next trigger",
-            path, self._write_busy_ms,
-        )
-        return True
-
-    @asynccontextmanager
-    async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
-        """One memory write as a real SQLite transaction on the write connection.
-
-        ``BEGIN IMMEDIATE`` .. ``COMMIT``; any exception (and cancellation)
-        rolls back, logs a failed rollback at WARNING, and propagates for the
-        caller to report. A write that gives up on the lock -- at ``BEGIN
-        IMMEDIATE``, in the body, or at ``COMMIT`` against a long reader -- logs
-        one WARNING naming the database path and the timeout in force, then
-        propagates; see ``_log_busy_give_up``.
-        Callers hold ``_db_lock`` so memory's own writers don't contend.
-        """
-        conn = await self._write_conn()
-        if conn is None:
-            raise RuntimeError("memory database is not open")
-        shared = self._resolve_db()
-        # A fallback to the shared connection has no transaction of its own.
-        own_txn = conn is not shared
-        path = self._write_path
-        if own_txn:
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as exc:
-                self._log_busy_give_up(exc, path)
-                raise
-        try:
-            yield conn
-            # COMMIT is inside the try: a failed commit (SQLITE_BUSY against a
-            # long reader) must roll back rather than leave the lock held.
-            await (conn.execute("COMMIT") if own_txn else conn.commit())
-        except BaseException as exc:
-            # A give-up at COMMIT is the likelier one now the wait is
-            # config-scaled, and it reaches here, not the BEGIN handler.
-            self._log_busy_give_up(exc, path)
-            # Undo every statement of the section, including cancellation.
-            try:
-                await (conn.execute("ROLLBACK") if own_txn else conn.rollback())
-            except Exception:
-                logger.warning(
-                    "memory write rollback failed on %s; closing the write "
-                    "connection so the next memory write reopens a clean one "
-                    "(restart the daemon if writes keep failing)",
-                    path, exc_info=True,
-                )
-                if own_txn:
-                    # Drop the wedged connection; closing releases its lock.
-                    self._write_db = None
-                    try:
-                        await conn.close()
-                    except Exception:
-                        logger.warning(
-                            "memory write connection on %s failed to close "
-                            "after a failed rollback", path, exc_info=True,
-                        )
-            raise
+    def _persistence(self) -> PersistencePlugin:
+        """The persistence plugin: the write route and the read handle."""
+        return get_dependency(self.pm, "persistence", PersistencePlugin)
 
     def _resolve_db(self) -> aiosqlite.Connection | None:
-        """Return the persistence plugin's DB connection, or None if not open yet."""
-        from corvidae.persistence import PersistencePlugin
-        persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
-        return persistence.db
+        """Return the persistence plugin's read handle, or None if not open yet."""
+        return self._persistence().db
 
     def _embedding_dimensions(self) -> int | None:
         """The configured embedding dimension, or None when unconfigured."""
@@ -4724,127 +4550,173 @@ class MemoryPlugin(CorvidaePlugin):
                     "could not re-disable extension loading", exc_info=True
                 )
 
-    async def _ensure_schema(self) -> aiosqlite.Connection | None:
-        """Create all memory tables; returns the DB or None when unavailable.
+    async def _load_vec_on_writer(self, persistence: PersistencePlugin) -> bool:
+        """Load sqlite-vec on the session writer; False (never raises) on failure.
 
-        Safe to call repeatedly — a no-op once the schema landed.
+        The writer is a separate connection from the reader, so the extension
+        must be loaded on both before a ``memory_vec`` insert can run in a
+        unit. Kept as a method so tests can monkeypatch the failure mode.
         """
-        db = self._resolve_db()
-        if db is None:
+        try:
+            import sqlite_vec
+            await persistence.load_extension(
+                sqlite_vec.loadable_path(), owner="memory"
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "memory: sqlite-vec failed to load on the session writer "
+                "connection, so vector inserts cannot run there; memory runs "
+                "FTS5-only until restart — check the sqlite-vec install and "
+                "that this Python's sqlite3 allows extension loading",
+                exc_info=True,
+            )
+            return False
+
+    async def _ensure_schema(self) -> aiosqlite.Connection | None:
+        """Create all memory tables; returns the reader or None when unavailable.
+
+        Safe to call repeatedly — a no-op once the schema landed. Returns None
+        until persistence has opened both its reader and its writer.
+        """
+        persistence = self._persistence()
+        db = persistence.db
+        if db is None or persistence.writer is None:
             return None
         if self._schema_ready:
             return db
 
-        # Core tables and the FTS surface land unconditionally.
-        await db.execute(MEMORY_DDL)
-        await db.execute(MEMORY_INDEX_DDL)
-        # Stamp columns (#299): tables from before stamping gain them as
-        # nullable columns without rewriting any row; old rows read NULL.
-        await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
-        await add_column_if_missing(db, "memory", "mode", "TEXT")
-        await add_column_if_missing(db, "memory", "model", "TEXT")
-        # Trigger column (#633), likewise nullable; old rows read NULL.
-        await add_column_if_missing(db, "memory", "trigger", "TEXT")
-        # Foreign-merge flag (#627); old rows read 0 (no backfill: exclusion
-        # only applies while a range is in the live window).
-        await add_column_if_missing(
-            db, "memory", "merged_foreign", "INTEGER NOT NULL DEFAULT 0"
-        )
-        await db.execute(MEMORY_PROMPT_DDL)
-        await db.execute(WATERMARK_DDL)
-        await db.execute(EMBEDDING_META_DDL)
-        # Schema upgrade: pre-existing two-column tables (before this feature)
-        # lack document_prefix/query_prefix. Add them with DEFAULT '' so they
-        # compare equal to prefix-less config, and mismatch against configured
-        # prefixes routes through the normal _encoder_mismatch path.
-        async with db.execute("PRAGMA table_info(embedding_meta)") as cursor:
-            existing_cols = {row[1] for row in await cursor.fetchall()}
-        for col in ("document_prefix", "query_prefix"):
-            if col not in existing_cols:
-                await db.execute(
-                    f"ALTER TABLE embedding_meta ADD COLUMN {col} "
-                    f"TEXT NOT NULL DEFAULT ''"
-                )
-        await create_fts_table(db, "memory_fts", MEMORY_FTS_DDL)
-        await db.execute(MEMORY_FTS_INSERT_TRIGGER)
-        await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
-        await db.execute(RETRIEVAL_LOG_DDL)
-        await db.execute(RETRIEVAL_LOG_INDEX_DDL)
-        # Schema upgrade: retrieval_log tables from before top_similarity
-        # (#66) gain it as a nullable column; old rows read NULL.
-        await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
-        # #407: the exclusion count and the per-candidate child table.
-        await add_column_if_missing(db, "retrieval_log", "excluded_in_window", "INTEGER")
-        # #931: the banding path that ran (z gate, raw-similarity fallback with
-        # its reason, or the FTS5 degrade); rows from before it read NULL.
-        await add_column_if_missing(db, "retrieval_log", "banding_path", "TEXT")
-        await db.execute(RETRIEVAL_CANDIDATE_DDL)
-        # #666: which search found each candidate; old rows read NULL.
-        await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")
-        # #409: the relative gate's z-score; old rows read NULL.
-        await add_column_if_missing(db, "retrieval_candidate", "z", "REAL")
-        await add_column_if_missing(db, "retrieval_candidate", "vec_rank", "INTEGER")
-        await add_column_if_missing(db, "retrieval_candidate", "fts_rank", "INTEGER")
-        await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
-        # Phase 1b: message_fts and retention_meta
-        await create_fts_table(db, "message_fts", MESSAGE_FTS_DDL)
-        await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
-        await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
-        await db.execute(RETENTION_META_DDL)
-
-        # The vector surface exists only with an embedding profile configured
-        # and a loadable sqlite-vec extension; anything else degrades to
-        # FTS5-only retrieval. Text is canonical; vectors are a cache.
         dimensions = self._embedding_dimensions()
         encoder = (
             self._embedding_cfg.get("model") if self._embedding_cfg else None
         )
-        if dimensions is not None and encoder is not None:
-            await self._check_embedding_meta(db, encoder, dimensions)
-            if not self._encoder_mismatch:
-                if await self._load_vec_extension(db):
-                    await db.execute(
+
+        def create_schema(cur: WriteCursor) -> None:
+            """Every memory table, column, index, trigger and the encoder row."""
+            # Core tables and the FTS surface land unconditionally.
+            cur.execute(MEMORY_DDL)
+            cur.execute(MEMORY_INDEX_DDL)
+            # Stamp columns (#299): tables from before stamping gain them as
+            # nullable columns without rewriting any row; old rows read NULL.
+            add_column_if_missing_sync(cur, "memory", "prompt_hash", "TEXT")
+            add_column_if_missing_sync(cur, "memory", "mode", "TEXT")
+            add_column_if_missing_sync(cur, "memory", "model", "TEXT")
+            # Trigger column (#633), likewise nullable; old rows read NULL.
+            add_column_if_missing_sync(cur, "memory", "trigger", "TEXT")
+            # Foreign-merge flag (#627); old rows read 0 (no backfill: exclusion
+            # only applies while a range is in the live window).
+            add_column_if_missing_sync(
+                cur, "memory", "merged_foreign", "INTEGER NOT NULL DEFAULT 0"
+            )
+            cur.execute(MEMORY_PROMPT_DDL)
+            cur.execute(WATERMARK_DDL)
+            cur.execute(EMBEDDING_META_DDL)
+            # Schema upgrade: pre-existing two-column tables (before this feature)
+            # lack document_prefix/query_prefix. Add them with DEFAULT '' so they
+            # compare equal to prefix-less config, and mismatch against configured
+            # prefixes routes through the normal _encoder_mismatch path.
+            for col in ("document_prefix", "query_prefix"):
+                add_column_if_missing_sync(
+                    cur, "embedding_meta", col, "TEXT NOT NULL DEFAULT ''"
+                )
+            create_fts_table_sync(cur, "memory_fts", MEMORY_FTS_DDL)
+            cur.execute(MEMORY_FTS_INSERT_TRIGGER)
+            cur.execute(MEMORY_FTS_UPDATE_TRIGGER)
+            cur.execute(RETRIEVAL_LOG_DDL)
+            cur.execute(RETRIEVAL_LOG_INDEX_DDL)
+            # Schema upgrade: retrieval_log tables from before top_similarity
+            # (#66) gain it as a nullable column; old rows read NULL.
+            add_column_if_missing_sync(cur, "retrieval_log", "top_similarity", "REAL")
+            # #407: the exclusion count and the per-candidate child table.
+            add_column_if_missing_sync(
+                cur, "retrieval_log", "excluded_in_window", "INTEGER"
+            )
+            # #931: the banding path that ran (z gate, raw-similarity fallback with
+            # its reason, or the FTS5 degrade); rows from before it read NULL.
+            add_column_if_missing_sync(cur, "retrieval_log", "banding_path", "TEXT")
+            cur.execute(RETRIEVAL_CANDIDATE_DDL)
+            # #666: which search found each candidate; old rows read NULL.
+            add_column_if_missing_sync(cur, "retrieval_candidate", "source", "TEXT")
+            # #409: the relative gate's z-score; old rows read NULL.
+            add_column_if_missing_sync(cur, "retrieval_candidate", "z", "REAL")
+            add_column_if_missing_sync(
+                cur, "retrieval_candidate", "vec_rank", "INTEGER"
+            )
+            add_column_if_missing_sync(
+                cur, "retrieval_candidate", "fts_rank", "INTEGER"
+            )
+            cur.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
+            # Phase 1b: message_fts and retention_meta
+            create_fts_table_sync(cur, "message_fts", MESSAGE_FTS_DDL)
+            cur.execute(MESSAGE_FTS_INSERT_TRIGGER)
+            cur.execute(MESSAGE_FTS_UPDATE_TRIGGER)
+            cur.execute(RETENTION_META_DDL)
+            # Record or verify the encoder identity the vector cache was built with.
+            if dimensions is not None and encoder is not None:
+                self._check_embedding_meta(cur, encoder, dimensions)
+
+        # One schema unit; indexes and ALTERs on a large existing table can
+        # outlast the default deadline, so it gets the maximum.
+        await persistence.write(
+            create_schema, owner="memory", deadline_s=MAX_WRITE_DEADLINE_S
+        )
+
+        # The vector surface exists only with an embedding profile configured
+        # and sqlite-vec loadable on both the reader and the writer; anything
+        # else degrades to FTS5-only retrieval. Text is canonical; vectors are
+        # a cache.
+        if dimensions is not None and encoder is not None and not self._encoder_mismatch:
+            if await self._load_vec_extension(db) and await self._load_vec_on_writer(
+                persistence
+            ):
+                # memory_vec is a vec0 table: created only once the writer
+                # has the extension.
+                def create_vec(cur: WriteCursor) -> None:
+                    cur.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0("
                         "memory_id INTEGER PRIMARY KEY, "
                         f"embedding FLOAT[{dimensions}] distance_metric=cosine)"
                     )
-                    self._vec_available = True
-                else:
-                    logger.warning(
-                        "sqlite-vec unavailable: vector retrieval disabled, "
-                        "degrading to FTS5"
-                    )
 
-        await db.commit()
+                await persistence.write(
+                    create_vec, owner="memory", deadline_s=MAX_WRITE_DEADLINE_S
+                )
+                self._vec_available = True
+            else:
+                logger.warning(
+                    "sqlite-vec unavailable: vector retrieval disabled, "
+                    "degrading to FTS5"
+                )
+
         self._schema_ready = True
         return db
 
-    async def _check_embedding_meta(
-        self, db: aiosqlite.Connection, encoder: str, dimensions: int
+    def _check_embedding_meta(
+        self, cur: WriteCursor, encoder: str, dimensions: int
     ) -> None:
         """Record or verify the encoder identity the vector cache was built with.
 
-        A stored encoder, dimensions, or prefix value differing from config is
-        an operator ERROR — mixing encoders or prefixes silently corrupts
-        similarity. Config revert is the only remediation; here we refuse to
-        mix and disable embedding.
+        Runs inside the schema unit. A stored encoder, dimensions, or prefix
+        value differing from config is an operator ERROR — mixing encoders or
+        prefixes silently corrupts similarity. Config revert is the only
+        remediation; here we refuse to mix and disable embedding.
         """
         doc_prefix = (self._embedding_cfg or {}).get("document_prefix", "") or ""
         qry_prefix = (self._embedding_cfg or {}).get("query_prefix", "") or ""
 
-        async with db.execute(
+        rows = cur.execute(
             "SELECT encoder, dimensions, document_prefix, query_prefix "
             "FROM embedding_meta LIMIT 1"
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            await db.execute(
+        ).rows
+        if not rows:
+            cur.execute(
                 "INSERT INTO embedding_meta "
                 "(encoder, dimensions, document_prefix, query_prefix) "
                 "VALUES (?, ?, ?, ?)",
                 (encoder, dimensions, doc_prefix, qry_prefix),
             )
             return
+        row = rows[0]
         # Normalize NULL (from ALTER TABLE DEFAULT '') to '' for comparison.
         stored = (row[0], row[1], row[2] or "", row[3] or "")
         if stored != (encoder, dimensions, doc_prefix, qry_prefix):

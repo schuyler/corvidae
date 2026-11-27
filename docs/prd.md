@@ -860,7 +860,11 @@ Per transport:
    message; exactly one implementation persists a message and returns its
    row id, and the Agent attaches the id to the in-memory message,
    stripped at prompt build. Plugins create their own tables lazily in the
-   same database.
+   same database, but write it only through the kernel's write route: short
+   synchronous units, each under a deadline, so no plugin can hold the
+   database's write lock past a bounded time, and a unit that overruns is
+   rolled back and its owner named in the log. A plugin that wants its own
+   write connection uses its own database file. Reads stay free.
 2. A compaction summary row is inserted so that it orders
    immediately before the oldest retained message; the working set is the
    summary plus everything newer. Old rows stay in the database, invisible
@@ -1954,6 +1958,7 @@ record that holds the reasoning.
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
 | Depend downward by type, sideways by hook: a plugin holds a reference only to a kernel plugin, named in its `depends_on` and resolved with `get_dependency`, and reaches any other plugin through hooks; it fires only hooks in `AgentSpec` or hooks whose owner it names in `depends_on` | principle 1; `docs/plugin-guide.md` "Plugin boundaries"; #1178; owner, 2026-11-22 |
 | The outcome log keeps every record reported about a trace, never overwriting one, instead of one row per trace merged in place; reporters reach it through an event any plugin may hear, and a disabled outcome log is reported at startup | §3.7 Outcome log; #1179; owner, 2026-11-23 |
+| Plugins write the kernel database only through the kernel's write route, as short synchronous units under a deadline; one that wants its own write connection opens its own file. A stalled unit is rolled back and its owner logged, so one plugin cannot stop persistence by holding the write lock | §3.4.1; #1211; owner, 2026-11-26 |
 | A bundled plugin is replaced by naming an installed entry point that subclasses it in `plugins.replace`, never by an import path; a replacement that fails to load falls back loudly to the bundled plugin | principle 1; §3.1.14; #1107, operator, 2026-11-20 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
 | Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |

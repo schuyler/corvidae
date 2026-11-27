@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import decode_message_row, parse_message_type
+from corvidae.session_writer import WriteCursor
 from corvidae_cognition.fts import KeywordQuery, keyword_query, keyword_where
 from corvidae_cognition.memory import _format_age, _fused_keys
 from corvidae.tool import Tool, tool_to_schema
@@ -655,14 +656,16 @@ class MemoryToolsPlugin(CorvidaePlugin):
 
             # Bump access stats (WP1b.1.3: recall_raw bumps, search_memory does not)
             now = time.time()
-            await db.execute(
-                "UPDATE memory SET "
-                "retrieval_count = retrieval_count + 1, "
-                "last_retrieved_at = ? "
-                "WHERE id = ?",
-                (now, memory_id),
-            )
-            await db.commit()
+            def bump_stats(cur: WriteCursor) -> None:
+                cur.execute(
+                    "UPDATE memory SET "
+                    "retrieval_count = retrieval_count + 1, "
+                    "last_retrieved_at = ? "
+                    "WHERE id = ?",
+                    (now, memory_id),
+                )
+
+            await memory._persistence().write(bump_stats, owner="memory")
 
             return text
 

@@ -71,7 +71,9 @@ class Env:
         self.registry = ChannelRegistry({"system_prompt": "test"})
         self.pm.register(self.registry, name="registry")
         self.persistence = PersistencePlugin()
-        self.persistence.db = db
+        # The reader/writer pair the fixture opened beside the seeding ``db``.
+        self.store = db._store
+        self.persistence.db, self.persistence.writer = self.store
         self.pm.register(self.persistence, name="persistence")
         self.recorder = NotifyRecorder()
         self.pm.register(self.recorder, name="recorder")
@@ -104,10 +106,10 @@ def sched_config(**overrides) -> dict:
 
 
 @pytest.fixture
-async def memdb():
-    async with aiosqlite.connect(":memory:") as conn:
-        await init_db(conn)
-        yield conn
+async def memdb(db, session_store):
+    """The rw seeding connection, carrying the (reader, writer) pair as ``_store``."""
+    db._store = session_store
+    yield db
 
 
 @pytest.fixture
@@ -254,12 +256,12 @@ class TestAdvance:
 class TestSchemaAndReadiness:
     async def test_schema_is_lazy_until_db_opens(self, memdb):
         e = Env(memdb, sched_config())
-        e.persistence.db = None
+        e.persistence.db = e.persistence.writer = None
         await e.init()
         assert e.sched._started_up is False
         assert await e.sched._tick() == READY_POLL_SECONDS
         # The DB opens later (PersistencePlugin.on_start ran after ours).
-        e.persistence.db = memdb
+        e.persistence.db, e.persistence.writer = e.store
         assert await e.sched._tick() == MAX_SLEEP_SECONDS
         async with memdb.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='schedule'"

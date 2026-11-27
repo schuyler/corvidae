@@ -25,7 +25,7 @@ from corvidae_cognition import retention as retention_module
 from corvidae_cognition import memory as memory_module
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
-from helpers import FakeForkAgent, add_kernel_registry, stub_llm_config, with_chat_llm
+from helpers import attach_store, fresh_session_db_path, FakeForkAgent, add_kernel_registry, stub_llm_config, with_chat_llm
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -143,11 +143,11 @@ async def make_env(retention_runs):
         config = with_chat_llm(config or CONFIG)
         if db is None:
             # A standalone plugin manager with an in-memory session DB.
-            db = await aiosqlite.connect(":memory:")
+            db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
             await init_db(db)
             pm = create_plugin_manager()
             persistence = PersistencePlugin()
-            persistence.db = db
+            persistence.db, persistence.writer = await attach_store(db)
             pm.register(persistence, name="persistence")
             channel = Channel(transport="irc", scope="#test")
         cleanups.append(db.close)
@@ -436,30 +436,26 @@ async def test_retention_write_failure_retries_at_bounded_rate(
     """
     attempts = []
 
-    class FailingWrites:
-        """Connection proxy: reads work, retention_meta writes raise."""
-
-        def __init__(self, real):
-            self._real = real
-
-        def execute(self, sql, *args, **kwargs):
-            if "retention_meta" in sql and sql.lstrip().upper().startswith(
-                ("UPDATE", "INSERT")
-            ):
-                attempts.append(sql)
-                raise sqlite3.OperationalError("disk I/O error")
-            return self._real.execute(sql, *args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = FailingWrites(db)
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
     caplog.set_level(logging.WARNING)
+
+    # Every write unit fails as a disk error would, except the schema units
+    # (they alone pass a deadline): in the counted window the only writer is
+    # the retention last_run stamp.
+    real_write = persistence.write
+
+    async def failing_write(fn, **kwargs):
+        if "deadline_s" in kwargs:
+            return await real_write(fn, **kwargs)
+        attempts.append(kwargs.get("owner"))
+        raise sqlite3.OperationalError("disk I/O error")
+
+    persistence.write = failing_write
     env = await make_env(
         pm=pm, db=db, persistence=persistence,
         channel=Channel(transport="irc", scope="#test"),
@@ -495,7 +491,7 @@ async def test_retention_arm_before_db_opens_logs_one_plain_warning(
 ):
     """Memory's on_start runs before persistence opens the DB: the retention
     arm defers with one plain WARNING (no traceback), then arms once open."""
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
     pm = create_plugin_manager()
     persistence = PersistencePlugin()  # DB not open yet, as at boot
@@ -505,7 +501,7 @@ async def test_retention_arm_before_db_opens_logs_one_plain_warning(
     with caplog.at_level(logging.DEBUG, logger="corvidae.memory"):
         env = await make_env(pm=pm, db=db, persistence=persistence, channel=channel)
         # Persistence opens the DB; the re-arm then reads retention_meta.
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         await env.advance(memory_module.RETENTION_DB_RETRY_SECONDS)
 
     # Only the re-arm warning is under test. A build without sqlite-vec also
@@ -527,7 +523,9 @@ async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
     """A real failure (DB open, reading retention_meta fails) still logs a
     WARNING with its traceback, and re-arms."""
     env = await make_env()
-    real_execute = env.db.execute
+    # Memory reads retention_meta on the persistence reader, not the seeding db.
+    reader = env.memory._resolve_db()
+    real_execute = reader.execute
 
     # Fail only the retention_meta read the arm performs.
     def failing_execute(sql, *args, **kwargs):
@@ -535,12 +533,12 @@ async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
             raise sqlite3.OperationalError("disk I/O error")
         return real_execute(sql, *args, **kwargs)
 
-    env.db.execute = failing_execute
+    reader.execute = failing_execute
     try:
         with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
             await env.memory._arm_retention()
     finally:
-        env.db.execute = real_execute
+        reader.execute = real_execute
 
     # The in-memory test DB has no file, so memory notes (once, at WARNING)
     # that its writes share the persistence connection; not under test here.

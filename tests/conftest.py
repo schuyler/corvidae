@@ -67,11 +67,38 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest_asyncio.fixture
-async def db():
+async def db(tmp_path):
+    """A read-write seeding connection on a file under tmp_path.
+
+    Autocommit (``isolation_level=None``): an uncommitted seed would hold the
+    file's write lock against the writer and be invisible to the reader.
+    """
     from corvidae.persistence import init_db
-    async with aiosqlite.connect(":memory:") as conn:
+    async with aiosqlite.connect(
+        tmp_path / "sessions.db", isolation_level=None
+    ) as conn:
         await init_db(conn)
         yield conn
+
+
+@pytest_asyncio.fixture
+async def session_store(db, tmp_path):
+    """``(reader, writer)`` from ``open_session_store`` on the ``db`` file.
+
+    Assign as ``persistence.db, persistence.writer = session_store``. Seed
+    through ``db``; plugin code sees the read-only reader as in the daemon.
+    """
+    from corvidae.session_writer import open_session_store
+
+    reader, writer = await open_session_store(tmp_path / "sessions.db")
+    try:
+        yield reader, writer
+    finally:
+        # Close both halves even if the test failed.
+        try:
+            await reader.close()
+        finally:
+            await writer.close()
 
 
 @pytest.fixture

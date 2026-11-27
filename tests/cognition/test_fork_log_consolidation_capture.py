@@ -95,17 +95,18 @@ async def test_the_consolidation_fork_writes_a_fork_log_row(tmp_path):
             f"row claims {block_count} blocks and stores {digests} digests;"
             " resolve_chain refuses a row whose claim and digests disagree"
         )
+        # resolve_chain reads on the persistence reader, so it runs before
+        # the harness closes the store below.
+        chain = await memory._fork_log.log.resolve_chain(fork_id)
+        assert chain is not None and len(chain) == block_count, (
+            f"resolve_chain gave {None if chain is None else f'{len(chain)} blocks'}"
+            f" for a {block_count}-block consolidation row"
+        )
+        assert memory._fork_log.write_failures == 0, "the capture counted a silent failure"
     finally:
         await log_db.close()
         # the harness handle: sibling fixtures close theirs
         await db.close()
-
-    chain = await memory._fork_log.log.resolve_chain(fork_id)
-    assert chain is not None and len(chain) == block_count, (
-        f"resolve_chain gave {None if chain is None else f'{len(chain)} blocks'}"
-        f" for a {block_count}-block consolidation row"
-    )
-    assert memory._fork_log.write_failures == 0, "the capture counted a silent failure"
 
 
 async def test_the_recorder_closes_cleanly(tmp_path):

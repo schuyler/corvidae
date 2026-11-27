@@ -29,7 +29,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
-from helpers import FakeForkAgent, window_of
+from helpers import attach_store, FakeForkAgent, window_of
 from tests.cognition.trace_helpers import TraceRecorder, add_trace
 
 
@@ -73,12 +73,13 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     from corvidae_cognition.appraisal import AppraisalPlugin, AppraisalSpec
 
     db_path = str(tmp_path / "sessions.db")
-    db = await aiosqlite.connect(db_path)
+    # ``db`` seeds and reads raw; the plugins write through the route.
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     # The trace protocol plugin and a listener, before any reporter.

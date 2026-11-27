@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers import attach_store
 from corvidae.agent import Agent, QueueItem
 from corvidae.channel import Channel, ChannelRegistry, load_channel_config
 from corvidae.hooks import create_plugin_manager, get_dependency, hookimpl
@@ -748,7 +749,7 @@ def test_a_source_cannot_imitate_header_or_fence_markup():
 async def persistence(db):
     """A PersistencePlugin over the in-memory test database."""
     plugin = PersistencePlugin()
-    plugin.db = db
+    plugin.db, plugin.writer = await attach_store(db)
     return plugin
 
 
@@ -757,7 +758,7 @@ async def log_row(persistence: PersistencePlugin, channel: Channel, message: dic
     await persistence.persist_message(channel, message, MessageType.MESSAGE)
 
 
-async def test_log_lookup_finds_the_source_by_spill_file_name(persistence):
+async def test_log_lookup_finds_the_source_by_spill_file_name(persistence, db):
     """The row recording the cut is found by the file's name; a row that only
     mentions the name, and a corrupt row, do not stop the search."""
     channel = Channel(transport="irc", scope="#a", config=None)
@@ -768,7 +769,7 @@ async def test_log_lookup_finds_the_source_by_spill_file_name(persistence):
             "name": "read_file", "arguments": json.dumps({"path": f"/s/{NAME}"})}}],
     })
     # A corrupt row that contains the name.
-    await persistence.db.execute(
+    await db.execute(
         "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
         "VALUES (?, ?, ?, ?)", (channel.id, f'{{"broken": "{NAME}', 1.0, "message"))
     # The row that recorded the cut.
@@ -822,7 +823,7 @@ async def log_cut_row(h: Harness, persistence, name: str = NAME, source: str = "
 
 
 async def test_reading_a_spill_file_back_names_the_source_and_reload_renders_the_same(
-        make, persistence):
+        make, persistence, db):
     """The read-back result is stamped from the log row, and its rendering needs
     neither the row nor the file afterwards."""
     h = await make()
@@ -838,7 +839,7 @@ async def test_reading_a_spill_file_back_names_the_source_and_reload_renders_the
     assert "[metadata: content spilled from hook:alpha]" in before.split("\n")
     # Sweep the file and the log row: the stored result renders the same bytes.
     os.remove(path)
-    await persistence.db.execute("DELETE FROM message_log")
+    await db.execute("DELETE FROM message_log")
     assert rendered(h, item) == before
 
 
