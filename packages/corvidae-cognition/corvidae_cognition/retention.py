@@ -15,6 +15,7 @@ import time
 from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.session_writer import WriteCursor
 
 if TYPE_CHECKING:
     from corvidae_cognition.memory import MemoryPlugin
@@ -24,8 +25,8 @@ logger = logging.getLogger("corvidae.retention")
 # §6-tunable: raise to weight recall traffic more heavily in the score.
 RETRIEVAL_BOOST: float = 0.5
 
-#: retrieval_log rows deleted per write transaction (#682). Bounds how long the
-#: prune holds memory's write lock, so a first prune of a large backlog cannot
+#: retrieval_log rows deleted per write unit (#682). Bounds how long the
+#: prune holds the write route, so a first prune of a large backlog cannot
 #: push another writer past its busy timeout.
 RETENTION_PRUNE_BATCH: int = 1000
 
@@ -92,26 +93,26 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
             demoted.append((mid, last_retrieved_at))
 
     if demoted:
-        # One transaction on memory's write connection: the whole batch
+        # One unit on the write route: the whole batch
         # demotes or none of it does (#257). A failure rolls back and
         # propagates; the job's caller logs it and the next run retries.
         # Each UPDATE re-checks the selection, so a row redacted, demoted
         # or retrieved since the SELECT above is left alone (#272).
-        demoted_count = 0
-        async with memory._db_lock, memory._write_txn() as wdb:
+        def demote(cur: WriteCursor) -> int:
+            count = 0
             for mid, selected_last_retrieved in demoted:
-                cursor = await wdb.execute(
+                result = cur.execute(
                     "UPDATE memory SET indexed = 0, embedded = 0 "
                     "WHERE id = ? AND indexed = 1 AND redacted = 0 "
                     "AND last_retrieved_at IS ?",
                     (mid, selected_last_retrieved),
                 )
-                if cursor.rowcount != 1:
+                if result.rowcount != 1:
                     continue
-                demoted_count += 1
+                count += 1
                 if memory._vec_available:
                     try:
-                        await wdb.execute(
+                        cur.execute(
                             "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
                         )
                     except Exception:
@@ -135,6 +136,10 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                             "(memory_vec is a vec0 virtual table)",
                             mid, mid, exc_info=True,
                         )
+            return count
+
+        async with memory._db_lock:
+            demoted_count = await memory._persistence().write(demote, owner="memory")
         if demoted_count:
             logger.info("retention: demoted %d records", demoted_count)
 
@@ -159,18 +164,24 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
             repromoted_ids.append(mid)
 
     if repromoted_ids:
-        # One transaction on memory's write connection (#257).
+        # One unit on the write route (#257).
         # The UPDATE re-checks the selection, so a row superseded or
         # redacted since the SELECT is never re-indexed (#309, #272).
-        repromoted_count = 0
-        async with memory._db_lock, memory._write_txn() as wdb:
+        def repromote(cur: WriteCursor) -> int:
+            count = 0
             for mid in repromoted_ids:
-                cursor = await wdb.execute(
+                result = cur.execute(
                     "UPDATE memory SET indexed = 1 WHERE id = ? AND indexed = 0 "
                     "AND redacted = 0 AND superseded_by IS NULL",
                     (mid,),
                 )
-                repromoted_count += cursor.rowcount == 1
+                count += result.rowcount == 1
+            return count
+
+        async with memory._db_lock:
+            repromoted_count = await memory._persistence().write(
+                repromote, owner="memory"
+            )
         if repromoted_count:
             logger.info("retention: re-promoted %d records", repromoted_count)
 
@@ -184,33 +195,43 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         cutoff = now - max_age_days * 86400.0
         pruned_log = pruned_candidates = 0
         try:
-            # One batch per transaction (#682): a first prune of months of rows
+            # One batch per unit (#682): a first prune of months of rows
             # used to delete them all while holding memory's write lock, and
             # other writers timed out behind it. Between batches the lock is
             # released, so a writer waits at most one batch. The cutoff is a
             # fixed instant, so batching cannot miss a row: what a batch leaves
             # is still past it next time round.
-            while True:
-                async with memory._db_lock, memory._write_txn() as wdb:
-                    # Children first, then the parents they belong to: the
-                    # id list is what both deletes key on.
-                    async with wdb.execute(
+            def prune_batch(cur: WriteCursor) -> tuple[int, int] | None:
+                # Children first, then the parents they belong to: the
+                # id list is what both deletes key on.
+                ids = [
+                    row[0]
+                    for row in cur.execute(
                         "SELECT id FROM retrieval_log WHERE ts < ? LIMIT ?",
                         (cutoff, RETENTION_PRUNE_BATCH),
-                    ) as cursor:
-                        ids = [row[0] for row in await cursor.fetchall()]
-                    if not ids:
-                        break
-                    marks = ", ".join("?" * len(ids))
-                    cand_cursor = await wdb.execute(
-                        f"DELETE FROM retrieval_candidate WHERE retrieval_id IN ({marks})",
-                        ids,
+                    ).rows
+                ]
+                if not ids:
+                    return None
+                marks = ", ".join("?" * len(ids))
+                cand = cur.execute(
+                    f"DELETE FROM retrieval_candidate WHERE retrieval_id IN ({marks})",
+                    ids,
+                )
+                log = cur.execute(
+                    f"DELETE FROM retrieval_log WHERE id IN ({marks})", ids
+                )
+                return cand.rowcount, log.rowcount
+
+            while True:
+                async with memory._db_lock:
+                    batch = await memory._persistence().write(
+                        prune_batch, owner="memory"
                     )
-                    log_cursor = await wdb.execute(
-                        f"DELETE FROM retrieval_log WHERE id IN ({marks})", ids
-                    )
-                pruned_candidates += cand_cursor.rowcount
-                pruned_log += log_cursor.rowcount
+                if batch is None:
+                    break
+                pruned_candidates += batch[0]
+                pruned_log += batch[1]
             if pruned_log:
                 logger.info(
                     "retention: pruned %d retrieval_log rows and %d "
@@ -271,31 +292,35 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         # rest (same handling as the write path).
         embeddings = [memory._check_embedding_width(e) for e in embeddings]
         # Embeddings are computed above, so no network await runs inside the
-        # transaction; the batch commits whole or rolls back whole (#257).
-        # Each row is re-checked inside the transaction before its vec row
+        # unit; the batch commits whole or rolls back whole (#257).
+        # Each row is re-checked inside the unit before its vec row
         # is written: one demoted, redacted or superseded while the
         # embeddings were computed gets no vec row (#309, #272).
-        backfilled_count = 0
-        async with memory._db_lock, memory._write_txn() as wdb:
+        def backfill(cur: WriteCursor) -> int:
+            count = 0
             for (mid, _summary), embedding in zip(backfill_rows, embeddings):
                 if embedding is None:
                     continue
-                cursor = await wdb.execute(
+                result = cur.execute(
                     "UPDATE memory SET embedded = 1 WHERE id = ? AND indexed = 1 "
                     "AND redacted = 0 AND superseded_by IS NULL AND embedded = 0",
                     (mid,),
                 )
-                if cursor.rowcount != 1:
+                if result.rowcount != 1:
                     continue
                 # vec0 does not support INSERT OR REPLACE; clear any stale row.
-                await wdb.execute(
-                    "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
-                )
-                await wdb.execute(
+                cur.execute("DELETE FROM memory_vec WHERE memory_id = ?", (mid,))
+                cur.execute(
                     "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                     (mid, sqlite_vec.serialize_float32(embedding)),
                 )
-                backfilled_count += 1
+                count += 1
+            return count
+
+        async with memory._db_lock:
+            backfilled_count = await memory._persistence().write(
+                backfill, owner="memory"
+            )
         if backfilled_count:
             logger.info("retention: backfilled %d records", backfilled_count)
     except Exception as exc:

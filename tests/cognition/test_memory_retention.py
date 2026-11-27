@@ -22,7 +22,7 @@ import pytest
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.retention'
-from helpers import memory_turn
+from helpers import attach_store, fresh_session_db_path, memory_turn
 from corvidae_cognition.retention import (
     retention_score,
     run_retention_job,
@@ -35,6 +35,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from fake_clock import install_kernel_clock
 from helpers import add_kernel_held, add_kernel_registry, stub_llm_config, with_chat_llm
+from .vec_seed import load_vec_for_seed
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 # Cross-WP dependency: MemoryToolsPlugin lives in WP1b.3. Tests in this file
@@ -118,14 +119,14 @@ async def build_retention_env(config=None, fail_embed: bool = False):
     Returns (memory, embedder, channel, db).
     """
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
     # Kernel clock and idle tracker, which memory resolves in on_start (#1180).
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -146,6 +147,7 @@ async def build_retention_env(config=None, fail_embed: bool = False):
     await memory.on_start(config=config)
 
     channel = Channel(transport="irc", scope="#test")
+    await load_vec_for_seed(db)
     return memory, embedder, channel, db
 
 

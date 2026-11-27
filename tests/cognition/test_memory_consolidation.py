@@ -17,7 +17,7 @@ import aiosqlite
 import pytest
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_registry
+from helpers import add_kernel_registry, open_test_store
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
@@ -92,18 +92,16 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     also holds a forks-off FakeForkAgent under ``agent`` (view-capable).
     """
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(db_path)
-    await init_db(db)
-    if db_path != ":memory:":
-        # Same journal mode the daemon runs the persistence connection in.
-        await db.execute("PRAGMA journal_mode=wal")
+    # A file-backed store (a fresh temp file for ":memory:", which the write
+    # route refuses): ``db`` seeds, the reader/writer pair is what plugins see.
+    db, reader, writer = await open_test_store(db_path)
 
     pm = create_plugin_manager()
     # Kernel plugins the memory plugin resolves with get_dependency (#1180).
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = reader, writer
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -197,7 +195,7 @@ class TestCompactionTrigger:
         assert await fetch_watermark(db, channel.id) == rowids[-1]
         # The vec row landed alongside.
         if memory._vec_available:
-            async with db.execute("SELECT count(*) FROM memory_vec") as cursor:
+            async with persistence.db.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 1
         await db.close()
 
@@ -297,7 +295,7 @@ class TestEmbeddingDegradation:
         assert len(records) == 1
         assert records[0]["embedded"] == 0
         if memory._vec_available:
-            async with db.execute("SELECT count(*) FROM memory_vec") as cursor:
+            async with persistence.db.execute("SELECT count(*) FROM memory_vec") as cursor:
                 assert (await cursor.fetchone())[0] == 0
         # The failure was logged, not raised.
         assert any("embed" in rec.message.lower() for rec in caplog.records)

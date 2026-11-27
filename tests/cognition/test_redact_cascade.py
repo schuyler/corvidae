@@ -35,7 +35,8 @@ from corvidae.commands.redact import (
 
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, insert_raw_message
+from helpers import attach_store, fresh_session_db_path, CORRUPT_MESSAGES, insert_raw_message
+from .vec_seed import load_vec_for_seed
 from corvidae.hooks import create_plugin_manager
 from fake_clock import install_kernel_clock
 from corvidae.llm_plugin import LLMPlugin
@@ -49,7 +50,7 @@ from corvidae.llm_plugin import LLMPlugin
 async def make_full_db(path: str | None = None) -> aiosqlite.Connection:
     """Open (or create) an aiosqlite DB with WAL mode, message_log schema,
     and the full Phase 1b memory schema (memory, memory_fts, message_fts, etc.)."""
-    db = await aiosqlite.connect(path or ":memory:")
+    db = await aiosqlite.connect(path or fresh_session_db_path(), isolation_level=None)
     await db.execute("PRAGMA journal_mode = WAL")
     await init_db(db)
 
@@ -58,7 +59,7 @@ async def make_full_db(path: str | None = None) -> aiosqlite.Connection:
     # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     from corvidae.llm_plugin import LLMPlugin
@@ -88,6 +89,7 @@ async def make_full_db(path: str | None = None) -> aiosqlite.Connection:
     await memory.on_init(pm=pm, config=config)
     await memory.on_start(config=config)
 
+    await load_vec_for_seed(db)
     return db
 
 
@@ -514,7 +516,7 @@ class TestPrePhase1bDb:
         because triggers/backfill index current content — bootstrap-mapping §4.11.)
         """
         # 1. Build pre-1b DB, redact the secret
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await db.execute("PRAGMA journal_mode = WAL")
         await init_db(db)
         await db.commit()
@@ -530,7 +532,7 @@ class TestPrePhase1bDb:
         # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
 
         llm = LLMPlugin()
@@ -720,7 +722,7 @@ async def _state(path: str, ids: dict) -> tuple[dict, dict, bool]:
     """(message msg1, memory record, vec row present) read with sqlite-vec loaded."""
     import sqlite_vec
 
-    db = await aiosqlite.connect(path)
+    db = await aiosqlite.connect(path, isolation_level=None)
     try:
         await db.enable_load_extension(True)
         await db.load_extension(sqlite_vec.loadable_path())

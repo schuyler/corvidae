@@ -15,7 +15,7 @@ import aiosqlite
 import pytest
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_registry
+from helpers import attach_store, fresh_session_db_path, add_kernel_registry
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -48,7 +48,7 @@ async def build_memory_plugin(config: dict | None = None):
     tests only need the config-derived dimensions.
     """
     config = config if config is not None else EMBED_CONFIG
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
@@ -56,7 +56,7 @@ async def build_memory_plugin(config: dict | None = None):
     add_kernel_registry(pm)
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     llm = LLMPlugin()
@@ -184,7 +184,7 @@ class TestDegradedStart:
 class TestEncoderMismatch:
     async def test_encoder_mismatch_logs_error_and_disables_embedding(self, caplog):
         """A stored encoder differing from config is an ERROR, not silent mixing."""
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
         # Pre-seed embedding_meta with a different encoder.
         await db.execute(
@@ -202,7 +202,7 @@ class TestEncoderMismatch:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         llm = LLMPlugin()
         pm.register(llm, name="llm")
@@ -255,7 +255,7 @@ class TestPrefixSupport:
 
     async def test_prefix_mismatch_disables_embedding_and_logs_error(self, caplog):
         """item 5: stored prefix != config prefix → ERROR log + _encoder_mismatch True."""
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
         # Pre-seed a table that already has prefix columns (simulates a store
         # built with the new schema) but with different prefix values.
@@ -277,7 +277,7 @@ class TestPrefixSupport:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         llm = LLMPlugin()
         pm.register(llm, name="llm")
@@ -299,7 +299,7 @@ class TestPrefixSupport:
 
     async def test_schema_upgrade_old_shape_prefix_less_config(self):
         """item 8a: old two-column embedding_meta + no prefix config → ALTER adds columns."""
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
         # Pre-seed the old two-column shape (as existed before this feature).
         await db.execute(
@@ -317,7 +317,7 @@ class TestPrefixSupport:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         llm = LLMPlugin()
         pm.register(llm, name="llm")
@@ -340,7 +340,7 @@ class TestPrefixSupport:
 
     async def test_schema_upgrade_old_shape_with_prefix_config_yields_mismatch(self, caplog):
         """item 8b: old two-column table + prefix config → mismatch-disable, not crash."""
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         await init_db(db)
         # Pre-seed old two-column shape (no prefix columns stored).
         await db.execute(
@@ -358,7 +358,7 @@ class TestPrefixSupport:
         add_kernel_registry(pm)
         install_kernel_clock(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         llm = LLMPlugin()
         pm.register(llm, name="llm")

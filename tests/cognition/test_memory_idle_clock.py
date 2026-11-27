@@ -25,7 +25,7 @@ from corvidae_cognition import retention as retention_module
 from corvidae_cognition import memory as memory_module
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
-from helpers import FakeForkAgent, add_kernel_registry, stub_llm_config, with_chat_llm
+from helpers import attach_store, fresh_session_db_path, FakeForkAgent, add_kernel_registry, stub_llm_config, with_chat_llm
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -143,11 +143,11 @@ async def make_env(retention_runs):
         config = with_chat_llm(config or CONFIG)
         if db is None:
             # A standalone plugin manager with an in-memory session DB.
-            db = await aiosqlite.connect(":memory:")
+            db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
             await init_db(db)
             pm = create_plugin_manager()
             persistence = PersistencePlugin()
-            persistence.db = db
+            persistence.db, persistence.writer = await attach_store(db)
             pm.register(persistence, name="persistence")
             channel = Channel(transport="irc", scope="#test")
         cleanups.append(db.close)
@@ -453,7 +453,7 @@ async def test_retention_write_failure_retries_at_bounded_rate(
         def __getattr__(self, name):
             return getattr(self._real, name)
 
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
@@ -495,7 +495,7 @@ async def test_retention_arm_before_db_opens_logs_one_plain_warning(
 ):
     """Memory's on_start runs before persistence opens the DB: the retention
     arm defers with one plain WARNING (no traceback), then arms once open."""
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
     pm = create_plugin_manager()
     persistence = PersistencePlugin()  # DB not open yet, as at boot
@@ -505,7 +505,7 @@ async def test_retention_arm_before_db_opens_logs_one_plain_warning(
     with caplog.at_level(logging.DEBUG, logger="corvidae.memory"):
         env = await make_env(pm=pm, db=db, persistence=persistence, channel=channel)
         # Persistence opens the DB; the re-arm then reads retention_meta.
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         await env.advance(memory_module.RETENTION_DB_RETRY_SECONDS)
 
     # Only the re-arm warning is under test. A build without sqlite-vec also

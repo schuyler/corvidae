@@ -34,7 +34,7 @@ import aiosqlite
 import pytest
 from corvidae_cognition.memory import WORST_MEMORY_LINE_PREFIX, MemoryPlugin
 from fake_clock import install_kernel_clock
-from helpers import stub_llm_config, with_chat_llm
+from helpers import attach_store, fresh_session_db_path, stub_llm_config, with_chat_llm
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType, count_tokens
@@ -69,12 +69,12 @@ async def build_env(config: dict | None = None, *, with_spy_funnel: bool = False
     # ``with_spy_funnel`` an AsyncMock-backed plugin named "funnel" is
     # registered, to prove memory no longer calls it.
     config = with_chat_llm(config or EMBED_CONFIG)
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
     await init_db(db)
     pm = create_plugin_manager()
     install_kernel_clock(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
     recorder = add_trace(pm, TraceRecorder())
     llm = LLMPlugin()

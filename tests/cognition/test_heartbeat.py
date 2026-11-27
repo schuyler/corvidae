@@ -26,7 +26,7 @@ from corvidae.hooks import (
     validate_dependencies,
 )
 from corvidae.llm_plugin import LLMPlugin
-from helpers import with_chat_llm
+from helpers import attach_store, fresh_session_db_path, with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
@@ -98,12 +98,12 @@ async def make_env():
         # Memory parses llm: in on_init, so the config needs a chat profile.
         config = with_chat_llm(config)
         # Session DB and persistence, which memory reads through.
-        db = await aiosqlite.connect(":memory:")
+        db = await aiosqlite.connect(fresh_session_db_path(), isolation_level=None)
         cleanups.append(db.close)
         await init_db(db)
         pm = create_plugin_manager()
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         pm.register(ChannelRegistry(), name="registry")
 
