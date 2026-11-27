@@ -139,6 +139,14 @@ class TestTheWeightingBeatsTheFlatHeuristic:
 
 
 class TestTheEstimateStaysItself:
+    """Regression guards, not evidence of the fix.
+
+    Each of these passes with `ensure_ascii=True` as well; they are here so a
+    later change cannot quietly move ASCII cost, reload behaviour or tag
+    handling while "fixing" the estimate. The cases that exercise #754 are in
+    the two classes above.
+    """
+
     def test_ascii_row_is_unchanged(self):
         """ASCII has no escaped form, so its count cannot move with this fix."""
         assert message_tokens(_row(ASCII)) == count_tokens(json.dumps(_row(ASCII)))
@@ -153,7 +161,15 @@ class TestTheEstimateStaysItself:
         assert message_tokens(row) == message_tokens(json.loads(json.dumps(row)))
 
     def test_a_row_that_is_not_a_mapping_is_counted_by_its_repr(self):
-        """§3.1.18.1: estimating never raises, whatever the row holds."""
+        """A row with no visible dict is counted by `repr`, not skipped.
+
+        This pins the non-mapping branch only. The wider "estimating never
+        raises" of §3.1.18.1 does not hold yet for rows that fail before any
+        count is attempted — a non-scalar key raises in `_visible`, a value
+        whose `str()` raises escapes `json.dumps`' `default=str`. Measured
+        identical on `8c8b2794` and filed as #1333; this test must not be read
+        as certifying more than the branch it exercises.
+        """
         for oddity in (42, ["not", "a", "row"], None, "bare string"):
             assert message_tokens(oddity) == count_tokens(repr(oddity))
 
@@ -164,9 +180,10 @@ class TestTheEstimateStaysItself:
         tiktoken refuses it — the rescue path in `count_tokens` is what keeps
         §3.1.18.1 true, so this pins the rescue rather than assuming it.
         """
-        if context._encoder is None:
-            pytest.skip("the rescue path under test is the one that follows an encoder failure")
 
+        # No skip guard: this case installs its own encoder, so it exercises the
+        # rescue on a tokenizer-less machine too. `count_tokens` only bypasses
+        # `encode` when `_encoder` is None, and here it is not.
         class RefusingEncoder:
             """Any encoder failure routes to the fallback; tiktoken refuses a lone surrogate."""
 
