@@ -395,3 +395,51 @@ def test_the_revoke_bound_fits_inside_the_configured_budget(tmp_path: Path) -> N
         assert writer._revoke_bound_s < small
     finally:
         writer._conn.close()
+
+
+async def test_a_stalled_unit_through_write_leaves_the_loop_responsive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1315 critical, driven through the real path: write() → _revoke → outcome.
+
+    The unit function takes the unit's own lock and then sleeps, which is what a
+    statement stuck in a C call presents to the revoker. Revocation gives up at
+    the bound; the awaiting loop must keep running (a wedged loop disarms
+    shutdown's force-exit) and the caller must see WriteRevoked.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=None)
+    monkeypatch.setattr(writer, "_revoke_bound_s", 0.2)
+    release = threading.Event()
+
+    def stall(cursor: WriteCursor) -> None:
+        # Hold the unit's lock across the stall, as a statement in C does.
+        cursor._unit.lock.acquire()
+        release.wait(5.0)
+        cursor._unit.lock.release()
+
+    ticks = 0
+
+    async def count_ticks(stop: asyncio.Future[None]) -> None:
+        nonlocal ticks
+        while not stop.done():
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    stop = asyncio.get_running_loop().create_future()
+    ticker = asyncio.create_task(count_ticks(stop))
+    try:
+        with pytest.raises(WriteRevoked):
+            await asyncio.wait_for(
+                writer.write(stall, owner="stall-test", deadline_s=0.2),
+                timeout=3.0,
+            )
+        # The loop kept turning while the stalled unit was abandoned.
+        assert ticks >= 4, ticks
+    finally:
+        stop.set_result(None)
+        release.set()
+        await ticker
+        writer._conn.close()
