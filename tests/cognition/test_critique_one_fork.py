@@ -776,7 +776,11 @@ async def test_the_prompt_key_joins_a_write_off_to_the_row_of_the_same_window(
         await _judged_turn(env, "k337e", PREDICTIVE_ONLY)
         moved = _warnings(caplog, "exceeded critique.fork_timeout")
         assert len(moved) == 2, moved
-        assert f"fork prompt_sha256={row_sha}" not in moved[1], moved[1]
+        after = critique_module.prompt_sha256(
+            critique_module._window_blocks(env.channel)
+        ).hex()
+        assert f"fork prompt_sha256={after}" in moved[1], moved[1]
+        assert after != row_sha
     finally:
         await _teardown(env)
 
@@ -854,6 +858,33 @@ def test_a_window_that_cannot_be_hashed_yields_no_key_rather_than_a_raise():
     hashable = type("C", (), {"conversation": type("V", (), {"messages": [
         {"role": "user", "content": "m1"}]})})()
     assert critique_module._dispatched_prompt_sha(hashable) is not None
+
+
+async def test_a_hash_failure_still_logs_the_skip_without_a_key(
+    tmp_path, caplog, monkeypatch
+):
+    """#1337: the key is computed on the way out of an exception handler, so a
+    hashing failure must cost the key and nothing else -- not the skip line, and
+    not the caller's exception.
+    """
+
+    def raiser(messages):
+        raise TypeError("not JSON serializable")
+
+    async def hangs(i, channel):
+        await asyncio.sleep(3)
+
+    monkeypatch.setattr(critique_module, "prompt_sha256", raiser)
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337h", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert "predictive" in text and "trace k337h " in text, text
+        assert "prompt_sha256" not in text, text
+    finally:
+        await _teardown(env)
 
 # ---------------------------------------------------------------------------
 # The two config keys: startup, reload, fork time

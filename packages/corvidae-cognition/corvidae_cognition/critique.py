@@ -126,9 +126,14 @@ def _dispatched_prompt_sha(channel) -> bytes | None:
 
     The same hash ``fork_log`` writes on the row (``prompt_sha256`` over the
     window blocks), so a skip line and a completion row join on it. It is read
-    at the moment of the write-off, which matches how the row reads the window
-    after the fact: if the window moved in between, the key matches no row --
-    a miss, never a false match.
+    at the dispatch point, so it describes the prompt the fork was sent with
+    even if the window moves before the miss is logged.
+
+    Two things follow from the key being a content hash. It identifies a
+    *prompt*, not a dispatch: two forks rendered over identical windows share
+    the key, which is a true collision rather than a mis-attribution, because
+    they are the same prompt. And if the window moves between dispatch and
+    write-off, the key matches no row -- a miss, never a false match.
     """
     blocks = _window_blocks(channel)
     if not blocks:
