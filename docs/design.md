@@ -1191,8 +1191,9 @@ the deadline. The unit runs on a fresh daemon worker thread:
 
 `deadline_s` defaults to 5 s (`DEFAULT_WRITE_DEADLINE_S`) and must be in
 `(0, 30]` (`MAX_WRITE_DEADLINE_S`); anything else raises `ValueError` naming the
-owner and the range. Schema units (every plugin's DDL and migration) pass the
-maximum, since an index or `ALTER` on a large table can outlast the default.
+owner and the range. Each plugin's schema routine runs as a unit at the
+maximum (acp's one-table `CREATE TABLE IF NOT EXISTS` rides in its upsert unit
+at the default), since an index or `ALTER` on a large table can outlast the default.
 Cancelling the caller does not cut a unit short: it commits or is revoked at
 its deadline as usual and the result is dropped, so there is one way a unit
 ends, not a third.

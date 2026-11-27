@@ -1012,7 +1012,7 @@ back and the exception comes out of `await persistence.write(...)` unchanged.
   `MessageType.CONTEXT` is stored as `'context'`). Anything else raises
   `TypeError` naming your owner, the parameter and its type; convert it first
   (`sqlite_vec.serialize_float32` already returns `bytes`). Parameter sets are
-  tuples, or dicts with `str` keys; `executemany` takes any iterable of them,
+  sequences (copied to tuples) or mappings with `str` keys (copied to dicts); `executemany` takes any iterable of them,
   which the kernel turns into a list before the unit takes its lock.
 - **Deadline.** `deadline_s` defaults to 5 s and must be in `(0, 30]`, or
   `write` raises `ValueError`. Schema units (DDL, `ALTER`, backfilling a new
