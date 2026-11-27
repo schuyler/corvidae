@@ -18,6 +18,7 @@ import enum
 import logging
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_WRITE_DEADLINE_S: float = 5.0
 # Largest deadline any caller may ask for (schema units use it).
 MAX_WRITE_DEADLINE_S: float = 30.0
+#: How long ``close()`` waits for a running unit to yield to revocation (#1315).
+#: A statement that never reaches SQLite's interrupt check (a read on a hung
+#: device, the busy wait on ``COMMIT`` outside WAL) makes the revoker wait with
+#: no bound, and shutdown waits with it. Past this, shutdown logs and leaves the
+#: connection to process exit: closing under a live worker crashed or hung the
+#: interpreter in #1310's testing.
+CLOSE_REVOKE_BOUND_S: float = 5.0
 
 # Unit lifecycle states, written only under the unit's lock.
 _RUNNING = "running"
@@ -411,21 +419,28 @@ class SessionWriter:
                     return
         signal(done)
 
-    def _end_transaction(self, unit: _Unit) -> bool:
+    def _end_transaction(
+        self, unit: _Unit, *, bound_s: float | None = None
+    ) -> bool | None:
         """Interrupt and roll back ``unit`` unless it already finished.
 
-        Returns True when this call revoked it. Runs on a daemon thread: it
-        loops ``interrupt()`` until it holds the unit lock, so it works even
-        while the unit is inside a long statement.
+        Returns True when this call revoked it, False when the unit had already
+        finished, and None when ``bound_s`` expired first — the unit's statement
+        is not reaching SQLite's interrupt check, so waiting longer cannot help
+        (#1315). Runs on a daemon thread: it loops ``interrupt()`` until it holds
+        the unit lock, so it works even while the unit is inside a long statement.
         """
         conn = self._conn
         # Step 1: flag first so the worker's next lock acquisition raises.
         unit.revoke_requested = True
-        # Step 2: interrupt until the lock is ours.
+        # Step 2: interrupt until the lock is ours, or the caller's bound ends.
+        started = time.monotonic()
         while True:
             conn.interrupt()
             if unit.lock.acquire(timeout=0.05):
                 break
+            if bound_s is not None and time.monotonic() - started >= bound_s:
+                return None
         try:
             # Step 3: a terminal state means the unit finished at the wire,
             # unless the rollback was caused by our own interrupt on COMMIT.
@@ -527,7 +542,23 @@ class SessionWriter:
             # running worker crashes the interpreter.
             unit = self._last_unit
             if unit is not None and unit.state == _RUNNING:
-                if await self._blocking(lambda: self._end_transaction(unit)):
+                outcome = await self._blocking(
+                    lambda: self._end_transaction(unit, bound_s=CLOSE_REVOKE_BOUND_S)
+                )
+                if outcome is None:
+                    # The statement ignores interrupt(); waiting cannot end it.
+                    # Leave the connection to process exit rather than close it
+                    # under a running worker (#1315, and #1310's crash).
+                    logger.error(
+                        "write unit from %r did not yield to revocation within "
+                        "%g s at shutdown on %s; its statement ignores "
+                        "interrupt(), so the connection is left open for process "
+                        "exit instead of being closed under a running worker",
+                        unit.owner, CLOSE_REVOKE_BOUND_S, "sessions.db",
+                        extra={"owner": unit.owner},
+                    )
+                    return
+                if outcome:
                     logger.warning(
                         "write unit from %r was still running at shutdown; "
                         "rolled back, its write was discarded", unit.owner,

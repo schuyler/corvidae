@@ -235,3 +235,64 @@ def test_r6_refuses_non_serialized_sqlite(
     # The message names the value found and the remedy to apply.
     assert "threadsafety == 1" in message
     assert "SQLITE_THREADSAFE=1" in message
+
+
+async def test_close_is_bounded_when_a_statement_ignores_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1315: a statement that never yields to ``interrupt()`` must not hang close.
+
+    Simulated from the revoker's side: the unit's lock is held by a thread that
+    never releases it, which is the observable a statement that ignores
+    ``interrupt()`` presents — ``acquire`` never succeeds however often the loop
+    interrupts (``sqlite3.Connection.interrupt`` is read-only in C, so the
+    interrupt itself cannot be stubbed). Past the bound, ``close()`` must log
+    and leave the connection open rather than closing it under the worker.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "CLOSE_REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("stuck-owner", 0.2)
+    unit.state = sw._RUNNING
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock() -> None:
+        unit.lock.acquire()
+        holding.set()
+        release.wait(5.0)
+        unit.lock.release()
+
+    holder = threading.Thread(target=hold_the_lock, daemon=True)
+    holder.start()
+    holding.wait(2.0)
+
+    writer._last_unit = unit
+
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(writer.close(), timeout=3.0)
+        elapsed = time.monotonic() - started
+        # Left open: the connection is still usable after close() returned.
+        still_open = writer._conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        release.set()
+        holder.join(2.0)
+        writer._conn.close()
+
+    # Bounded: it returned on its own bound, not on the unit finishing.
+    assert elapsed < 1.0, elapsed
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == "corvidae.session_writer"
+    ]
+    assert len(errors) == 1
+    message = errors[0].getMessage()
+    assert "stuck-owner" in message
+    assert "ignores interrupt" in message
+    assert still_open
+    assert writer._closed is True
