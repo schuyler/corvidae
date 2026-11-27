@@ -443,3 +443,40 @@ async def test_a_stalled_unit_through_write_leaves_the_loop_responsive(
         release.set()
         await ticker
         writer._conn.close()
+
+
+async def test_close_does_not_close_the_connection_after_an_abandonment(
+    tmp_path: Path,
+) -> None:
+    """#1315, third recurrence: after a give-up, close() must not close on the loop.
+
+    ``sqlite3.Connection.close()`` waits for a statement still inside the
+    connection; with an abandoned unit that statement never returns, so closing
+    here blocks the event loop — the hang the issue exists to remove.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._REVOKED
+    writer._last_unit = unit
+    writer._abandoned = True
+
+    real_conn = writer._conn
+    closed: list[bool] = []
+
+    def record_close() -> None:
+        closed.append(True)
+
+    # A stand-in, because sqlite3.Connection.close is read-only in C; reaching it
+    # at all is what the assertion detects.
+    writer._conn = SimpleNamespace(close=record_close)  # type: ignore[assignment]
+    try:
+        started = time.monotonic()
+        await asyncio.wait_for(writer.close(), timeout=3.0)
+        assert time.monotonic() - started < 0.5
+        assert closed == []
+        assert writer._closed is True
+    finally:
+        writer._conn = real_conn  # type: ignore[assignment]
+        real_conn.close()

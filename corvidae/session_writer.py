@@ -219,6 +219,9 @@ class SessionWriter:
         self._closed = False
         # The most recent unit; close() ends it if a cancelled loop left it running.
         self._last_unit: _Unit | None = None
+        #: Set when a revocation gave up: the worker still holds the connection
+        #: inside a statement, so closing it here would block the loop (#1315).
+        self._abandoned = False
 
     @classmethod
     def open(
@@ -488,6 +491,7 @@ class SessionWriter:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             unit.state, unit.exc = _REVOKED, None
+            self._abandoned = True
             return True
         finally:
             unit.lock.release()
@@ -606,6 +610,13 @@ class SessionWriter:
             if self._closed:
                 return
             self._closed = True
+            if self._abandoned:
+                # A previous revocation gave up: the connection is still inside a
+                # statement the worker cannot leave, and sqlite3.close() waits for
+                # it. Closing here blocks the loop and disarms shutdown's
+                # force-exit (#1315); the log line from _revoke already named the
+                # owner, so leave the connection to process exit.
+                return
             # A unit still running here means its awaiting task was cancelled
             # (shutdown): end it first, since closing the connection under a
             # running worker crashes the interpreter.
