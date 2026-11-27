@@ -82,6 +82,8 @@ class TestFallbackCountsNonAsciiToo:
 
     @pytest.mark.parametrize("name,text", [("cjk", CJK), ("emoji", EMOJI)])
     def test_fallback_lands_near_the_tokenizer_within_its_envelope(self, name, text, monkeypatch):
+        if context._encoder is None:
+            pytest.skip("no tokenizer: `count_tokens` here would be the fallback being tested")
         truth = count_tokens(text)  # tokenizer path, before the fallback is forced
         monkeypatch.setattr(context, "_encoder", None)
         est = message_tokens(_row(text))
@@ -96,6 +98,44 @@ class TestFallbackCountsNonAsciiToo:
         row = _row(ASCII)
         monkeypatch.setattr(context, "_encoder", None)
         assert message_tokens(row) == int(len(json.dumps(row)) / context._FALLBACK_CHARS_PER_TOKEN)
+
+
+class TestTheWeightingBeatsTheFlatHeuristic:
+    """The fallback is still a guess; the claim is only that it is a better one.
+
+    A sweep of 17 scripts at 15:14:09Z put the weighted estimate between 0.36x
+    of the tokenizer's count and 1.88x, where the same fallback run flat at 3.5
+    characters per token ranged 0.11x to 1.88x. This pins the direction of the
+    improvement on a corpus rather than the constants: if a future change breaks
+    the weighting, the flat heuristic wins and this fails.
+
+    It deliberately does not compare against the pre-#754 form (flat on escaped
+    text, 0.59x to 2.62x): over-count and under-count can be equally far from
+    the truth, and two errors cancelling was never the thing to preserve.
+    """
+
+    CORPUS = [
+        "中文汉字测试窗口令牌估算",  # Han
+        "привет мир оценка",  # Cyrillic
+        "ሰላም ዓለም ግምት",  # Ge'ez: the worst under-count in the sweep
+        "สวัสดีชาวโลก",  # Thai
+        "नमस्ते दुनिया अनुमान",  # Devanagari
+        "e\u0301k\u0307m\u0307 n\u0303a\u0308o\u030c",  # combining marks
+        "\U0001f600\U0001f680",  # emoji
+    ]
+
+    def test_weighted_fallback_is_closer_than_three_and_a_half_chars(self, monkeypatch):
+        if context._encoder is None:
+            pytest.skip("no tokenizer to measure the two guesses against")
+        row = _row(" ".join(phrase * 40 for phrase in self.CORPUS))
+        truth = count_tokens(json.dumps(row, ensure_ascii=False))
+        monkeypatch.setattr(context, "_encoder", None)
+        weighted = message_tokens(row)
+        flat = int(len(json.dumps(row, ensure_ascii=False)) / context._FALLBACK_CHARS_PER_TOKEN)
+        assert abs(weighted - truth) < abs(flat - truth), (
+            f"weighted fallback {weighted} is no closer to {truth} than the flat "
+            f"heuristic's {flat} — the weighting is doing nothing (#754)"
+        )
 
 
 class TestTheEstimateStaysItself:
@@ -117,13 +157,23 @@ class TestTheEstimateStaysItself:
         for oddity in (42, ["not", "a", "row"], None, "bare string"):
             assert message_tokens(oddity) == count_tokens(repr(oddity))
 
-    def test_an_unpaired_surrogate_is_estimated_without_raising(self):
+    def test_an_unpaired_surrogate_is_estimated_without_raising(self, monkeypatch):
         """A lone surrogate decodes from `json.loads` and must still be countable.
 
         With escapes it never reached the tokenizer; unescaped it does, and
         tiktoken refuses it — the rescue path in `count_tokens` is what keeps
         §3.1.18.1 true, so this pins the rescue rather than assuming it.
         """
+        if context._encoder is None:
+            pytest.skip("the rescue path under test is the one that follows an encoder failure")
+
+        class RefusingEncoder:
+            """Any encoder failure routes to the fallback; tiktoken refuses a lone surrogate."""
+
+            def encode(self, text, **kwargs):
+                raise UnicodeEncodeError("utf-8", text, 0, len(text), "surrogates not allowed")
+
+        monkeypatch.setattr(context, "_encoder", RefusingEncoder())
         lone = json.loads('"\\ud800"')
         est = message_tokens(_row(f"before{lone}after"))
         assert isinstance(est, int) and est > 0, f"surrogate row estimated as {est!r}"

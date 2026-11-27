@@ -41,9 +41,15 @@ _FALLBACK_CHARS_PER_TOKEN: float = 3.5
 # Per-character token cost for non-ASCII text in the same fallback, measured
 # against cl100k_base on the samples in #754 (probe 14:42:50Z): 5760 CJK
 # characters cost 5760 tokens and 1440 emoji cost 2880, i.e. one token per
-# BMP character and two per astral one. Kept as two constants rather than a
-# lookup table: the fallback is a rescue path, and these are within a factor
-# on the inputs the fallback has to survive.
+# BMP character and two per astral one. A sweep of 17 scripts at 15:14:09Z put
+# the weighted estimate between 0.36x of the tokenizer's count (Ge'ez) and 1.88x
+# (the ASCII heuristic, untouched here), against 0.11x to 1.88x for the same
+# fallback run flat on unescaped text: the weighting lifts the worst under-count
+# roughly three-fold. Before #754 the escaped form made that flat heuristic read
+# 0.59x to 2.62x — two errors partly cancelling by accident, which is why the
+# serialization keyword and this weighting belong in one change and not one
+# without the other. Kept as two constants rather than a lookup table: the
+# fallback is a rescue path for when the real thing is absent.
 _FALLBACK_TOKENS_PER_WIDE: float = 1.0
 _FALLBACK_TOKENS_PER_ASTRAL: float = 2.0
 
@@ -87,14 +93,19 @@ def count_tokens(text: str) -> int:
     # brought the two non-ASCII samples to 1.00x of the tokenizer's count
     # (14:44:26Z: CJK 5768 against 5760, emoji 2888 against 2880). The ASCII
     # bias is pre-existing and untouched here.
-    wide = astral = 0
-    for ch in text:
-        codepoint = ord(ch)
-        if codepoint > 0xFFFF:
-            astral += 1
-        elif codepoint >= 0x80:
-            wide += 1
-    ascii_chars = len(text) - wide - astral
+    # Counts by codepoint range through the codecs rather than a per-character
+    # Python loop: this runs once per row on every compaction pass and once per
+    # candidate page in the file tool's budget, where a Python scan of a large
+    # page is real time. Measured on 1,760,000 characters of mixed text, twice
+    # (15:12:33Z and 15:15:39Z): 5.0ms and 6.8ms per call by codec against
+    # 84.3ms and 89.4ms by loop, with identical counts on every sample.
+    # `surrogatepass` keeps a lone surrogate (which
+    # reaches here because the encoder refused it) from raising in the fallback
+    # too; it takes a single UTF-16 unit, so it is weighted as the BMP
+    # character it is.
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    astral = len(text.encode("utf-16-le", "surrogatepass")) // 2 - len(text)
+    wide = len(text) - ascii_chars - astral
     return int(
         ascii_chars / _FALLBACK_CHARS_PER_TOKEN
         + wide * _FALLBACK_TOKENS_PER_WIDE
