@@ -480,3 +480,54 @@ async def test_close_does_not_close_the_connection_after_an_abandonment(
     finally:
         writer._conn = real_conn  # type: ignore[assignment]
         real_conn.close()
+
+
+async def test_a_real_abandonment_keeps_the_loop_free_through_close(
+    tmp_path: Path,
+) -> None:
+    """#1315, end to end: write() stalls, the unit is abandoned, close() returns.
+
+    The unit function takes the unit's own lock and sleeps — what a statement
+    inside a C call presents to the revoker — so revocation gives up on the real
+    path and the flag is set by the code, not by the test. The loop must keep
+    turning while `close()` runs, and the connection must be left open.
+    """
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=0.5)
+    release = threading.Event()
+
+    def stall(cursor: WriteCursor) -> None:
+        cursor._unit.lock.acquire()
+        release.wait(5.0)
+        cursor._unit.lock.release()
+
+    ticks = 0
+
+    async def count_ticks(stop: asyncio.Future[None]) -> None:
+        nonlocal ticks
+        while not stop.done():
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    stop = asyncio.get_running_loop().create_future()
+    ticker = asyncio.create_task(count_ticks(stop))
+    try:
+        with pytest.raises(WriteRevoked):
+            await asyncio.wait_for(
+                writer.write(stall, owner="stall-test", deadline_s=0.2), timeout=4.0
+            )
+        assert writer._abandoned is True  # set by _revoke, not by the test
+        started = time.monotonic()
+        await asyncio.wait_for(writer.close(), timeout=2.0)
+        elapsed = time.monotonic() - started
+        # A wedged loop could neither finish close() nor run the ticker after it.
+        assert elapsed < 1.0, elapsed
+        ticks_before = ticks
+        await asyncio.sleep(0.15)
+        assert ticks > ticks_before, "the loop stopped turning after close()"
+        # Left open: the connection still answers after close().
+        assert writer._conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        stop.set_result(None)
+        release.set()
+        await ticker
+        writer._conn.close()

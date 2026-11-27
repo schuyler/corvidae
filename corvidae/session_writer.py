@@ -491,7 +491,6 @@ class SessionWriter:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             unit.state, unit.exc = _REVOKED, None
-            self._abandoned = True
             return True
         finally:
             unit.lock.release()
@@ -511,6 +510,7 @@ class SessionWriter:
                 extra={"owner": unit.owner},
             )
             unit.state, unit.exc = _REVOKED, None
+            self._abandoned = True
             return
         if not outcome:
             return
@@ -643,7 +643,10 @@ class SessionWriter:
                         "write unit from %r was still running at shutdown; "
                         "rolled back, its write was discarded", unit.owner,
                     )
-            self._conn.close()
+            # Off the loop: sqlite3.Connection.close() waits for a statement
+            # still inside the connection, so a wrong guard here must not be able
+            # to wedge the event loop (#1315, three rounds of it).
+            await self._blocking(self._conn.close)
         finally:
             lock.release()
 
