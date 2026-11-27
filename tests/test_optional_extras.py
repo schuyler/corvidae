@@ -183,6 +183,46 @@ def _is_type_checking(test: ast.expr) -> bool:
     return "TYPE_CHECKING" in {getattr(test, "id", None), getattr(test, "attr", None)}
 
 
+def _re_raise_guard_names(node: ast.Try) -> frozenset[str]:
+    """The module names a ``try``/``except ModuleNotFoundError`` block vouches for.
+
+    The tree's own correct guard, written a PR before the helper existed and cited
+    in #1287 as the exemplar, is::
+
+        try:
+            import acp as _acp
+        except ModuleNotFoundError as exc:
+            if exc.name != "acp":
+                raise
+
+    It skips when the extra is absent and re-raises when the package is present but
+    broken, which is the absent-versus-broken rule the helper enforces. The literal
+    it compares ``exc.name`` against is the name being vouched for.
+    """
+    vouched: set[str] = set()
+    for handler in node.handlers:
+        handler_type = handler.type
+        kind = getattr(handler_type, "id", None) or getattr(handler_type, "attr", None)
+        if kind not in {"ModuleNotFoundError", "ImportError"}:
+            continue
+        for sub in ast.walk(handler):
+            if not isinstance(sub, ast.If) or not any(isinstance(n, ast.Raise) for n in ast.walk(sub)):
+                continue
+            comparisons = sub.test.values if isinstance(sub.test, ast.BoolOp) else (sub.test,)
+            for cmp in comparisons:
+                if not isinstance(cmp, ast.Compare):
+                    continue
+                sides = [cmp.left, *cmp.comparators]
+                if not any(isinstance(x, ast.Attribute) and x.attr == "name" for x in sides):
+                    continue
+                vouched |= {
+                    x.value
+                    for x in sides
+                    if isinstance(x, ast.Constant) and isinstance(x.value, str)
+                }
+    return frozenset(vouched)
+
+
 def _import_time_imports(tree: ast.Module):
     """Yield ``(lineno, top_level_name, guarded_names)`` for import-time imports.
 
@@ -203,6 +243,11 @@ def _import_time_imports(tree: ast.Module):
                 continue
             if isinstance(node, ast.With):
                 yield from walk(node.body, guarded | _guarded_names(node))
+                continue
+            if isinstance(node, ast.Try):
+                yield from walk(node.body, guarded | _re_raise_guard_names(node))
+                for branch in [*[h.body for h in node.handlers], node.orelse, node.finalbody]:
+                    yield from walk(branch, guarded)
                 continue
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 if isinstance(node, ast.ImportFrom) and node.level:
@@ -242,13 +287,44 @@ def _extra_import_names() -> set[str]:
                 names.add(child.name)
 
     # Extras whose distribution is third-party rather than a workspace package
-    # (``acp``, ``discord``) are invisible to the walk above, and their extra key
-    # is normally also their import root. ``sys.stdlib_module_names`` is what keeps
-    # the ``signal`` extra from turning every ``import signal`` in a test file into
-    # an apparent extra import; 1 such key is dropped this way.
-    extras = tomllib.loads((_TESTS_DIR.parent / "pyproject.toml").read_text(encoding="utf-8"))
-    keys = {k.replace("-", "_") for k in extras["project"]["optional-dependencies"]} - {"dev"}
-    return names | (keys - set(sys.stdlib_module_names))
+    # (``acp``, ``discord``, ``emoji``) are invisible to the walk above, so the
+    # extra key is the only clue to their import root — and that clue is wrong in
+    # two directions, hence 2 filters: ``signal`` is a stdlib module name, and
+    # ``cognition`` is this tree's own test package. Where a key's root differs from
+    # the key in a way no walk can see (``signal`` → ``emoji``), the root is listed
+    # by hand below.
+    cfg = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    keys = {k.replace("-", "_") for k in cfg["project"]["optional-dependencies"]} - {"dev"}
+    keys -= set(sys.stdlib_module_names) | _tree_local_names()
+    keys.add("emoji")
+    return names | keys
+
+
+def _tree_local_names() -> set[str]:
+    """Top-level names already importable from pytest's own ``pythonpath``.
+
+    An extra key is a guess at an import root, and this tree collides with the
+    guess: ``tests/cognition/__init__.py`` is empty and ``pythonpath`` includes
+    ``tests``, so ``from cognition.test_redact_cascade import …`` is a sibling-test
+    import inside the test tree, not an extra. Guarding it would add a skip that can
+    never fire. The ``packages/*`` walk is exempt from this filter because those are
+    declared workspace packages — so ``corvidae_restart`` stays enforced even though
+    ``pythonpath`` also lists ``packages/corvidae-restart`` and it cannot error
+    today. That asymmetry is deliberate, not an oversight.
+    """
+    cfg = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    entries = cfg["tool"]["pytest"]["ini_options"].get("pythonpath", [])
+    found: set[str] = set()
+    for entry in entries:
+        directory = _REPO_ROOT / entry
+        if not directory.is_dir():
+            continue
+        for child in directory.iterdir():
+            if child.is_dir() and (child / "__init__.py").is_file():
+                found.add(child.name)
+            elif child.suffix == ".py" and child.name != "conftest.py":
+                found.add(child.stem)
+    return found
 
 
 def _scanned_files() -> list[pathlib.Path]:
@@ -282,7 +358,7 @@ def _scanned_files() -> list[pathlib.Path]:
 
 
 _UNGUARDED_DEBT = frozenset({
-    # cognition — 73
+    # cognition — 68
     "tests/cognition/test_appraisal_fork.py:corvidae_cognition",
     "tests/cognition/test_appraisal_no_vector.py:corvidae_cognition",
     "tests/cognition/test_appraisal_stage2.py:corvidae_cognition",
@@ -303,7 +379,6 @@ _UNGUARDED_DEBT = frozenset({
     "tests/cognition/test_fork_log_digest_granularity.py:corvidae_cognition",
     "tests/cognition/test_fork_log_read_guard.py:corvidae_cognition",
     "tests/cognition/test_fork_log_snapshot_capture.py:corvidae_cognition",
-    "tests/cognition/test_fts_sites.py:cognition",
     "tests/cognition/test_funnel_policy.py:corvidae_cognition",
     "tests/cognition/test_funnel_ponder_and_reload.py:corvidae_cognition",
     "tests/cognition/test_goals.py:corvidae_cognition",
@@ -346,16 +421,12 @@ _UNGUARDED_DEBT = frozenset({
     "tests/cognition/test_recall_contribution.py:corvidae_cognition",
     "tests/cognition/test_reconsolidate.py:corvidae_cognition",
     "tests/cognition/test_redact_cascade.py:corvidae_cognition",
-    "tests/cognition/test_redact_exchange_log.py:cognition",
     "tests/cognition/test_redact_exchange_log.py:corvidae_cognition",
-    "tests/cognition/test_redact_outcomes_jsonl.py:cognition",
-    "tests/cognition/test_redact_retrieval_candidates.py:cognition",
     "tests/cognition/test_retention_write_txn.py:corvidae_cognition",
     "tests/cognition/test_retrieval_benchmark.py:corvidae_cognition",
     "tests/cognition/test_retrieval_candidates.py:corvidae_cognition",
     "tests/cognition/test_retrieval_log_prune.py:corvidae_cognition",
     "tests/cognition/test_skills.py:corvidae_cognition",
-    "tests/cognition/test_transcript_access.py:cognition",
     # test_planning — 2
     "tests/test_planning/test_planning_lens.py:corvidae_cognition",
     "tests/test_planning/test_planning_lens.py:corvidae_planning",
@@ -375,8 +446,7 @@ _UNGUARDED_DEBT = frozenset({
     "tests/test_outbound_cap/test_outbound_cap.py:outbound_cap",
     # test_timepiece — 1
     "tests/test_timepiece/test_timepiece.py:corvidae_timepiece",
-    # (tests root) — 5
-    "tests/_acp_extra.py:acp",
+    # (tests root) — 4
     "tests/preflight_cleanup_child.py:corvidae_restart",
     "tests/preflight_failed_load_child.py:corvidae_restart",
     "tests/preflight_leak_child.py:corvidae_restart",
