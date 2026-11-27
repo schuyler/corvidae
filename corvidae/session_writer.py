@@ -438,8 +438,10 @@ class SessionWriter:
         # holds the route lock, so no other unit can be `_last_unit` here. A unit
         # queued behind the one that was abandoned does reach this method on a
         # writer that was healthy when it called `write()` — the refusal check at
-        # entry runs before the route lock — and for that unit the flag is still
-        # the right answer: its own answer is unknown too.
+        # entry runs before the route lock — and here the refusal is deliberately
+        # conservative and blames the wrong plugin: that unit's own answer may be
+        # known (a failed BEGIN means nothing landed) and `_abandoned_owner` is
+        # the other plugin. Naming the caller instead is #1328 item 1.
         if self._abandoned:
             raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
