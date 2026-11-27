@@ -40,6 +40,14 @@ def _row(text: str) -> dict:
 class TestEscapesAreNotCharged:
     """Two-sided bands. An upper bound alone would pass on an estimate of 0."""
 
+    @pytest.fixture(autouse=True)
+    def _require_reference_tokenizer(self):
+        """The bands are measured against `count_tokens`; with no encoder that call
+        *is* the fallback under test, so both sides would move together and the
+        asserts would pass without measuring anything (#754)."""
+        if context._encoder is None:
+            pytest.skip("no tokenizer available: the reference and the estimate share a path")
+
     @pytest.mark.parametrize("name,text", [("cjk", CJK), ("emoji", EMOJI)])
     def test_row_estimates_within_its_envelope_of_the_text(self, name, text):
         direct = count_tokens(text)

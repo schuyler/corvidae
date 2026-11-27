@@ -377,9 +377,13 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     person row's header is a separate message and is not counted here, as
     before.
 
-    Never raises on a row's content (PRD §3.1.18.1): ``default=str`` counts a
-    value JSON cannot encode by its text, and a row that is not a mapping at
-    all is counted by its repr.
+    Encoding a row is not expected to raise for ordinary content: ``default=str``
+    counts a value JSON cannot encode by its text, and a row that is not a mapping
+    at all is counted by its repr. It is not yet *never* raises: a non-scalar dict
+    key, a value whose ``str()`` raises, and cyclic content all get past both guards
+    and reach the caller, identically on the parent of this branch (#1333, which
+    #1335 closes). PRD §3.1.18.1's never-raises clause is that contract; claiming it
+    here before it holds would let a caller rely on a guarantee nothing enforces.
     """
     if not isinstance(msg, dict):
         return count_tokens(repr(msg))
