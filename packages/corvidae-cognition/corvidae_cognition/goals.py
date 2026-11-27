@@ -29,6 +29,8 @@ import aiosqlite
 import click
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
+from corvidae.persistence import PersistencePlugin
+from corvidae.session_writer import MAX_WRITE_DEADLINE_S, WriteCursor
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.config_keys import read_count, read_prompt
 from corvidae_cognition.memory import MemoryPlugin
@@ -211,34 +213,44 @@ class GoalsPlugin(CorvidaePlugin):
     def _memory(self) -> MemoryPlugin:
         return get_dependency(self.pm, "memory", MemoryPlugin)
 
+    def _persistence(self) -> PersistencePlugin:
+        """The persistence plugin: writes go through its route, reads on its reader."""
+        return get_dependency(self.pm, "persistence", PersistencePlugin)
+
     async def _ensure_schema(self) -> aiosqlite.Connection | None:
-        """Create the table (or migrate it); returns the DB, or None when
-        it isn't open yet."""
-        from corvidae.persistence import PersistencePlugin
-        db = get_dependency(self.pm, "persistence", PersistencePlugin).db
-        if db is None:
+        """Create the table (or migrate it); returns the read connection, or
+        None when the store isn't open yet."""
+        persistence = self._persistence()
+        db = persistence.db
+        if db is None or persistence.writer is None:
             return None
         if not self._schema_ready:
-            await db.execute(GOALS_DDL)
-            # Migrate existing tables that lack the status column.
-            async with db.execute("PRAGMA table_info(goals)") as cur:
-                cols = {row[1] for row in await cur.fetchall()}
-            if "status" not in cols:
-                await db.execute(
-                    "ALTER TABLE goals ADD COLUMN status TEXT NOT NULL DEFAULT 'open'"
-                )
-                logger.info("goals: migrated existing table (added status column)")
-            if "position" not in cols:
-                # Existing goals keep id order: position = id.
-                await db.execute(
-                    "ALTER TABLE goals ADD COLUMN position REAL NOT NULL DEFAULT 0"
-                )
-                await db.execute("UPDATE goals SET position = id WHERE position = 0")
-                logger.info("goals: migrated existing table (added position column)")
-            if "origin_channel" not in cols:
-                await db.execute("ALTER TABLE goals ADD COLUMN origin_channel TEXT")
-                logger.info("goals: migrated existing table (added origin_channel column)")
-            await db.commit()
+            # Schema unit: create the table and add any column an older table
+            # lacks, all in one transaction.
+            def schema(cur: WriteCursor) -> None:
+                cur.execute(GOALS_DDL)
+                cols = {row[1] for row in cur.execute("PRAGMA table_info(goals)").rows}
+                if "status" not in cols:
+                    cur.execute(
+                        "ALTER TABLE goals ADD COLUMN status TEXT NOT NULL DEFAULT 'open'"
+                    )
+                    logger.info("goals: migrated existing table (added status column)")
+                if "position" not in cols:
+                    # Existing goals keep id order: position = id.
+                    cur.execute(
+                        "ALTER TABLE goals ADD COLUMN position REAL NOT NULL DEFAULT 0"
+                    )
+                    cur.execute("UPDATE goals SET position = id WHERE position = 0")
+                    logger.info("goals: migrated existing table (added position column)")
+                if "origin_channel" not in cols:
+                    cur.execute("ALTER TABLE goals ADD COLUMN origin_channel TEXT")
+                    logger.info(
+                        "goals: migrated existing table (added origin_channel column)"
+                    )
+
+            await persistence.write(
+                schema, owner="goals", deadline_s=MAX_WRITE_DEADLINE_S
+            )
             self._schema_ready = True
         return db
 
@@ -356,7 +368,7 @@ class GoalsPlugin(CorvidaePlugin):
                 return "Error: text is empty; say what the goal is"
             if position not in ("prepend", "append"):
                 return f"Error: position must be 'prepend' or 'append', got {position!r}"
-            db = await plugin._require_db()
+            await plugin._require_db()
             now = plugin._now()
             origin_channel = (
                 _ctx.channel.id if _ctx is not None and _ctx.channel is not None else None
@@ -369,13 +381,17 @@ class GoalsPlugin(CorvidaePlugin):
                     if position == "prepend"
                     else "COALESCE((SELECT MAX(position) FROM goals), 0) + 1"
                 )
-                cursor = await db.execute(
-                    "INSERT INTO goals (text, created_at, updated_at, position, origin_channel) "
-                    f"VALUES (?, ?, ?, {edge}, ?)",
-                    (text, now, now, origin_channel),
-                )
-                await db.commit()
-            return f"Goal #{cursor.lastrowid} added."
+
+                # One INSERT; its row id is the goal's id.
+                def insert(cur: WriteCursor) -> int | None:
+                    return cur.execute(
+                        "INSERT INTO goals (text, created_at, updated_at, position, origin_channel) "
+                        f"VALUES (?, ?, ?, {edge}, ?)",
+                        (text, now, now, origin_channel),
+                    ).lastrowid
+
+                goal_id = await plugin._persistence().write(insert, owner="goals")
+            return f"Goal #{goal_id} added."
 
         async def update_goal(id: int, text: str, _ctx=None) -> str:
             """Replace the text of an open goal: outcome + pointer only — state belongs to set_goal_status, not the prose.
@@ -392,13 +408,18 @@ class GoalsPlugin(CorvidaePlugin):
                 checked = await plugin._check_open(db, id)
                 if isinstance(checked, str):
                     return checked
-                async with plugin._memory()._db_lock:
-                    await db.execute(
+                updated_at = plugin._now()
+
+                # One UPDATE of the goal's text.
+                def update(cur: WriteCursor) -> None:
+                    cur.execute(
                         "UPDATE goals SET text = ?, updated_at = ? "
                         "WHERE id = ? AND retired_at IS NULL",
-                        (text, plugin._now(), id),
+                        (text, updated_at, id),
                     )
-                    await db.commit()
+
+                async with plugin._memory()._db_lock:
+                    await plugin._persistence().write(update, owner="goals")
             return f"Goal #{id} updated."
 
         async def retire_goal(id: int, conclusion: str, _ctx=None) -> str:
@@ -449,8 +470,10 @@ class GoalsPlugin(CorvidaePlugin):
                         f"({type(exc).__name__}); the goal is still open, try again"
                     )
                 # write_record released the lock; take it for the state change only.
-                async with plugin._memory()._db_lock:
-                    cursor = await db.execute(
+
+                # One UPDATE; its rowcount says whether the goal was still open.
+                def retire(cur: WriteCursor) -> int:
+                    return cur.execute(
                         # status in the same statement as retired_at: a row that
                         # says retired_at IS NOT NULL while status reads "open" is
                         # the trap #1119 names -- any future query on status
@@ -458,9 +481,13 @@ class GoalsPlugin(CorvidaePlugin):
                         "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ?, "
                         "status = ? WHERE id = ? AND retired_at IS NULL",
                         (now, now, memory_id, RETIRED_STATUS, id),
+                    ).rowcount
+
+                async with plugin._memory()._db_lock:
+                    rowcount = await plugin._persistence().write(
+                        retire, owner="goals"
                     )
-                    await db.commit()
-                if cursor.rowcount == 0:
+                if rowcount == 0:
                     return (
                         f"Error: goal #{id} is already retired; add a new goal instead"
                     )
@@ -536,24 +563,20 @@ class GoalsPlugin(CorvidaePlugin):
                         "call list_goals for the open ids"
                     )
                 now = plugin._now()
-                async with db.execute(
-                    "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
-                    (status, now, id),
-                ) as cursor:
-                    if cursor.rowcount == 0:
-                        # Retired between the read above and this write. The
-                        # zero-row UPDATE still opened a write transaction,
-                        # and returning with it open holds the write lock
-                        # until some other plugin commits (#1211). Commit,
-                        # not roll back: this connection is shared, so a
-                        # rollback would also discard other plugins' pending
-                        # writes, and this UPDATE changed nothing.
-                        await db.commit()
-                        return (
-                            f"Error: goal #{id} was retired just now; "
-                            "add a new goal instead"
-                        )
-                await db.commit()
+
+                # One UPDATE; a zero rowcount means the goal was retired
+                # between the read above and this write.
+                def set_status(cur: WriteCursor) -> int:
+                    return cur.execute(
+                        "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
+                        (status, now, id),
+                    ).rowcount
+
+                if await plugin._persistence().write(set_status, owner="goals") == 0:
+                    return (
+                        f"Error: goal #{id} was retired just now; "
+                        "add a new goal instead"
+                    )
             # No notify on a no-op (setting the same status).
             if goal.status != status:
                 await plugin._fire_state_changed(

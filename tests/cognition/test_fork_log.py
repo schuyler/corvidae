@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.cognition.fork_log_store import close_log, open_log
 from corvidae_cognition.fork_log import (
     ForkLog,
     LABELS,
@@ -21,16 +22,16 @@ MESSAGES = [
 
 @pytest.fixture
 async def log(tmp_path):
-    log = ForkLog(str(tmp_path / "sessions.db"))
+    log = await open_log(tmp_path / "sessions.db")
     await log.open()
     try:
         yield log
     finally:
-        await log.close()
+        await close_log(log)
 
 
 async def _row(log: ForkLog, fork_id: int):
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute("SELECT * FROM fork_log WHERE id = ?", (fork_id,)) as cur:
         return await cur.fetchone()
 
@@ -110,7 +111,7 @@ async def test_the_system_prompt_is_stored_once_per_version(log):
             messages=MESSAGES,
             system_prompt="you are a test",
         )
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute("SELECT count(*) AS n FROM fork_block") as cur:
         assert (await cur.fetchone())["n"] == 1
 
@@ -172,7 +173,7 @@ async def test_evict_drops_text_and_never_a_row(log):
 
     assert freed > 0
     assert await log.bytes_used() <= before // 2
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute("SELECT count(*) AS n FROM fork_log") as cur:
         assert (await cur.fetchone())["n"] == 4
     row = await _row(log, fork_ids[0])
@@ -274,7 +275,7 @@ async def test_digests_that_do_not_describe_the_blocks_are_refused(log):
 
 
 async def _blocks(log):
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute(
         "SELECT sha256, length(text) AS n FROM fork_block ORDER BY created_at"
     ) as cur:
@@ -322,7 +323,7 @@ async def test_only_the_rows_that_named_the_dropped_text_are_stranded(log):
 
     after = {b["sha256"] for b in await _blocks(log)}
     assert len(after) == 1
-    db = await log._conn()
+    db = log.seed_db
     for fork_id in ids:
         async with db.execute(
             "SELECT system_sha256, reconstructable FROM fork_log WHERE id = ?",
@@ -358,7 +359,7 @@ async def test_the_whole_prompt_list_is_accepted_for_a_chained_row(log):
         chain_from=2,
     )
     assert await log.resolve_chain(fork_id) == [digest_of(b) for b in B[:3]]
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute(
         "SELECT count(*) AS n FROM fork_digest WHERE fork_id = ?", (fork_id,)
     ) as cur:
@@ -396,7 +397,7 @@ async def test_a_table_from_an_older_build_gains_the_new_columns(tmp_path):
 
     from corvidae_cognition.fork_log import digest_of
 
-    log = ForkLog(path)
+    log = await open_log(path)
     await log.open()
     try:
         fork_id = await log.record(
@@ -409,7 +410,7 @@ async def test_a_table_from_an_older_build_gains_the_new_columns(tmp_path):
         row = await _row(log, fork_id)
         assert row["point"] == "after-send"
     finally:
-        await log.close()
+        await close_log(log)
 
 
 async def test_a_refused_record_releases_the_write_lock(log, tmp_path):
@@ -445,7 +446,7 @@ async def test_a_refused_record_releases_the_write_lock(log, tmp_path):
     # The refused row is gone for good: the next successful record's commit
     # must not carry it into the table.
     await _fork(log, B[:2])
-    db = await log._conn()
+    db = log.seed_db
     async with db.execute("SELECT count(*) FROM fork_log") as cur:
         (count,) = await cur.fetchone()
     assert count == 2
@@ -494,3 +495,26 @@ async def test_a_refused_record_does_not_discard_a_concurrent_one(
 
     _, fork_id = await asyncio.gather(refused(), valid())
     assert await _row(log, fork_id) is not None
+
+
+async def test_a_failed_block_count_repair_does_not_fail_open(tmp_path, caplog, monkeypatch):
+    """The repair is its own unit: its failure warns and open still succeeds (#1211)."""
+
+    # The repair raises as a revoked or failed unit would.
+    def broken(cur) -> None:
+        raise RuntimeError("repair stalled")
+
+    monkeypatch.setattr(ForkLog, "_repair_block_counts", staticmethod(broken))
+    log = await open_log(tmp_path / "sessions.db")
+    try:
+        with caplog.at_level("WARNING", logger="corvidae.fork_log"):
+            await log.open()
+        # The warning names fork_log and says when the repair is retried.
+        assert any(
+            "fork_log" in r.getMessage() and "next open" in r.getMessage()
+            for r in caplog.records
+        )
+        # The log is usable: the schema unit had already committed.
+        assert await _fork(log, B[:2])
+    finally:
+        await close_log(log)

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import aiosqlite
 import pytest
 
 from corvidae.channel import Channel, ChannelRegistry
@@ -109,7 +110,10 @@ async def env(tmp_path, monkeypatch):
     # Production order: goals' on_start runs before persistence opens the DB
     # (on_start is broadcast LIFO), so goals must create its table lazily.
     await pm.ahook.on_start(config=config)
-    db = persistence.db
+    # ``db`` is a read-write autocommit seeding connection on the same file:
+    # the plugins under test read on persistence.db (read-only) and write
+    # through persistence.write, so seeds and raw checks go through this one.
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     assert llm._config.profiles["embedding"]["dimensions"] == DIMS
 
     registry: list = []
@@ -150,6 +154,8 @@ async def env(tmp_path, monkeypatch):
     idle.stop()
     await clock.close()
     await db.close()
+    await persistence.db.close()
+    await persistence.writer.close()
 
 
 def ctx_for(channel):
@@ -946,27 +952,23 @@ async def test_g4_seed_between_add_goal_read_and_write_keeps_positions_distinct(
         "INSERT INTO goals (text, created_at, updated_at, position) "
         "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)"
     )
-    real_execute = env.db.execute
+    persistence = env.goals._persistence()
+    real_write = persistence.write
     fired = []
 
-    # Wrap execute: just before add_goal's INSERT, perform the seed's insert.
-    def racing_execute(sql, *args, **kwargs):
-        if "INSERT INTO goals" in sql and "origin_channel" in sql and not fired:
+    # Wrap the write route: just before add_goal's unit runs, perform the
+    # seed's insert (committed on the seeding connection).
+    async def racing_write(fn, **kwargs):
+        if kwargs.get("owner") == "goals" and not fired:
             fired.append(True)
+            await env.db.execute(seed_sql, ("seeded", 1.0, 1.0))
+        return await real_write(fn, **kwargs)
 
-            async def seed_then_insert():
-                await real_execute(seed_sql, ("seeded", 1.0, 1.0))
-                return await real_execute(sql, *args, **kwargs)
-
-            return seed_then_insert()
-        return real_execute(sql, *args, **kwargs)
-
-    env.db.execute = racing_execute
+    persistence.write = racing_write
     try:
         await env.tools["add_goal"]("racer", _ctx=ctx)
     finally:
-        env.db.execute = real_execute
-    await env.db.commit()
+        persistence.write = real_write
 
     data = await rows(env, "SELECT text, position FROM goals")
     assert sorted(t for t, _ in data) == ["existing", "racer", "seeded"]
@@ -1062,9 +1064,8 @@ async def test_set_goal_status_on_a_just_retired_goal_leaves_no_transaction_open
 ):
     """The retired-between-read-and-write branch closes its transaction (#1211).
 
-    The zero-row UPDATE still opens an implicit write transaction on the
-    shared persistence connection; returning without ending it leaves the
-    write lock held until some other plugin happens to commit.
+    The zero-row UPDATE runs inside a write unit; the route must end it, so
+    the file's write lock is free for the next writer at once.
     """
     ctx = ctx_for(env.channel)
     await env.tools["add_goal"]("soon retired", _ctx=ctx)
@@ -1080,4 +1081,6 @@ async def test_set_goal_status_on_a_just_retired_goal_leaves_no_transaction_open
     monkeypatch.setattr(env.goals, "_get", stale_get)
     result = await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
     assert "was retired just now" in result
-    assert not env.db.in_transaction
+    # Another writer takes the write lock at once, without waiting.
+    await env.db.execute("PRAGMA busy_timeout = 0")
+    await env.db.execute("UPDATE goals SET text = 'after' WHERE id = ?", (gid,))

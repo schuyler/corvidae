@@ -21,7 +21,7 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_registry, FakeForkAgent, stub_llm_config, window_of, with_chat_llm
+from helpers import add_kernel_registry, attach_store, FakeForkAgent, stub_llm_config, window_of, with_chat_llm
 from .test_appraisal_hooks import PeerSpy, _wire
 from .test_appraisal_stage2 import StubClient, _read_appraisal, _teardown, build_env
 from tests.cognition.trace_helpers import add_trace
@@ -138,7 +138,7 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
 
     # Wire persistence, outcome_log, a stub LLM, memory and appraisal.
     db_path = str(tmp_path / "sessions.db")
-    db = await aiosqlite.connect(db_path)
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(db)
     try:
         pm = create_plugin_manager()
@@ -147,7 +147,7 @@ async def test_consolidation_uses_memorys_own_rating_and_stores_no_valence(tmp_p
         # memory's consolidation commit resolves the kernel registry (#1180).
         add_kernel_registry(pm)
         persistence = PersistencePlugin()
-        persistence.db = db
+        persistence.db, persistence.writer = await attach_store(db)
         pm.register(persistence, name="persistence")
         # The trace protocol plugin first: outcome_log depends on it.
         add_trace(pm)

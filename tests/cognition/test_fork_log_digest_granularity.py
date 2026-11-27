@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.cognition.fork_log_store import close_log, open_log
 from corvidae_cognition.fork_log import ForkLog, digest_of, prompt_sha256
 
 pytestmark = pytest.mark.timeout(30)
@@ -43,12 +44,12 @@ NO_TOOL_CALL = [{"role": "assistant", "content": None}]
 
 @pytest.fixture
 async def log(tmp_path):
-    log = ForkLog(str(tmp_path / "sessions.db"))
+    log = await open_log(tmp_path / "sessions.db")
     await log.open()
     try:
         yield log
     finally:
-        await log.close()
+        await close_log(log)
 
 
 @pytest.mark.parametrize(

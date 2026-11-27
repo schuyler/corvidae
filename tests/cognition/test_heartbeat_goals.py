@@ -14,6 +14,7 @@ import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelRegistry
@@ -145,7 +146,15 @@ async def make_env(tmp_path, monkeypatch):
         await hb.on_init(pm=pm, config=config)
 
         await pm.ahook.on_start(config=config)
+        # A read-write autocommit seeding connection on the same file: the
+        # plugins read on persistence.db (read-only) and write through the
+        # route, so seeds and raw writes go through this one.
+        seed = await aiosqlite.connect(
+            str(tmp_path / "sessions.db"), isolation_level=None
+        )
+        cleanups.append(persistence.writer.close)
         cleanups.append(persistence.db.close)
+        cleanups.append(seed.close)
         cleanups.append(memory.on_stop)
         cleanups.append(hb.on_stop)
 
@@ -153,7 +162,7 @@ async def make_env(tmp_path, monkeypatch):
         pm.hook.register_tools(tool_registry=registry)
         tools = {t.name: t.fn for t in registry}
         return SimpleNamespace(
-            pm=pm, clock=clock, agent=agent, tools=tools, db=persistence.db,
+            pm=pm, clock=clock, agent=agent, tools=tools, db=seed,
         )
 
     yield make

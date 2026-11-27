@@ -24,14 +24,22 @@ import json
 import logging
 import time
 import zlib
-from typing import Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 import aiosqlite
 
+from corvidae.session_writer import MAX_WRITE_DEADLINE_S, WriteCursor
+
+if TYPE_CHECKING:
+    from corvidae.persistence import PersistencePlugin
+
 logger = logging.getLogger("corvidae.fork_log")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS fork_log (
+#: One statement per entry: the write route runs a unit's statements one
+#: ``execute`` at a time, because ``executescript`` commits the kernel's
+#: transaction (#1211).
+SCHEMA: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS fork_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     stage TEXT NOT NULL,
@@ -63,32 +71,31 @@ CREATE TABLE IF NOT EXISTS fork_log (
     chain_parent INTEGER,
     chain_from INTEGER NOT NULL DEFAULT 0,
     reconstructable INTEGER NOT NULL DEFAULT 1
-);
--- Only the block digests a fork appends to its parent's list: repeating the
--- whole array per fork costs more than the row (measured, #1204).
-CREATE TABLE IF NOT EXISTS fork_digest (
+)""",
+    # Only the block digests a fork appends to its parent's list: repeating the
+    # whole array per fork costs more than the row (measured, #1204).
+    """CREATE TABLE IF NOT EXISTS fork_digest (
     fork_id INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
     digest BLOB NOT NULL,
     PRIMARY KEY (fork_id, ordinal)
-);
-
--- Rendered text that has no durable home elsewhere, compressed, by hash.
-CREATE TABLE IF NOT EXISTS fork_block (
+)""",
+    # Rendered text that has no durable home elsewhere, compressed, by hash.
+    """CREATE TABLE IF NOT EXISTS fork_block (
     sha256 TEXT PRIMARY KEY,
     bytes INTEGER NOT NULL,
     created_at REAL NOT NULL,
     text BLOB NOT NULL
-);
-"""
+)""",
+)
 
 #: Built after the migration: an index over a late column cannot exist before
 #: that column does.
-INDEXES = """
-CREATE INDEX IF NOT EXISTS fork_log_ts ON fork_log (ts);
-CREATE INDEX IF NOT EXISTS fork_log_stage_ts ON fork_log (stage, ts);
-CREATE INDEX IF NOT EXISTS fork_log_label ON fork_log (label, stage);
-"""
+INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS fork_log_ts ON fork_log (ts)",
+    "CREATE INDEX IF NOT EXISTS fork_log_stage_ts ON fork_log (stage, ts)",
+    "CREATE INDEX IF NOT EXISTS fork_log_label ON fork_log (label, stage)",
+)
 
 #: Labels a finding can carry. ``ignored`` is deliberately absent: no timer
 #: writes a label, so a finding nobody resolved stays unlabeled and the census
@@ -144,32 +151,62 @@ def _dumps(value: Any) -> str | None:
 
 
 class ForkLog:
-    """One connection to the fork log; open lazily, close on shutdown."""
+    """The fork log: writes go through the persistence plugin's write route,
+    reads use its read-only connection; this class opens no connection."""
 
-    def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
-        self._db_path = db_path
+    def __init__(
+        self,
+        persistence: Callable[[], "PersistencePlugin"],
+        *,
+        sample_every: int = 50,
+    ) -> None:
+        # Resolved lazily: constructors run in on_init, before persistence
+        # has opened its store.
+        self._persistence = persistence
         self._sample_every = max(1, sample_every)
         self._seen = 0
         #: Forks whose row could not be written. Non-zero means the corpus has
         #: a hole the queries cannot see, so the caller escalates it.
         self.write_failures = 0
-        self._db: aiosqlite.Connection | None = None
-        #: Held by every write from its first statement to its commit or
-        #: rollback. Writers share one connection, so without it one call's
-        #: rollback would discard another call's uncommitted rows, and one
-        #: call's commit would publish another's half-written record (#1211).
+        self._opened = False
+        #: Held by every write from its chain check to its commit, so a
+        #: concurrent evict or mark_unreconstructable cannot change a parent
+        #: between a record's check and its insert (#1211).
         self._write_lock = asyncio.Lock()
 
     async def open(self) -> None:
-        if self._db is not None:
+        """Create the tables and indexes once; idempotent."""
+        if self._opened:
             return
-        db = await aiosqlite.connect(self._db_path)
-        db.row_factory = aiosqlite.Row
-        await db.executescript(SCHEMA)
-        await self._migrate(db)
-        await db.executescript(INDEXES)
-        await db.commit()
-        self._db = db
+
+        # Schema unit: tables, late-column migration and indexes together.
+        def schema(cur: WriteCursor) -> None:
+            for stmt in SCHEMA:
+                cur.execute(stmt)
+            self._migrate(cur)
+            for stmt in INDEXES:
+                cur.execute(stmt)
+
+        persistence = self._persistence()
+        await persistence.write(
+            schema, owner="fork_log", deadline_s=MAX_WRITE_DEADLINE_S
+        )
+        # The repair walks the whole table, so it is its own unit: a large
+        # table must not make every open overrun. It is idempotent, so a
+        # failed or revoked run is retried at the next open.
+        try:
+            await persistence.write(
+                self._repair_block_counts,
+                owner="fork_log",
+                deadline_s=MAX_WRITE_DEADLINE_S,
+            )
+        except Exception:
+            logger.warning(
+                "fork_log: the block_count repair did not finish; it is"
+                " idempotent and retries at the next open",
+                exc_info=True,
+            )
+        self._opened = True
 
     #: Columns added after the first release. ``CREATE TABLE IF NOT EXISTS``
     #: does nothing to a table that already exists, so a database written by an
@@ -204,17 +241,23 @@ class ForkLog:
         "reconstructable": "INTEGER NOT NULL DEFAULT 1",
     }
 
-    async def _migrate(self, db: aiosqlite.Connection) -> None:
-        async with db.execute("PRAGMA table_info(fork_log)") as cur:
-            have = {row[1] for row in await cur.fetchall()}
+    def _migrate(self, cur: WriteCursor) -> None:
+        """Add the late columns an older table lacks; runs inside the schema unit."""
+        have = {row[1] for row in cur.execute("PRAGMA table_info(fork_log)").rows}
         for name, decl in self.LATE_COLUMNS.items():
             if name not in have:
-                await db.execute(f"ALTER TABLE fork_log ADD COLUMN {name} {decl}")
+                cur.execute(f"ALTER TABLE fork_log ADD COLUMN {name} {decl}")
                 logger.info("fork_log: added column %s to an existing table", name)
-        # A defaulted column lies about rows written before it existed: they
-        # claim zero blocks, which the length check would read as damage. This
-        # runs every open so a rewound row is repaired too; it is idempotent.
-        await db.execute(
+
+    @staticmethod
+    def _repair_block_counts(cur: WriteCursor) -> None:
+        """Fix block_count on rows written before it existed.
+
+        A defaulted column lies about rows written before it existed: they
+        claim zero blocks, which the length check would read as damage. This
+        runs every open so a rewound row is repaired too; it is idempotent.
+        """
+        cur.execute(
             "UPDATE fork_log SET block_count = coalesce(chain_from, 0) +"
             " (SELECT count(*) FROM fork_digest"
             "  WHERE fork_digest.fork_id = fork_log.id)"
@@ -222,41 +265,45 @@ class ForkLog:
         )
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        """Nothing to close: the connections belong to the persistence plugin."""
+        self._opened = False
 
-    async def _conn(self) -> aiosqlite.Connection:
+    async def _reader(self) -> aiosqlite.Connection:
+        """The persistence plugin's read-only connection, after the schema exists."""
         await self.open()
-        assert self._db is not None
-        return self._db
+        db = self._persistence().db
+        if db is None:
+            raise RuntimeError(
+                "fork_log: the session database is not open; persistence"
+                " must start before the fork log is read"
+            )
+        return db
 
     async def store_block(self, text: str) -> str:
         """Store rendered text once, by content hash; returns the hash."""
         sha = hashlib.sha256(text.encode()).hexdigest()
-        db = await self._conn()
+        await self.open()
+        created, blob = time.time(), zlib.compress(text.encode(), 6)
+
+        # One INSERT: the text is stored once per hash.
+        def store(cur: WriteCursor) -> None:
+            cur.execute(
+                "INSERT OR IGNORE INTO fork_block (sha256, bytes, created_at, text)"
+                " VALUES (?, ?, ?, ?)",
+                (sha, len(text), created, blob),
+            )
+
         async with self._write_lock:
-            try:
-                await db.execute(
-                    "INSERT OR IGNORE INTO fork_block (sha256, bytes, created_at, text)"
-                    " VALUES (?, ?, ?, ?)",
-                    (sha, len(text), time.time(), zlib.compress(text.encode(), 6)),
-                )
-                await db.commit()
-            except BaseException:
-                # Same reason as _insert_fork: a cancelled store must not
-                # leave its transaction holding the write lock (#1211).
-                await db.rollback()
-                raise
+            await self._persistence().write(store, owner="fork_log")
         return sha
 
     async def read_block(self, sha: str) -> str | None:
-        db = await self._conn()
+        db = await self._reader()
         async with db.execute(
             "SELECT text FROM fork_block WHERE sha256 = ?", (sha,)
         ) as cur:
             row = await cur.fetchone()
-        return None if row is None else zlib.decompress(row["text"]).decode()
+        return None if row is None else zlib.decompress(row[0]).decode()
 
     async def record(
         self,
@@ -293,7 +340,7 @@ class ForkLog:
         once per version, deduped by hash, because it is the one rendered
         input with no durable home.
         """
-        db = await self._conn()
+        await self.open()
         # Every Nth fork keeps its rendered prompt: the sampling rate is the
         # only thing that costs text, and nothing else reads it.
         self._seen += 1
@@ -312,7 +359,6 @@ class ForkLog:
         reconstructable = 0 if digests is None else 1
         first, last = (None, None) if window is None else window
         return await self._insert_fork(
-            db,
             (
                 time.time(),
                 stage,
@@ -352,7 +398,6 @@ class ForkLog:
 
     async def _insert_fork(
         self,
-        db: aiosqlite.Connection,
         row: tuple,
         *,
         messages: Sequence[dict],
@@ -360,10 +405,20 @@ class ForkLog:
         chain_parent: int | None,
         chain_from: int,
     ) -> int:
-        """Insert one fork row and its digests, then commit; returns its id."""
+        """Insert one fork row and its digests in one unit; returns its id."""
         async with self._write_lock:
-            try:
-                cur = await db.execute(
+            # The chain check reads parent digests on the reader, before the
+            # unit: they are written once and never change, and the write
+            # lock keeps evict/mark_unreconstructable from racing the check.
+            tail: Sequence[bytes] = ()
+            if digests:
+                tail = await self._check_digests(
+                    messages, digests, chain_parent=chain_parent, chain_from=chain_from
+                )
+
+            # One unit: the row and its digests commit together or not at all.
+            def insert(cur: WriteCursor) -> int:
+                res = cur.execute(
                     """INSERT INTO fork_log (
                         ts, stage, point, channel_id, trace_id, lens_id, profile, model,
                         question_sha256, question_text, instruction,
@@ -375,28 +430,17 @@ class ForkLog:
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     row,
                 )
-                fork_id = int(cur.lastrowid)
-                if digests:
-                    digests = await self._check_digests(
-                        messages, digests, chain_parent=chain_parent, chain_from=chain_from
-                    )
-                    await db.executemany(
+                assert res.lastrowid is not None
+                fork_id = int(res.lastrowid)
+                if tail:
+                    cur.executemany(
                         "INSERT OR REPLACE INTO fork_digest (fork_id, ordinal, digest)"
                         " VALUES (?, ?, ?)",
-                        [(fork_id, chain_from + i, d) for i, d in enumerate(digests)],
+                        [(fork_id, chain_from + i, d) for i, d in enumerate(tail)],
                     )
-                await db.commit()
                 return fork_id
-            except BaseException:
-                # The INSERT opened a write transaction; anything that fails
-                # before the commit (a refused digest chain, a cancelled task)
-                # must end it here. Left open it holds the database's write
-                # lock until this connection's next commit, and every other
-                # writer on the file -- the conversation log included -- fails
-                # with "database is locked" meanwhile (#1211). The write lock
-                # keeps this rollback to this call's own rows.
-                await db.rollback()
-                raise
+
+            return await self._persistence().write(insert, owner="fork_log")
 
     async def _check_digests(
         self,
@@ -443,7 +487,7 @@ class ForkLog:
         offset this row claims. A partial list would describe a different
         prompt, so it is not returned.
         """
-        db = await self._conn()
+        db = await self._reader()
         memo = {} if _memo is None else _memo
         if fork_id in memo:
             return memo[fork_id]
@@ -453,7 +497,7 @@ class ForkLog:
             (fork_id,),
         ) as cur:
             row = await cur.fetchone()
-        if row is None or not row["reconstructable"]:
+        if row is None or not row[2]:
             return None
         async with db.execute(
             "SELECT ordinal, digest FROM fork_digest WHERE fork_id = ?"
@@ -461,14 +505,14 @@ class ForkLog:
             (fork_id,),
         ) as cur:
             own_rows = list(await cur.fetchall())
-        own = [bytes(r["digest"]) for r in own_rows]
+        own = [bytes(r[1]) for r in own_rows]
         # The stored ordinals must be contiguous from the offset the row claims:
         # checking only the first would rebuild a short chain out of a gap.
-        if own_rows and [r["ordinal"] for r in own_rows] != list(
-            range(row["chain_from"], row["chain_from"] + len(own_rows))
+        if own_rows and [r[0] for r in own_rows] != list(
+            range(row[1], row[1] + len(own_rows))
         ):
             return None
-        base, parent = row["chain_from"], row["chain_parent"]
+        base, parent = row[1], row[0]
         if base == 0:
             blocks = [] if parent is None else None
         elif parent is None:
@@ -483,19 +527,23 @@ class ForkLog:
             "SELECT block_count FROM fork_log WHERE id = ?", (fork_id,)
         ) as cur:
             claim = await cur.fetchone()
-        if claim is not None and claim["block_count"] != len(resolved):
+        if claim is not None and claim[0] != len(resolved):
             return None
         memo[fork_id] = resolved
         return resolved
 
     async def mark_unreconstructable(self, fork_ids: Iterable[int]) -> None:
-        db = await self._conn()
-        async with self._write_lock:
-            await db.executemany(
-                "UPDATE fork_log SET reconstructable = 0 WHERE id = ?",
-                [(i,) for i in fork_ids],
+        await self.open()
+        ids = [(i,) for i in fork_ids]
+
+        # One unit for the whole batch.
+        def mark(cur: WriteCursor) -> None:
+            cur.executemany(
+                "UPDATE fork_log SET reconstructable = 0 WHERE id = ?", ids
             )
-            await db.commit()
+
+        async with self._write_lock:
+            await self._persistence().write(mark, owner="fork_log")
 
     async def set_label(
         self, fork_id: int, label: str, *, reason: str | None = None
@@ -505,17 +553,25 @@ class ForkLog:
             raise ValueError(
                 f"fork_log: unknown label {label!r}; one of {sorted(LABELS)}"
             )
-        db = await self._conn()
-        async with self._write_lock:
-            await db.execute(
+        await self.open()
+
+        # One UPDATE: set the terminal label.
+        def set_it(cur: WriteCursor) -> None:
+            cur.execute(
                 "UPDATE fork_log SET label = ?, label_reason = ? WHERE id = ?",
                 (label, reason, fork_id),
             )
-            await db.commit()
 
-    async def counts(self, since: float | None = None) -> list[aiosqlite.Row]:
-        """Rows per stage and label, with the oldest unlabeled row's age."""
-        db = await self._conn()
+        async with self._write_lock:
+            await self._persistence().write(set_it, owner="fork_log")
+
+    async def counts(self, since: float | None = None) -> list[dict[str, Any]]:
+        """Rows per stage and label, with the oldest unlabeled row's age.
+
+        Each row is a dict keyed by column name (the shared reader returns
+        plain tuples).
+        """
+        db = await self._reader()
         sql = (
             "SELECT stage, coalesce(label, 'unlabeled') AS label, count(*) AS n,"
             " min(CASE WHEN label IS NULL THEN ts END) AS oldest_unlabeled"
@@ -527,10 +583,11 @@ class ForkLog:
             args = (since,)
         sql += " GROUP BY stage, label ORDER BY stage, n DESC"
         async with db.execute(sql, args) as cur:
-            return list(await cur.fetchall())
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r)) for r in await cur.fetchall()]
 
     async def bytes_used(self) -> int:
-        db = await self._conn()
+        db = await self._reader()
         total = 0
         for sql in (
             "SELECT coalesce(sum(length(findings_json)), 0) +"
@@ -540,7 +597,7 @@ class ForkLog:
         ):
             async with db.execute(sql) as cur:
                 row = await cur.fetchone()
-                total += int(row["n"] or 0)
+                total += int(row[0] or 0)
         return total
 
     async def evict(self, max_bytes: int) -> int:
@@ -550,10 +607,12 @@ class ForkLog:
         the remaining block text oldest-first. Labels, hashes, findings and
         question text stay.
         """
-        # One lock for the whole pass: _drop_block writes on the shared
-        # connection too and must not interleave with a record's rollback.
+        await self.open()
+        # One lock for the whole pass: _drop_block writes too and must not
+        # interleave with a record's chain check.
         async with self._write_lock:
-            db = await self._conn()
+            db = await self._reader()
+            persistence = self._persistence()
             used = await self.bytes_used()
             if used <= max_bytes:
                 return 0
@@ -563,15 +622,19 @@ class ForkLog:
                 " WHERE snapshot_sha256 IS NOT NULL ORDER BY ts"
             ) as cur:
                 snapshots = list(await cur.fetchall())
-            for row in snapshots:
+            for fork_id, snapshot_sha in snapshots:
                 if used <= max_bytes:
                     break
-                dropped = await self._drop_block(row["snapshot_sha256"])
-                await db.execute(
-                    "UPDATE fork_log SET snapshot_sha256 = NULL WHERE id = ?",
-                    (row["id"],),
-                )
-                await db.commit()
+                dropped = await self._drop_block(snapshot_sha)
+
+                # Forget the dropped snapshot on its row.
+                def forget(cur: WriteCursor, fork_id: int = fork_id) -> None:
+                    cur.execute(
+                        "UPDATE fork_log SET snapshot_sha256 = NULL WHERE id = ?",
+                        (fork_id,),
+                    )
+
+                await persistence.write(forget, owner="fork_log")
                 used -= dropped
                 freed += dropped
             if used > max_bytes:
@@ -579,46 +642,58 @@ class ForkLog:
                     "SELECT sha256 FROM fork_block ORDER BY created_at"
                 ) as cur:
                     blocks = list(await cur.fetchall())
-                for row in blocks:
+                for (sha,) in blocks:
                     if used <= max_bytes:
                         break
-                    dropped = await self._drop_block(row["sha256"])
+                    dropped = await self._drop_block(sha)
                     if not dropped:
                         continue
                     used -= dropped
                     freed += dropped
+
                     # Only the rows that named this text lose reconstructability.
-                    await db.execute(
-                        "UPDATE fork_log SET reconstructable = 0"
-                        " WHERE system_sha256 = ?",
-                        (row["sha256"],),
-                    )
-                    await db.commit()
+                    def unmark(cur: WriteCursor, sha: str = sha) -> None:
+                        cur.execute(
+                            "UPDATE fork_log SET reconstructable = 0"
+                            " WHERE system_sha256 = ?",
+                            (sha,),
+                        )
+
+                    await persistence.write(unmark, owner="fork_log")
             return freed
 
     async def _drop_block(self, sha: str) -> int:
         """Delete one stored block; the caller holds ``_write_lock``."""
-        db = await self._conn()
+        db = await self._reader()
         async with db.execute(
             "SELECT bytes, text FROM fork_block WHERE sha256 = ?", (sha,)
         ) as cur:
             row = await cur.fetchone()
         if row is None:
             return 0
-        await db.execute("DELETE FROM fork_block WHERE sha256 = ?", (sha,))
-        await db.commit()
-        return len(row["text"])
+
+        # One DELETE: drop the block's text.
+        def drop(cur: WriteCursor) -> None:
+            cur.execute("DELETE FROM fork_block WHERE sha256 = ?", (sha,))
+
+        await self._persistence().write(drop, owner="fork_log")
+        return len(row[1])
 
 
 class ForkRecorder:
-    """A plugin's view of the fork log: one connection, per-channel chains.
+    """A plugin's view of the fork log: per-channel chains.
 
     The chaining state is per recorder because a chain only extends within one
     conversation; the failure counter is here so a caller can escalate.
     """
 
-    def __init__(self, db_path: str, *, sample_every: int = 50) -> None:
-        self.log = ForkLog(db_path, sample_every=sample_every)
+    def __init__(
+        self,
+        persistence: Callable[[], "PersistencePlugin"],
+        *,
+        sample_every: int = 50,
+    ) -> None:
+        self.log = ForkLog(persistence, sample_every=sample_every)
         self._last: dict[str, tuple[int, list[bytes]]] = {}
 
     @property

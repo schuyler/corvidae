@@ -43,7 +43,7 @@ from corvidae.task import TaskPlugin, TaskQueue
 
 from tests.cognition.trace_helpers import TraceRecorder
 from fake_clock import install_kernel_clock
-from helpers import add_kernel_held, add_kernel_registry, CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
+from helpers import attach_store, add_kernel_held, add_kernel_registry, CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 
 EMPTY_VERDICT = json.dumps({"objections": []})
@@ -143,14 +143,14 @@ async def build_critique(
     db_path = str(tmp_path / "sessions.db")
     await _seed_fts(db_path, fts_contents)  # creates message_fts
 
-    db = await aiosqlite.connect(db_path)
+    db = await aiosqlite.connect(db_path, isolation_level=None)
     await init_db(db)
 
     pm = create_plugin_manager()
     # outcome_log resolves the kernel registry with get_dependency (#1180).
     add_kernel_registry(pm)
     persistence = PersistencePlugin()
-    persistence.db = db
+    persistence.db, persistence.writer = await attach_store(db)
     pm.register(persistence, name="persistence")
 
     # The trace protocol plugin and a listener on it; the specs themselves

@@ -31,6 +31,7 @@ import math
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
+from corvidae.persistence import PersistencePlugin
 from corvidae_cognition.fork_log import ForkRecorder
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.task import Task, TaskPlugin
@@ -499,8 +500,9 @@ class AppraisalPlugin(CorvidaePlugin):
         self._before_send_prompt = resolve_prompt(
             config, "appraisal.before_send_fork_prompt", DEFAULT_BEFORE_SEND_FORK_PROMPT
         )
+        # Persistence resolves lazily: it has not started during on_init.
         self._fork_log = ForkRecorder(
-            config.get("daemon", {}).get("session_db", "sessions.db"),
+            lambda: get_dependency(self.pm, "persistence", PersistencePlugin),
             sample_every=int(config.get("fork_log", {}).get("sample_every", 50)),
         )
 
