@@ -38,6 +38,15 @@ except Exception:
 
 _FALLBACK_CHARS_PER_TOKEN: float = 3.5
 
+# Per-character token cost for non-ASCII text in the same fallback, measured
+# against cl100k_base on the samples in #754 (probe 14:42:50Z): 5760 CJK
+# characters cost 5760 tokens and 1440 emoji cost 2880, i.e. one token per
+# BMP character and two per astral one. Kept as two constants rather than a
+# lookup table: the fallback is a rescue path, and these are within a factor
+# on the inputs the fallback has to survive.
+_FALLBACK_TOKENS_PER_WIDE: float = 1.0
+_FALLBACK_TOKENS_PER_ASTRAL: float = 2.0
+
 
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken, or fall back to char estimate.
@@ -68,7 +77,29 @@ def count_tokens(text: str) -> int:
                 exc_info=True,
             )
     # Character-based estimate: tiktoken is unavailable or just failed.
-    return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
+    if text.isascii():
+        return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
+    # Non-ASCII is not 3.5 characters of anything. Measured against
+    # cl100k_base at 14:42:50Z, a flat 3.5 charged the same corpus 2.3x high on
+    # ASCII, 3.4x low on CJK and 6.9x low on emoji: one estimate, wrong in both
+    # directions, so a window of non-ASCII text compacted late and met the
+    # provider's limit instead of the operator's. Weighting by codepoint range
+    # brought the two non-ASCII samples to 1.00x of the tokenizer's count
+    # (14:44:26Z: CJK 5768 against 5760, emoji 2888 against 2880). The ASCII
+    # bias is pre-existing and untouched here.
+    wide = astral = 0
+    for ch in text:
+        codepoint = ord(ch)
+        if codepoint > 0xFFFF:
+            astral += 1
+        elif codepoint >= 0x80:
+            wide += 1
+    ascii_chars = len(text) - wide - astral
+    return int(
+        ascii_chars / _FALLBACK_CHARS_PER_TOKEN
+        + wide * _FALLBACK_TOKENS_PER_WIDE
+        + astral * _FALLBACK_TOKENS_PER_ASTRAL
+    )
 
 
 class MessageType(str, enum.Enum):
@@ -321,7 +352,10 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     visible dict with non-ASCII characters left as themselves, not just
     `content`. Catches size hiding in `tool_calls` and `reasoning_content` that
     content-only counting misses, and does not charge for the ``\\uXXXX``
-    escapes a transport would put in their place (#754).
+    escapes a transport would put in their place (#754). A row that is not a
+    mapping has no visible dict, so it is counted by its repr instead
+    (§3.1.18.1); a row whose provenance renders is counted from the rendered
+    form, described below.
     Accepts messages in tagged or already-clean form — `_visible()` strips
     any `_`-prefixed keys itself, and is a no-op on a dict with none.
 

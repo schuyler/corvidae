@@ -4,69 +4,104 @@ PRD §3.3.1 estimates with a tokenizer over "the JSON-serialized visible fields"
 of a message, and the same item says a row that renders is "estimated as it
 renders, not by the record": the estimate charges for what arrives at the model.
 `json.dumps` escapes every non-ASCII character to a ``\uXXXX`` sequence by
-default, so the estimator was charging roughly 6 characters' worth of tokens for
-each one — a window full of CJK or emoji compacted, dropped rows or truncated
+default, so the estimator was charging roughly six characters' worth of tokens
+for each one — a window of CJK or emoji compacted, dropped rows or truncated
 its newest row at a fraction of the provider's window.
 
-These tests run the real counter, not a stub: the defect is a ratio, and a
-mocked ``count_tokens`` cannot see one.
+The counter in these tests is the real one wherever the assertion is about a
+ratio: a stubbed ``count_tokens`` cannot see one. Where a test needs the
+character fallback it swaps the encoder out explicitly and says so.
 """
 
 from __future__ import annotations
 
 import json
 
+import pytest
+
+import corvidae.context as context
 from corvidae.context import count_tokens, message_tokens
 
-# A row's JSON envelope costs a little over the bare text: {"role": "user",
-# "content": "..."}. Any envelope is fine; several times the text is not.
-ENVELOPE_SLACK = 30
+CJK = "中文" * 2880  # 5760 characters
+EMOJI = "\U0001f600" * 1440  # 1440 characters
+ASCII = "a" * 5760
+
+# What the JSON around an empty row costs. A row's estimate is the text plus
+# this envelope; tokenization is not perfectly additive across the seam, so the
+# lower edge of the band allows a little merge at the boundary.
+ENVELOPE = count_tokens(json.dumps({"role": "user", "content": ""}, ensure_ascii=False))
+SEAM_SLACK = 8
 
 
 def _row(text: str) -> dict:
     return {"role": "user", "content": text}
 
 
-class TestNonAsciiEstimateIsNotInflatedByEscapes:
-    def test_cjk_row_estimates_near_its_own_token_cost(self):
-        text = "中文" * 2880  # 5760 characters
+class TestEscapesAreNotCharged:
+    """Two-sided bands. An upper bound alone would pass on an estimate of 0."""
+
+    @pytest.mark.parametrize("name,text", [("cjk", CJK), ("emoji", EMOJI)])
+    def test_row_estimates_within_its_envelope_of_the_text(self, name, text):
         direct = count_tokens(text)
         est = message_tokens(_row(text))
-        assert est <= direct + ENVELOPE_SLACK, (
-            f"a CJK row estimated at {est} tokens against {direct} for the same "
-            f"text: the estimate is charging for \\uXXXX escapes, not characters (#754)"
+        assert est >= direct - SEAM_SLACK, (
+            f"{name}: estimated {est}, below the {direct} tokens the same text costs on its "
+            f"own — the estimate dropped content rather than counting it (#754)"
+        )
+        assert est <= direct + ENVELOPE, (
+            f"{name}: estimated {est} against {direct} for the text plus {ENVELOPE} for the "
+            f"JSON around it — the surplus is escaped characters, not content (#754)"
         )
 
-    def test_emoji_row_estimates_near_its_own_token_cost(self):
-        text = "\U0001f600" * 1440  # 1440 characters
-        direct = count_tokens(text)
-        est = message_tokens(_row(text))
-        assert est <= direct + ENVELOPE_SLACK, (
-            f"an emoji row estimated at {est} tokens against {direct} for the same "
-            f"text: the estimate is charging for \\uXXXX escapes, not characters (#754)"
-        )
+    def test_estimate_is_the_count_of_the_row_with_characters_intact(self):
+        """Deliberately coupled to the serialization: this is the semantics.
 
-    def test_estimate_is_below_the_escaped_serialization_it_replaced(self):
-        """The guard on the mechanism itself, for any non-ASCII row.
-
-        ``ensure_ascii=True`` is the defect, so the estimate must be cheaper
-        than the escaped form it used to count. Written as a relation between
-        two serializations rather than a hard-coded number, so it survives a
-        tokenizer change.
+        The estimate is `count_tokens` of the row serialized with non-ASCII left
+        as themselves. If a future change moves to a different serialization,
+        this test should fail loudly and be rewritten on purpose, not drift.
         """
-        text = "naïve café 中文 日本語 🎉"
-        row = _row(text)
-        escaped = json.dumps(row)  # the form the estimator used
-        assert message_tokens(row) < count_tokens(escaped), (
+        row = _row("naïve café 中文 日本語 🎉")
+        assert message_tokens(row) == count_tokens(json.dumps(row, ensure_ascii=False))
+
+    def test_escaped_form_is_explicitly_the_thing_being_refused(self):
+        """The relation the fix is about, kept as its own regression guard."""
+        row = _row("día 中文 🎉")
+        assert message_tokens(row) < count_tokens(json.dumps(row)), (
             "the estimate still counts the escaped serialization (#754)"
         )
+
+
+class TestFallbackCountsNonAsciiToo:
+    """The PRD allows a character-based fallback; it must not be wrong by 3x.
+
+    A flat chars/token is right for neither CJK nor emoji: measured against the
+    tokenizer at 14:42:50Z it came out 3.4x low on CJK and 6.9x low on emoji,
+    which compacts a non-ASCII window late — the provider's limit, not the
+    operator's. The fallback weights by codepoint range now.
+    """
+
+    @pytest.mark.parametrize("name,text", [("cjk", CJK), ("emoji", EMOJI)])
+    def test_fallback_lands_near_the_tokenizer_within_its_envelope(self, name, text, monkeypatch):
+        truth = count_tokens(text)  # tokenizer path, before the fallback is forced
+        monkeypatch.setattr(context, "_encoder", None)
+        est = message_tokens(_row(text))
+        assert est >= truth * 0.7, (
+            f"{name}: the fallback estimated {est} against {truth} tokens the tokenizer counts "
+            f"— a non-ASCII window would compact late and overflow at the provider (#754)"
+        )
+        assert est <= truth * 1.5, f"{name}: the fallback estimated {est} against {truth}"
+
+    def test_ascii_fallback_is_unchanged_by_the_weighting(self, monkeypatch):
+        """The ASCII heuristic stays the one every other test pins (3.5 chars)."""
+        row = _row(ASCII)
+        monkeypatch.setattr(context, "_encoder", None)
+        assert message_tokens(row) == int(len(json.dumps(row)) / context._FALLBACK_CHARS_PER_TOKEN)
 
 
 class TestTheEstimateStaysItself:
     def test_ascii_row_is_unchanged(self):
         """ASCII has no escaped form, so its count cannot move with this fix."""
-        row = _row("a" * 5760)
-        assert message_tokens(row) == count_tokens(json.dumps(row))
+        assert message_tokens(_row(ASCII)) == count_tokens(json.dumps(_row(ASCII)))
 
     def test_estimate_survives_a_json_round_trip(self):
         """The estimate is a pure function of the stored row, so a reload agrees.
@@ -75,13 +110,23 @@ class TestTheEstimateStaysItself:
         estimate depended on how the row was decoded, the cut would move.
         """
         row = _row("café 中文 🎉")
-        reloaded = json.loads(json.dumps(row))
-        assert message_tokens(row) == message_tokens(reloaded)
+        assert message_tokens(row) == message_tokens(json.loads(json.dumps(row)))
 
-    def test_a_row_that_is_not_a_mapping_is_still_counted_by_its_repr(self):
+    def test_a_row_that_is_not_a_mapping_is_counted_by_its_repr(self):
         """§3.1.18.1: estimating never raises, whatever the row holds."""
         for oddity in (42, ["not", "a", "row"], None, "bare string"):
             assert message_tokens(oddity) == count_tokens(repr(oddity))
+
+    def test_an_unpaired_surrogate_is_estimated_without_raising(self):
+        """A lone surrogate decodes from `json.loads` and must still be countable.
+
+        With escapes it never reached the tokenizer; unescaped it does, and
+        tiktoken refuses it — the rescue path in `count_tokens` is what keeps
+        §3.1.18.1 true, so this pins the rescue rather than assuming it.
+        """
+        lone = json.loads('"\\ud800"')
+        est = message_tokens(_row(f"before{lone}after"))
+        assert isinstance(est, int) and est > 0, f"surrogate row estimated as {est!r}"
 
     def test_tagged_and_clean_rows_still_agree(self):
         """`_`-prefixed tags stay out of the count, as before the fix."""
