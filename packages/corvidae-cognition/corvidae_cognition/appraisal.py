@@ -468,6 +468,10 @@ class AppraisalPlugin(CorvidaePlugin):
         # Same discipline for the originating row's message_log rowid: a
         # stage-2 fork runs only while that row is still in the window.
         self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
+        # The exchange's final reply row, for stage 2's fork cut (#341): PRD
+        # §3.8.2 says the judge sees the window up to the reply and nothing
+        # written after it.
+        self._reply_rowid: collections.OrderedDict[str, int | None] = collections.OrderedDict()
         # The pre-send hold-and-revise state (#1149); built on first use
         # because pm may arrive at on_init.
         self._presend_hold: PreSendHold | None = None
@@ -575,6 +579,38 @@ class AppraisalPlugin(CorvidaePlugin):
         """Pure reader for the originating row's message_log rowid, or None."""
         return self._originating_rowid.get(trace_id)
 
+    def _record_reply(self, channel, trace_id: str) -> None:
+        """Note which window row is the exchange's final reply (#341).
+
+        Called from ``on_agent_response`` before its first await, when the
+        reply is the last assistant message: what follows it is CONTEXT, so a
+        stage-2 fork cut here cannot see a late tool result, a second reply or
+        the user's next message. ``None`` when the reply was never persisted.
+        """
+        rowid = None
+        conv = getattr(channel, "conversation", None)
+        for message in reversed(getattr(conv, "messages", None) or []):
+            if message.get("role") == "assistant":
+                rowid = message.get("_db_id")
+                break
+        self._reply_rowid[trace_id] = rowid
+        self._reply_rowid.move_to_end(trace_id)
+        while len(self._reply_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
+            self._reply_rowid.popitem(last=False)
+
+    def _reply_cut(self, channel, trace_id: str) -> int | str:
+        """``cut`` for stage 2's fork, or the reason it has none (#341)."""
+        rowid = self._reply_rowid.get(trace_id)
+        conv = getattr(channel, "conversation", None)
+        if rowid is None:
+            return "the reply was not recorded or not persisted"
+        if conv is None:
+            return "no live window"
+        for index, message in enumerate(conv.messages):
+            if message.get("_db_id") == rowid:
+                return index + 1
+        return "the reply is not in the window"
+
     # ------------------------------------------------------------------
     # Readers
     # ------------------------------------------------------------------
@@ -650,6 +686,10 @@ class AppraisalPlugin(CorvidaePlugin):
         return, so a declined revision still clears; a held trace gets no
         stage 2 (#1149 R8).
         """
+        # Before the first await: the reply is then the window's last assistant
+        # message, so its row is the cut stage 2's fork uses (#341).
+        if trace_id is not None:
+            self._record_reply(channel, trace_id)
         # Hold outcome first: True means this trace was held, so skip stage 2.
         if await self._hold.on_final(channel, trace_id, response_text, annotations):
             return
@@ -819,6 +859,10 @@ class AppraisalPlugin(CorvidaePlugin):
             f"The exchange began with the message «{quote(originating_text)}», "
             f"and the response you sent began «{quote(response_text)}»."
         )
+        cut = self._reply_cut(channel, trace_id)
+        if isinstance(cut, str):
+            self._skip_stage2(channel, trace_id, cut)
+            return None
         extra_body = STAGE2_EXTRA_BODY
         if offer:
             instruction += "\n\n" + _offer_block(offer)
@@ -826,7 +870,8 @@ class AppraisalPlugin(CorvidaePlugin):
         # Fork and parse; any failure or unusable reply is a miss.
         try:
             result = await agent.fork(
-                channel, instruction, stage="appraisal", extra_body=extra_body
+                channel, instruction, stage="appraisal", cut=cut,
+                extra_body=extra_body,
             )
             conv = channel.conversation
             await self._record_fork(

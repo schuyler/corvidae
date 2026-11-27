@@ -34,6 +34,8 @@ async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, o
     env.channel.runtime_overrides.update(overrides or {})
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text="is the heater the culprit?", annotations={})
+    # The reply row, as on_agent_response records it before its first await.
+    env.appraisal._record_reply(env.channel, "k")
     await env.appraisal._run_stage2(env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
     stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown(env)
@@ -46,7 +48,9 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
     assert env.stub.chat_calls == []
     call = agent.calls[0]
     assert call["stage"] == "appraisal"
-    assert (call["cut"], call["extra_body"]) == (None, STAGE2_EXTRA_BODY)
+    # Cut at the reply (#341): the window is [user 41, assistant 42], so the
+    # fork's prefix ends one past the reply rather than at the live window end.
+    assert (call["cut"], call["extra_body"]) == (2, STAGE2_EXTRA_BODY)
     assert call["instruction"].startswith(DEFAULT_STAGE2_FORK_PROMPT)
     for part in ("«is the heater the culprit?»", "«yes, brownout»"):
         assert part in call["instruction"]
@@ -99,3 +103,38 @@ def test_appraisal_registers_its_llm_stage_as_chat():
     from helpers import collect_llm_stages
 
     assert collect_llm_stages(AppraisalPlugin(), "appraisal") == {"appraisal": "chat"}
+
+
+async def test_the_fork_is_cut_at_the_reply_not_the_window_end(tmp_path):
+    """#341: a row written after the reply must not reach the judge's prefix.
+
+    The window is [user 41, assistant 42, user 43]: 43 is the user's next
+    message, written while stage 2 was queued. The fork's cut is 2, so the
+    judge sees the exchange and not what followed it.
+    """
+    agent = FakeForkAgent({"appraisal"}, text=FORK_JSON)
+    env, stored = await _run(tmp_path, agent, window_rowids=(41, 42, 43))
+    call = agent.calls[0]
+    assert call["cut"] == 2, "the fork must end one past the reply row"
+    assert stored == json.loads(FORK_JSON)
+
+
+async def test_a_reply_with_no_recorded_row_skips_stage2(tmp_path, caplog):
+    """A cut with no reply to cut at is a miss, not a fork of the whole window."""
+    agent = FakeForkAgent({"appraisal"}, text=FORK_JSON)
+    env = await build_env(tmp_path)
+    env.pm.unregister(name="agent")
+    env.pm.register(agent, name="agent")
+    env.channel.conversation = window_of(env.channel.id, [41, 42])
+    await env.appraisal.on_message_persisted(
+        channel=env.channel, trace_id="k", rowid=41,
+        text="is the heater the culprit?", annotations={})
+    with caplog.at_level(logging.WARNING, logger="corvidae.appraisal"):
+        # No _record_reply: the reply row was never noted.
+        await env.appraisal._run_stage2(
+            env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
+    assert agent.calls == []
+    skips = [r.getMessage() for r in caplog.records
+             if "stage-2 appraisal skipped" in r.getMessage()]
+    assert len(skips) == 1 and "the reply was not recorded" in skips[0]
+    await _teardown(env)
