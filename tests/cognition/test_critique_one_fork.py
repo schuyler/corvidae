@@ -556,9 +556,11 @@ async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(tmp_path, cap
 
     A stall between arming and the fork's first statement is injected here
     rather than hoped for. A stopwatch started inside the block — on either
-    clock — reports a wait near zero for a fork that never ran, which is below
-    both the allowance and the stall; the floor below is above both, so the
-    assertion goes red if the measurement no longer starts before the arm.
+    clock — reports a wait near zero for a fork that never ran: below the
+    allowance and far below the 0.08 s of wall time the loop really lost. The
+    0.05 s floor sits between the two readings, above the 0.02 s allowance and
+    below the injected stall, so it separates them without needing the stall to
+    land exactly.
     """
     async def hangs(i, channel):
         try:
@@ -575,8 +577,15 @@ async def test_r5_5_a_stall_between_arming_and_the_body_is_counted(tmp_path, cap
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
         m = re.search(r"after (\d+\.\d+)s", text)
         assert m, f"the warning must state its own elapsed time: {text!r}"
+        # Pin the allowance in the same phrase, so the number being checked
+        # cannot be the configured bound the line also prints.
+        assert "critique.fork_timeout (0.02 s) after " in text, text
         assert float(m.group(1)) >= 0.05, (
             f"the printed wait is shorter than the stall the runner took: {text!r}"
+        )
+        assert re.fullmatch(r"\d+\.\d{3}", m.group(1)), (
+            "the wait needs enough digits to separate a small allowance from a "
+            f"stalled measurement: {text!r}"
         )
     finally:
         await _teardown(env)
@@ -600,8 +609,15 @@ async def test_r5_5_a_small_allowance_is_logged_with_digits_that_can_say_it(tmp_
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
         m = re.search(r"after (\d+\.\d+)s", text)
         assert m, f"the warning must state its own elapsed time: {text!r}"
+        # Name the allowance in the same phrase, so the digits under test are
+        # the elapsed field and not the configured bound the line also prints.
+        assert "critique.fork_timeout (0.002 s) after " in text, text
         assert float(m.group(1)) >= 0.002, (
             f"the printed wait is below the allowance that expired: {text!r}"
+        )
+        assert re.fullmatch(r"\d+\.\d{3}", m.group(1)), (
+            "one decimal cannot express a 0.002 s allowance at all: "
+            f"{text!r}"
         )
     finally:
         await _teardown(env)
