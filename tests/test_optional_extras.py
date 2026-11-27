@@ -14,7 +14,6 @@ import os
 import pathlib
 import subprocess
 import sys
-import warnings
 import tomllib
 from pathlib import Path
 
@@ -481,6 +480,19 @@ _UNGUARDED_DEBT = frozenset({
 })
 
 
+def _tree_unguarded_pairs() -> set[str]:
+    """Every ``relative/path.py:package`` pair the tree imports unguarded."""
+    extra_names = _extra_import_names()
+    found = set()
+    for path in _scanned_files():
+        tree = ast.parse(path.read_text(), filename=str(path))
+        relative = path.relative_to(_REPO_ROOT).as_posix()
+        for _lineno, top, guarded in _import_time_imports(tree):
+            if top in extra_names and top not in guarded:
+                found.add(f"{relative}:{top}")
+    return found
+
+
 def test_no_new_unguarded_extra_imports():
     """No test-tree module may import an extra's package unguarded, beyond debt.
 
@@ -507,35 +519,31 @@ def test_no_new_unguarded_extra_imports():
     unguarded. That strictness is deliberate — one spelling is what keeps a skip
     honest about the exact module that is missing.
     """
-    extra_names = _extra_import_names()
-    found = set()
-    for path in _scanned_files():
-        tree = ast.parse(path.read_text(), filename=str(path))
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        for _lineno, top, guarded in _import_time_imports(tree):
-            if top in extra_names and top not in guarded:
-                found.add(f"{relative}:{top}")
+    new_debt = sorted(_tree_unguarded_pairs() - _UNGUARDED_DEBT)
+    assert not new_debt, (
+        "new unguarded extra imports (wrap them in "
+        '"with optional_extra("<name>"):" before the import):\n  '
+        + "\n  ".join(new_debt)
+    )
 
-    new_debt = sorted(found - _UNGUARDED_DEBT)
-    cleared = sorted(_UNGUARDED_DEBT - found)
-    message = []
-    if new_debt:
-        message.append(
-            "new unguarded extra imports (wrap them in "
-            '"with optional_extra("<name>"):" before the import):\n  '
-            + "\n  ".join(new_debt)
-        )
-    assert not message, "\n".join(message)
-    if cleared:
-        # Drift in the ledger's other direction is not the fault of the branch
-        # that runs this test: warn, so an unledgered entry is fixed on purpose
-        # (#1319) instead of reddening every PR that touches tests/.
-        warnings.warn(
-            "stale _UNGUARDED_DEBT entries — the tree guards them or no longer "
-            "imports them; delete these lines (not a failure):\n  "
-            + "\n  ".join(cleared),
-            stacklevel=2,
-        )
+
+def test_ledger_has_no_stale_entries():
+    """A ledger line is a standing grant, so it must not outlive its import.
+
+    Dropping these to a warning (#1320) let a stale ``path:package`` line keep
+    pre-approving its file: the pair stayed in the ledger, so a *new* unguarded
+    import of that package in that file compared as already-known and passed
+    (#1321). Split out as its own test rather than folded back into the scan so
+    the failure names whose fault it is: ledger drift, not the diff that
+    happened to run first. Delete the lines it names.
+    """
+    stale = sorted(_UNGUARDED_DEBT - _tree_unguarded_pairs())
+    assert not stale, (
+        "stale _UNGUARDED_DEBT entries — ledger drift, not your change. The "
+        "tree guards these imports or no longer has them, and a line left "
+        "behind pre-approves its file; delete these from _UNGUARDED_DEBT:\n  "
+        + "\n  ".join(stale)
+    )
 
 
 _HIDE_PLUGIN = """
@@ -585,14 +593,17 @@ def test_render_smoke_skips_rather_than_errors_without_context_panel(tmp_path):
     assert "optional context_panel extra not installed" in proc.stdout, proc.stdout
 
 
-def test_a_stale_ledger_entry_warns_rather_than_fails(monkeypatch):
-    """#1319: ledger drift must not redden branches that did not cause it."""
-    stale = frozenset({"tests/cognition/gone.py:corvidae_cognition"})
+def test_a_stale_ledger_entry_names_the_lines_and_fails(monkeypatch):
+    """#1321: it must fail, and the message must say it is ledger drift."""
+    stale = "tests/cognition/gone.py:corvidae_cognition"
     monkeypatch.setattr(
-        sys.modules[__name__], "_UNGUARDED_DEBT", _UNGUARDED_DEBT | stale
+        sys.modules[__name__], "_UNGUARDED_DEBT", _UNGUARDED_DEBT | {stale}
     )
-    with pytest.warns(UserWarning, match="stale _UNGUARDED_DEBT"):
-        test_no_new_unguarded_extra_imports()
+    with pytest.raises(AssertionError) as excinfo:
+        test_ledger_has_no_stale_entries()
+    message = str(excinfo.value)
+    assert stale in message
+    assert "ledger drift, not your change" in message
 
 
 def _imports_of(source: str):
