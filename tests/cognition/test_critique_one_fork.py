@@ -708,11 +708,15 @@ async def test_r5_5_the_deadline_warning_names_the_abandoned_prompt(tmp_path, ca
 
     agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
     env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    # Read at the dispatch moment, the way the code does: a hash taken after
+    # the turn describes whatever the window holds then, not what was sent.
+    expected = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
     caplog.set_level(logging.WARNING)
     try:
         await _judged_turn(env, "k337a", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "exceeded critique.fork_timeout")
-        expected = critique_module.prompt_sha256(critique_module._window_blocks(env.channel)).hex()
         assert f"fork prompt_sha256={expected}" in text, text
     finally:
         await _teardown(env)
@@ -818,6 +822,11 @@ async def test_the_compaction_miss_names_the_prompt_that_was_dispatched(
         await _judged_turn(env, "k337f", PREDICTIVE_ONLY)
         [text] = _warnings(caplog, "compacted while the fork ran")
         assert f"fork prompt_sha256={dispatched}" in text, text
+        # The test's own premise: the window really did move under the fork, or
+        # this assertion would also pass on a hash taken in the handler.
+        assert critique_module.prompt_sha256(
+            critique_module._window_blocks(env.channel)
+        ).hex() != dispatched
     finally:
         await _teardown(env)
 
@@ -854,6 +863,10 @@ def test_a_window_that_cannot_be_hashed_yields_no_key_rather_than_a_raise():
     unhashable = type("C", (), {"conversation": type("V", (), {"messages": [
         {"role": "user", "content": object()}]})})()
     assert critique_module._dispatched_prompt_sha(unhashable) is None
+    # Reading the window is part of what can fail, so it belongs inside the guard:
+    # a `messages` that cannot even be listed is the same miss, not a raise.
+    unlistable = type("C", (), {"conversation": type("V", (), {"messages": 5})})()
+    assert critique_module._dispatched_prompt_sha(unlistable) is None
     # Positive control: the same call on a window that can be serialized keys it.
     hashable = type("C", (), {"conversation": type("V", (), {"messages": [
         {"role": "user", "content": "m1"}]})})()

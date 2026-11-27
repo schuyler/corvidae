@@ -135,10 +135,10 @@ def _dispatched_prompt_sha(channel) -> bytes | None:
     they are the same prompt. And if the window moves between dispatch and
     write-off, the key matches no row -- a miss, never a false match.
     """
-    blocks = _window_blocks(channel)
-    if not blocks:
-        return None
     try:
+        blocks = _window_blocks(channel)
+        if not blocks:
+            return None
         return prompt_sha256(blocks)
     except Exception:
         # A window that cannot be hashed is a key this line does not have. The
@@ -2174,7 +2174,9 @@ class CritiquePlugin(CorvidaePlugin):
             "no objections from this lens%s",
             lens, trace_id, channel.id, reason,
             "" if fork_sha is None else f" (fork prompt_sha256={fork_sha.hex()})",
-            extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
+            extra={"channel": channel.id, "trace_id": trace_id,
+                   "fork_prompt_sha256": None if fork_sha is None else fork_sha.hex()},
+            **kwargs,
         )
 
     def _fork_target(self, channel, trace_id):
