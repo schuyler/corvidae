@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAYLOAD_CHARS = 8000
 
+#: How long on_stop waits for a cancelled flush to unwind (#853). A flush holds
+#: no transaction; this bounds shutdown against one that ignores cancellation.
+STOP_FLUSH_BOUND = 5.0
+
 # The throttle's built-in values (#793). Batching on by default is the point
 # of the change; an operator restoring the old behaviour sets
 # ``batch_seconds: 0`` and a high ``max_notifications``.
@@ -112,10 +116,17 @@ class _State:
     # model by a flush.
     dropped: int = 0
     pending_dropped: int = 0
+    #: Flushes running right now, so on_stop can stop them (#853).
+    inflight: set[asyncio.Task] = field(default_factory=set)
 
 
 class WebhookNotifyPlugin(CorvidaePlugin):
     """Notifies configured channels of webhook deliveries, throttled per endpoint."""
+
+    #: Set by on_stop. A delivery arriving after it is buffered and reported,
+    #: never armed and never sent (#853). Plugin-level, not per endpoint, because
+    #: an endpoint with no state yet has no per-endpoint flag to read.
+    _stopping: bool = False
 
     depends_on = frozenset({"registry", "spill"})
     optional_depends_on = frozenset({"webhook"})
@@ -238,11 +249,21 @@ class WebhookNotifyPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Cancel the flush timers, and report what was still buffered."""
+        """Cancel the timers and any running flush, then report what is buffered."""
+        self._stopping = True
         for endpoint, state in self._state.items():
             if state.window is not None:
                 state.window.cancel()
                 state.window = None
+        running = [task for state in self._state.values() for task in state.inflight]
+        for task in running:
+            task.cancel()
+        if running:
+            # Bounded: a flush that ignores cancellation must not hold shutdown.
+            # Their deliveries go back to the buffer in _flush's handler, so the
+            # count below includes anything the cancel reclaimed (#853).
+            await asyncio.wait(running, timeout=STOP_FLUSH_BOUND)
+        for endpoint, state in self._state.items():
             if state.buffer or state.pending_dropped:
                 logger.warning(
                     "webhook_notify: endpoint %s shutting down with %d buffered "
@@ -266,6 +287,9 @@ class WebhookNotifyPlugin(CorvidaePlugin):
                 "dropped the oldest, %d dropped so far",
                 delivery.endpoint, limit.max_buffered, state.dropped,
             )
+        if self._stopping:
+            # on_stop has run: buffered, counted, and never sent (#853).
+            return
         if limit.batch_seconds == 0:
             # Batching off: deliver on arrival, as before #793.
             await self._flush(delivery.endpoint)
@@ -325,8 +349,53 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         else:
             return
         dropped, state.pending_dropped = state.pending_dropped, 0
+        task = asyncio.current_task()
+        if task is not None:
+            state.inflight.add(task)
+        try:
+            await self._notify(endpoint, deliveries, dropped)
+        except BaseException:
+            # The deliveries go back to the buffer and the cap slot is not spent.
+            # Before #853 the buffer was already cleared here, so the whole digest
+            # was lost. A raise does NOT mean nothing was sent: the spill notifies
+            # an endpoint's channels one at a time, so a failure on the second has
+            # already delivered to the first, and the retry these deliveries get
+            # will duplicate it there. At-least-once is the intended trade; the
+            # duplicate is the price of not losing the digest.
+            self._restore(endpoint, state, limit, deliveries, dropped)
+            raise
+        finally:
+            if task is not None:
+                state.inflight.discard(task)
         state.flushes.append(now)
-        await self._notify(endpoint, deliveries, dropped)
+
+    @staticmethod
+    def _restore(
+        endpoint: str,
+        state: _State,
+        limit: _Limit,
+        deliveries: list[WebhookDelivery],
+        dropped: int,
+    ) -> None:
+        """Put a failed flush's deliveries back, oldest first, and its drop count.
+
+        Respects ``max_buffered``: what no longer fits is dropped and counted,
+        which is the same rule the buffer applies on arrival (#853).
+        """
+        state.buffer[:0] = deliveries
+        state.pending_dropped += dropped
+        overflow = len(state.buffer) - limit.max_buffered
+        if overflow > 0:
+            del state.buffer[:overflow]
+            state.dropped += overflow
+            state.pending_dropped += overflow
+        logger.warning(
+            "webhook_notify: endpoint %s did not accept a digest of %d "
+            "deliveries; kept %d buffered for the next window and counted %d "
+            "dropped. A retry may repeat the digest in any channel of this "
+            "endpoint that was already notified before the failure",
+            endpoint, len(deliveries), len(state.buffer), overflow,
+        )
 
     async def _notify(
         self, endpoint: str, deliveries: list[WebhookDelivery], dropped: int
