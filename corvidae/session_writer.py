@@ -18,11 +18,14 @@ import enum
 import logging
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import quote
+
+from corvidae.shutdown import DEFAULT_SHUTDOWN_TIMEOUTS, stop_bound_seconds
 
 import aiosqlite
 
@@ -32,6 +35,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_WRITE_DEADLINE_S: float = 5.0
 # Largest deadline any caller may ask for (schema units use it).
 MAX_WRITE_DEADLINE_S: float = 30.0
+#: How long a revocation may take before the unit is abandoned (#1315).
+#: A statement that never reaches SQLite's interrupt check (a read on a hung
+#: device, the busy wait on ``COMMIT`` outside WAL) makes the interrupt-and-
+#: acquire loop spin with no bound; that loop holds the write route, so shutdown
+#: waits with it. Derived from the graceful shutdown budget less a reserve, the
+#: way ``mcp_client`` derives its stop bound: a constant above that budget would
+#: never elapse inside it, and the diagnostic below would never reach the log.
+REVOKE_BOUND_S: float = stop_bound_seconds(DEFAULT_SHUTDOWN_TIMEOUTS.graceful)
 
 # Unit lifecycle states, written only under the unit's lock.
 _RUNNING = "running"
@@ -51,6 +62,28 @@ class WriteRevoked(Exception):
         super().__init__(
             f"write unit from {owner} overran its {deadline_s:g} s deadline "
             "and was rolled back"
+        )
+
+
+class WriteAbandoned(WriteRevoked):
+    """A unit could not be revoked, so its outcome is unknown (#1315).
+
+    Its statement is not reaching SQLite's interrupt check, so the transaction it
+    opened is still open and the connection cannot be used again. The caller is
+    told the outcome is unknown rather than that the write was rolled back: on a
+    busy-wait abandonment the worker's own ``COMMIT`` may still land.
+    """
+
+    def __init__(self, owner: str, path: str) -> None:
+        self.owner = owner
+        self.path = path
+        self.deadline_s = float("nan")
+        Exception.__init__(
+            self,
+            f"write unit from {owner} on {path} could not be revoked: its "
+            "statement ignores interrupt(), so whether its write landed is "
+            "unknown and this writer refuses further writes until restart — add "
+            "the plugin to plugins.disabled and report it",
         )
 
 
@@ -188,18 +221,38 @@ class WriteCursor:
 class SessionWriter:
     """The one read-write connection to ``sessions.db``."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        path: str | Path = "sessions.db",
+        *,
+        revoke_bound_s: float = REVOKE_BOUND_S,
+    ) -> None:
         self._conn = conn
+        # Named in the revocation ERRORs, where the issue asks for the path.
+        self._path = str(path)
+        #: How long a revocation may take for this writer. Derived from the
+        #: configured ``daemon.shutdown_timeout`` at open time, so the bound
+        #: always fits inside the phase it sits in (#1315).
+        self._revoke_bound_s = revoke_bound_s
         # Serializes units FIFO on the loop; created lazily on first use so
         # the writer can be opened from synchronous code (R6 test).
         self._alock: asyncio.Lock | None = None
         self._closed = False
         # The most recent unit; close() ends it if a cancelled loop left it running.
         self._last_unit: _Unit | None = None
+        #: Set when a revocation gave up: the worker still holds the connection
+        #: inside a statement, so closing it here would block the loop (#1315).
+        self._abandoned = False
+        self._abandoned_owner = ""
 
     @classmethod
     def open(
-        cls, path: str | Path, *, busy_timeout_ms: int | None = None
+        cls,
+        path: str | Path,
+        *,
+        busy_timeout_ms: int | None = None,
+        graceful_s: float | None = None,
     ) -> "SessionWriter":
         """Open the writer connection, refusing a non-serialized SQLite (R6).
 
@@ -217,6 +270,9 @@ class SessionWriter:
                 "sqlite3 module is built with SQLITE_THREADSAFE=1"
             )
         # Local import: persistence imports this module at load time.
+        revoke_bound_s = (
+            REVOKE_BOUND_S if graceful_s is None else stop_bound_seconds(graceful_s)
+        )
         if busy_timeout_ms is None:
             from corvidae.persistence import DEFAULT_BUSY_TIMEOUT_MS
 
@@ -234,13 +290,22 @@ class SessionWriter:
         except BaseException:
             conn.close()
             raise
-        return cls(conn)
+        return cls(conn, path, revoke_bound_s=revoke_bound_s)
 
     def _lock(self) -> asyncio.Lock:
         """The asyncio lock, created on first use inside a running loop."""
         if self._alock is None:
             self._alock = asyncio.Lock()
         return self._alock
+
+    def _refuse_if_abandoned(self) -> None:
+        """Refuse every write after an abandonment, naming why (#1315).
+
+        Left to SQLite, the next unit fails with "cannot start a transaction
+        within a transaction", which names neither the abandonment nor the owner.
+        """
+        if self._abandoned:
+            raise WriteAbandoned(self._abandoned_owner, self._path)
 
     async def write(
         self,
@@ -250,6 +315,7 @@ class SessionWriter:
         deadline_s: float = DEFAULT_WRITE_DEADLINE_S,
     ) -> T:
         """Run ``fn`` as one transactional unit with a deadline."""
+        self._refuse_if_abandoned()
         # Reject a deadline outside the accepted range.
         if not 0 < deadline_s <= MAX_WRITE_DEADLINE_S:
             raise ValueError(
@@ -339,9 +405,32 @@ class SessionWriter:
         return self._outcome(unit)
 
     def _outcome(self, unit: _Unit) -> T:
-        """Return the unit's recorded result or raise its recorded outcome."""
-        with unit.lock:
+        """Return the unit's recorded result or raise its recorded outcome.
+
+        Never blocks the loop: after a revocation that gave up, the worker holds
+        this lock inside a C call, and a plain ``with unit.lock`` here would wedge
+        the event loop — which also disarms shutdown's force-exit, turning a
+        bounded ugly exit into an unbounded hang (#1315).
+        """
+        if not unit.lock.acquire(blocking=False):
+            # The unit is already known dead: revocation returned None, which
+            # means the worker held this lock for the whole bound. Its outcome is
+            # unknown, not rolled back — the worker's own COMMIT may still land.
+            raise WriteAbandoned(unit.owner, self._path)
+        try:
             state, exc, result = unit.state, unit.exc, unit.result
+        finally:
+            unit.lock.release()
+        # Abandonment decides first, whatever state the unit reads: the give-up
+        # branch writes none, so this unit can read _RUNNING, _COMMITTED if the
+        # worker's own COMMIT later landed, or _REVOKED from an earlier unit on
+        # the same writer. None of those may hand the caller a result or tell it
+        # the write was rolled back (#1315). No identity test: `write()` refuses
+        # once abandoned, so a unit reaching here on an abandoned writer is one
+        # that was abandoned, and a condition that can only be true is one more
+        # place to be wrong.
+        if self._abandoned:
+            raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
         if exc is not None:
@@ -411,21 +500,28 @@ class SessionWriter:
                     return
         signal(done)
 
-    def _end_transaction(self, unit: _Unit) -> bool:
+    def _end_transaction(
+        self, unit: _Unit, *, bound_s: float | None = None
+    ) -> bool | None:
         """Interrupt and roll back ``unit`` unless it already finished.
 
-        Returns True when this call revoked it. Runs on a daemon thread: it
-        loops ``interrupt()`` until it holds the unit lock, so it works even
-        while the unit is inside a long statement.
+        Returns True when this call revoked it, False when the unit had already
+        finished, and None when ``bound_s`` expired first — the unit's statement
+        is not reaching SQLite's interrupt check, so waiting longer cannot help
+        (#1315). Runs on a daemon thread: it loops ``interrupt()`` until it holds
+        the unit lock, so it works even while the unit is inside a long statement.
         """
         conn = self._conn
         # Step 1: flag first so the worker's next lock acquisition raises.
         unit.revoke_requested = True
-        # Step 2: interrupt until the lock is ours.
+        # Step 2: interrupt until the lock is ours, or the caller's bound ends.
+        started = time.monotonic()
         while True:
             conn.interrupt()
             if unit.lock.acquire(timeout=0.05):
                 break
+            if bound_s is not None and time.monotonic() - started >= bound_s:
+                return None
         try:
             # Step 3: a terminal state means the unit finished at the wire,
             # unless the rollback was caused by our own interrupt on COMMIT.
@@ -445,14 +541,32 @@ class SessionWriter:
 
     def _revoke(self, unit: _Unit) -> None:
         """Revoke an overrun unit and log the R3 ERROR (daemon thread)."""
-        if not self._end_transaction(unit):
+        outcome = self._end_transaction(unit, bound_s=self._revoke_bound_s)
+        if outcome is None:
+            # The statement is not reaching interrupt(); the loop would hold the
+            # write route forever, which is what made shutdown hang (#1315).
+            logger.error(
+                "write unit from %r did not yield to revocation within %g s on "
+                "%s; its statement ignores interrupt(), so it is abandoned and "
+                "its transaction is left open — this writer now refuses every "
+                "further write (WriteAbandoned) and the connection is left to "
+                "process exit rather than closed under a running worker",
+                unit.owner, self._revoke_bound_s, self._path,
+                extra={"owner": unit.owner},
+            )
+            # No state write here: the lock is held by the worker, and this
+            # module writes unit state only under it. The flag is the record.
+            self._abandoned_owner = unit.owner
+            self._abandoned = True
+            return
+        if not outcome:
             return
         # Step 4: R3 ERROR naming the owner and the deadline.
         logger.error(
             "write unit from %r overran its %g s deadline on %s; rolled back "
             "and revoked, so its write was discarded — if this recurs, add "
             "the plugin to plugins.disabled and report it",
-            unit.owner, unit.deadline_s, "sessions.db",
+            unit.owner, unit.deadline_s, self._path,
             extra={"owner": unit.owner, "deadline_s": unit.deadline_s},
         )
 
@@ -517,22 +631,71 @@ class SessionWriter:
         return await self._shielded(locked())
 
     async def close(self) -> None:
-        """Wait for the in-flight unit, then close the connection."""
-        async with self._lock():
+        """Wait for the in-flight unit, then close the connection.
+
+        Bounded: a unit whose statement ignores ``interrupt()`` keeps its
+        shielded task — and therefore the route lock — alive forever, so the
+        wait for the lock has to be bounded too, not only the revoke behind it
+        (#1315). Past the bound the writer logs, marks itself closed and leaves
+        the connection to process exit.
+        """
+        lock = self._lock()
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=self._revoke_bound_s)
+        except (asyncio.TimeoutError, TimeoutError):
+            self._closed = True
+            owner = self._last_unit.owner if self._last_unit else "unknown"
+            logger.error(
+                "the write route was still held %g s into shutdown on %s by a "
+                "unit from %r; that unit is not yielding to interrupt(), so the "
+                "connection is left open for process exit — if this recurs, add "
+                "the plugin to plugins.disabled and report it",
+                self._revoke_bound_s, self._path, owner, extra={"owner": owner},
+            )
+            return
+        try:
             if self._closed:
                 return
             self._closed = True
+            if self._abandoned:
+                # A previous revocation gave up: the connection is still inside a
+                # statement the worker cannot leave, and sqlite3.close() waits for
+                # it. Closing here blocks the loop and disarms shutdown's
+                # force-exit (#1315); the log line from _revoke already named the
+                # owner, so leave the connection to process exit.
+                return
             # A unit still running here means its awaiting task was cancelled
             # (shutdown): end it first, since closing the connection under a
             # running worker crashes the interpreter.
             unit = self._last_unit
             if unit is not None and unit.state == _RUNNING:
-                if await self._blocking(lambda: self._end_transaction(unit)):
+                outcome = await self._blocking(
+                    lambda: self._end_transaction(unit, bound_s=self._revoke_bound_s)
+                )
+                if outcome is None:
+                    # The statement ignores interrupt(); waiting cannot end it.
+                    # Leave the connection to process exit rather than close it
+                    # under a running worker (#1315, and #1310's crash).
+                    logger.error(
+                        "write unit from %r did not yield to revocation within "
+                        "%g s at shutdown on %s; its statement ignores "
+                        "interrupt(), so the connection is left open for process "
+                        "exit instead of being closed under a running worker",
+                        unit.owner, self._revoke_bound_s, self._path,
+                        extra={"owner": unit.owner},
+                    )
+                    return
+                if outcome:
                     logger.warning(
                         "write unit from %r was still running at shutdown; "
                         "rolled back, its write was discarded", unit.owner,
                     )
-            self._conn.close()
+            # Off the loop: sqlite3.Connection.close() waits for a statement
+            # still inside the connection, so a wrong guard here must not be able
+            # to wedge the event loop (#1315, three rounds of it).
+            await self._blocking(self._conn.close)
+        finally:
+            lock.release()
 
 
 async def open_session_store(
@@ -540,6 +703,7 @@ async def open_session_store(
     *,
     journal_mode: str = "wal",
     busy_timeout_ms: int | None = None,
+    graceful_s: float | None = None,
 ) -> tuple[aiosqlite.Connection, SessionWriter]:
     """Open writer, apply journal mode, run schema, then open the reader.
 
@@ -550,7 +714,9 @@ async def open_session_store(
     # Local import: persistence imports this module for its constants.
     from corvidae.persistence import MESSAGE_LOG_SCHEMA
 
-    writer = SessionWriter.open(path, busy_timeout_ms=busy_timeout_ms)
+    writer = SessionWriter.open(
+        path, busy_timeout_ms=busy_timeout_ms, graceful_s=graceful_s
+    )
     try:
         await writer.set_journal_mode(journal_mode)
 

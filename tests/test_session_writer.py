@@ -22,6 +22,7 @@ from corvidae.context import MessageType
 from corvidae.persistence import PersistencePlugin
 from corvidae.session_writer import (
     SessionWriter,
+    WriteAbandoned,
     WriteCursor,
     WriteRevoked,
     open_session_store,
@@ -235,3 +236,354 @@ def test_r6_refuses_non_serialized_sqlite(
     # The message names the value found and the remedy to apply.
     assert "threadsafety == 1" in message
     assert "SQLITE_THREADSAFE=1" in message
+
+
+async def test_close_is_bounded_when_a_statement_ignores_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1315: a statement that never yields to ``interrupt()`` must not hang close.
+
+    Simulated from the revoker's side: the unit's lock is held by a thread that
+    never releases it, which is the observable a statement that ignores
+    ``interrupt()`` presents — ``acquire`` never succeeds however often the loop
+    interrupts (``sqlite3.Connection.interrupt`` is read-only in C, so the
+    interrupt itself cannot be stubbed). Past the bound, ``close()`` must log
+    and leave the connection open rather than closing it under the worker.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("stuck-owner", 0.2)
+    unit.state = sw._RUNNING
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock() -> None:
+        unit.lock.acquire()
+        holding.set()
+        release.wait(5.0)
+        unit.lock.release()
+
+    holder = threading.Thread(target=hold_the_lock, daemon=True)
+    holder.start()
+    holding.wait(2.0)
+
+    writer._last_unit = unit
+
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(writer.close(), timeout=3.0)
+        elapsed = time.monotonic() - started
+        # Left open: the connection is still usable after close() returned.
+        still_open = writer._conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        release.set()
+        holder.join(2.0)
+        writer._conn.close()
+
+    # Bounded: it returned on its own bound, not on the unit finishing.
+    assert elapsed < 1.0, elapsed
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == "corvidae.session_writer"
+    ]
+    assert len(errors) == 1
+    message = errors[0].getMessage()
+    assert "stuck-owner" in message
+    assert "ignores interrupt" in message
+    assert still_open
+    assert writer._closed is True
+
+
+async def test_close_is_bounded_when_the_route_lock_itself_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1315 review: the lock wait has to be bounded, not only the revoke.
+
+    A statement that ignores ``interrupt()`` keeps its shielded unit task — and
+    therefore the route lock — alive forever, so ``close()`` would block before
+    reaching any bound behind the lock. This holds the route lock the way that
+    case does and requires ``close()`` to return on its own bound.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+
+    lock = writer._lock()
+    await lock.acquire()  # the stuck unit's shielded task would hold this
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(writer.close(), timeout=3.0)
+        elapsed = time.monotonic() - started
+        still_open = writer._conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        lock.release()
+        writer._conn.close()
+
+    assert elapsed < 1.0, elapsed
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == "corvidae.session_writer"
+    ]
+    assert len(errors) == 1
+    assert "write route was still held" in errors[0].getMessage()
+    assert still_open
+    assert writer._closed is True
+
+
+def test_outcome_does_not_block_when_the_unit_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    """#1315 critical: ``_outcome`` must not acquire the lock on the loop.
+
+    After a revocation that gave up, the worker holds the unit's lock inside a C
+    call. ``_outcome`` runs on the event loop; a plain ``with unit.lock`` there
+    wedges the loop, which also disarms shutdown's force-exit.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("wedged-owner", 0.2)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        unit.lock.acquire()
+        holding.set()
+        release.wait(5.0)
+        unit.lock.release()
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(2.0)
+        started = time.monotonic()
+        with pytest.raises(WriteRevoked):
+            writer._outcome(unit)
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        holder.join(2.0)
+        writer._conn.close()
+
+
+def test_the_revoke_bound_fits_inside_the_configured_budget(tmp_path: Path) -> None:
+    """#1315: the bound is derived per writer, not a constant above the budget.
+
+    A bound longer than the graceful phase never elapses inside it, so the
+    diagnostic is dead and the force-exit lands mid-wait.
+    """
+    import corvidae.session_writer as sw
+    from corvidae.shutdown import (
+        DEFAULT_SHUTDOWN_TIMEOUTS,
+        parse_shutdown_timeouts,
+        stop_bound_seconds,
+    )
+
+    assert sw.REVOKE_BOUND_S < DEFAULT_SHUTDOWN_TIMEOUTS.graceful
+
+    small = parse_shutdown_timeouts({"shutdown_timeout": 1}).graceful
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=small)
+    try:
+        assert writer._revoke_bound_s == stop_bound_seconds(small)
+        assert writer._revoke_bound_s < small
+    finally:
+        writer._conn.close()
+
+
+async def test_a_stalled_unit_through_write_leaves_the_loop_responsive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1315 critical, driven through the real path: write() → _revoke → outcome.
+
+    The unit function takes the unit's own lock and then sleeps, which is what a
+    statement stuck in a C call presents to the revoker. Revocation gives up at
+    the bound; the awaiting loop must keep running (a wedged loop disarms
+    shutdown's force-exit) and the caller must see WriteRevoked.
+    """
+    import corvidae.session_writer as sw
+
+    monkeypatch.setattr(sw, "REVOKE_BOUND_S", 0.2)
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=None)
+    monkeypatch.setattr(writer, "_revoke_bound_s", 0.2)
+    release = threading.Event()
+
+    def stall(cursor: WriteCursor) -> None:
+        # Hold the unit's lock across the stall, as a statement in C does.
+        cursor._unit.lock.acquire()
+        release.wait(5.0)
+        cursor._unit.lock.release()
+
+    ticks = 0
+
+    async def count_ticks(stop: asyncio.Future[None]) -> None:
+        nonlocal ticks
+        while not stop.done():
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    stop = asyncio.get_running_loop().create_future()
+    ticker = asyncio.create_task(count_ticks(stop))
+    try:
+        with pytest.raises(WriteRevoked):
+            await asyncio.wait_for(
+                writer.write(stall, owner="stall-test", deadline_s=0.2),
+                timeout=3.0,
+            )
+        # The loop kept turning while the stalled unit was abandoned.
+        assert ticks >= 4, ticks
+    finally:
+        stop.set_result(None)
+        release.set()
+        await ticker
+        writer._conn.close()
+
+
+async def test_close_does_not_close_the_connection_after_an_abandonment(
+    tmp_path: Path,
+) -> None:
+    """#1315, third recurrence: after a give-up, close() must not close on the loop.
+
+    ``sqlite3.Connection.close()`` waits for a statement still inside the
+    connection; with an abandoned unit that statement never returns, so closing
+    here blocks the event loop — the hang the issue exists to remove.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._REVOKED
+    writer._last_unit = unit
+    writer._abandoned = True
+
+    real_conn = writer._conn
+    closed: list[bool] = []
+
+    def record_close() -> None:
+        closed.append(True)
+
+    # A stand-in, because sqlite3.Connection.close is read-only in C; reaching it
+    # at all is what the assertion detects.
+    writer._conn = SimpleNamespace(close=record_close)  # type: ignore[assignment]
+    try:
+        started = time.monotonic()
+        await asyncio.wait_for(writer.close(), timeout=3.0)
+        assert time.monotonic() - started < 0.5
+        assert closed == []
+        assert writer._closed is True
+    finally:
+        writer._conn = real_conn  # type: ignore[assignment]
+        real_conn.close()
+
+
+async def test_a_real_abandonment_keeps_the_loop_free_through_close(
+    tmp_path: Path,
+) -> None:
+    """#1315, end to end: write() stalls, the unit is abandoned, close() returns.
+
+    The unit function takes the unit's own lock and sleeps — what a statement
+    inside a C call presents to the revoker — so revocation gives up on the real
+    path and the flag is set by the code, not by the test. The loop must keep
+    turning while `close()` runs, and the connection must be left open.
+    """
+    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=0.5)
+    release = threading.Event()
+
+    def stall(cursor: WriteCursor) -> None:
+        cursor._unit.lock.acquire()
+        release.wait(5.0)
+        cursor._unit.lock.release()
+
+    ticks = 0
+
+    async def count_ticks(stop: asyncio.Future[None]) -> None:
+        nonlocal ticks
+        while not stop.done():
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    stop = asyncio.get_running_loop().create_future()
+    ticker = asyncio.create_task(count_ticks(stop))
+    try:
+        with pytest.raises(WriteRevoked):
+            await asyncio.wait_for(
+                writer.write(stall, owner="stall-test", deadline_s=0.2), timeout=4.0
+            )
+        # Set by _revoke on its give-up branch, not by this test; the behaviour
+        # assertions below (not this line) are what pin the fix.
+        assert writer._abandoned is True
+        started = time.monotonic()
+        await asyncio.wait_for(writer.close(), timeout=2.0)
+        elapsed = time.monotonic() - started
+        # A wedged loop could neither finish close() nor run the ticker after it.
+        assert elapsed < 1.0, elapsed
+        ticks_before = ticks
+        await asyncio.sleep(0.15)
+        assert ticks > ticks_before, "the loop stopped turning after close()"
+        # Left open: the connection still answers after close().
+        assert writer._conn.execute("SELECT 1").fetchone() == (1,)
+        # A later write is refused by name rather than failing inside SQLite
+        # with "cannot start a transaction within a transaction".
+        def healthy(cursor: WriteCursor) -> None:
+            cursor.execute("SELECT 1")
+
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(healthy, owner="healthy", deadline_s=5.0)
+        assert "stall-test" in str(excinfo.value)
+        assert "plugins.disabled" in str(excinfo.value)
+    finally:
+        stop.set_result(None)
+        release.set()
+        await ticker
+        writer._conn.close()
+
+
+async def test_an_abandoned_unit_never_hands_back_a_result(tmp_path: Path) -> None:
+    """#1315: the give-up branch writes no state, so state alone must not decide.
+
+    If the worker's own COMMIT lands after the caller was told nothing, the unit
+    reads `_COMMITTED`; the caller must still see `WriteAbandoned` rather than a
+    silent `None`.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._COMMITTED  # what the worker leaves behind if its COMMIT lands
+    writer._last_unit = unit
+    writer._abandoned = True
+    writer._abandoned_owner = unit.owner
+    try:
+        with pytest.raises(WriteAbandoned):
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()
+
+
+async def test_an_abandoned_unit_is_not_reported_as_rolled_back(tmp_path: Path) -> None:
+    """#1315: a `_REVOKED` unit on an abandoned writer must not read as a rollback.
+
+    The give-up branch writes no state, so a unit from an earlier, successful
+    revocation can still carry `_REVOKED`; the caller must see the abandonment,
+    because on a busy wait its write may have landed.
+    """
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    unit = sw._Unit("abandoned-owner", 0.2)
+    unit.state = sw._REVOKED
+    writer._last_unit = unit
+    writer._abandoned = True
+    writer._abandoned_owner = unit.owner
+    try:
+        with pytest.raises(WriteAbandoned):
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()
