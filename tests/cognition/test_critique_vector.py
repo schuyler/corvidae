@@ -564,6 +564,8 @@ async def _appraise(tmp_path, reply, offer=OFFER, fork_prompt="Score it."):
         _wire(env, PeerSpy({"idle": offer}))
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=41, text="is it Friday?", annotations={})
+    # The reply row stage 2 cuts its fork at (#341).
+    env.appraisal._record_reply(env.channel, "k")
     await env.appraisal._run_stage2(env.channel, "k", "is it Friday?", "yes, Friday", None)
     stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown_appraisal(env)
