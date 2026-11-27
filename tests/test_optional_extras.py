@@ -805,3 +805,25 @@ def test_importorskip_vouches_only_for_the_imports_below_it():
     )
     guarded = next(e for e in entries if e[1] == "corvidae_vision")[2]
     assert "corvidae_vision" not in guarded
+
+
+def test_the_ledger_literal_has_no_duplicate_lines():
+    """A duplicate entry is invisible in the frozenset, so check the source.
+
+    #1321 measured the literal holding two lines its set had already collapsed.
+    """
+    source = pathlib.Path(__file__).read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(getattr(t, "id", "") == "_UNGUARDED_DEBT" for t in node.targets)
+            and isinstance(node.value, ast.Call)
+        ):
+            literal = node.value.args[0]
+            entries = [e.value for e in literal.elts]
+            break
+    else:  # pragma: no cover - the assignment moved
+        raise AssertionError("_UNGUARDED_DEBT literal not found")
+    duplicates = sorted({e for e in entries if entries.count(e) > 1})
+    assert not duplicates, f"duplicate _UNGUARDED_DEBT lines: {duplicates}"
