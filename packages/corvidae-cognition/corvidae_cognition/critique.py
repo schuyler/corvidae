@@ -2245,10 +2245,10 @@ class CritiquePlugin(CorvidaePlugin):
             # that is the microseconds of entering the context; on a stalled
             # runner it is the stall, which is wall time the fork stage really
             # did occupy, so the slow-fork warning calling it slow is honest.
-            # Wall time from here is what
-            # the deadline bounds — the quiet wait plus every request — because a
-            # warning that says only "exceeded the timeout" cannot tell a slow
-            # fork from a hung one (#1272).
+            # The span measured from this stamp is what the deadline bounds —
+            # the quiet wait plus every request — because a warning that says
+            # only "exceeded the timeout" cannot tell a slow fork from a hung
+            # one (#1272).
             loop = asyncio.get_running_loop()
             started = loop.time()
             async with asyncio.timeout(timeout) as deadline:

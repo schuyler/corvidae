@@ -455,9 +455,12 @@ class _ScriptedTime:
     """`time` as the reporting code would see it after a runner stall: every
     `monotonic()` read moves by `step`, so a span measured across two reads
     collapses to `step` no matter how long the wait really was. Everything else
-    on the module delegates to the real thing, which keeps the blast radius to
-    critique's three `time.monotonic()` calls. The event loop's clock, which
-    `asyncio.timeout` actually arms and compares against, is untouched."""
+    on the module delegates to the real thing, so the shim can only bite the
+    module's own `time` reads — which at this head is none, the reporting code
+    being on the loop clock. That absence is the thing this guard keeps: if a
+    monotonic-based report comes back, this is the object that notices. The event
+    loop's clock, which `asyncio.timeout` arms and compares against, is
+    untouched."""
 
     def __init__(self, step: float, start: float = 1_000.0) -> None:
         self.step = step
