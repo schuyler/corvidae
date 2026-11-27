@@ -33,6 +33,7 @@ import pytest
 
 from corvidae_cognition import critique as critique_module
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
+from corvidae_cognition.fork_log import prompt_sha256
 
 from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
@@ -676,6 +677,109 @@ async def test_r5_5_a_provider_timeout_is_not_reported_as_the_deadline(tmp_path,
     finally:
         await _teardown(env)
 
+
+# --- naming the prompt that was abandoned (#1337) ---------------------------------------
+
+
+async def _fork_shas(env) -> list[str]:
+    """The `prompt_sha256` of every fork row this env's database holds, as hex."""
+    import aiosqlite as _aio
+
+    db = await _aio.connect(env.db_path)
+    try:
+        async with db.execute(
+            "SELECT prompt_sha256 FROM fork_log ORDER BY id"
+        ) as cur:
+            return [bytes(row[0]).hex() async for row in cur]
+    finally:
+        await db.close()
+
+
+async def test_r5_5_the_deadline_warning_names_the_abandoned_prompt(tmp_path, caplog):
+    """#1337: a fork written off by the deadline names the prompt it gave up on.
+
+    The skip line carried lens, trace, channel and the bound, which is not enough
+    to find the row a late completion writes later: a trace runs several critique
+    stages, so `trace_id` matches a later stage's fork as easily as the abandoned
+    one. The key here is the same hash the row stores, so the join is a key match.
+    """
+
+    async def hangs(i, channel):
+        await asyncio.sleep(3)  # outlives the 0.05 s deadline; the test's own does not
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337a", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        expected = prompt_sha256(critique_module._window_blocks(env.channel)).hex()
+        assert f"fork prompt_sha256={expected}" in text, text
+    finally:
+        await _teardown(env)
+
+
+async def test_r5_5_a_busy_channel_names_no_prompt_because_none_was_built(
+    tmp_path, caplog, fast_poll
+):
+    """#1337 guard: a deadline that hit during the quiet wait abandons no prompt,
+    so it names none. This passes before the key existed as well as after; it pins
+    that the key means "a request was dispatched", not "a fork stage ran".
+    """
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    agent.waiting[env.channel.id] = 1
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337b", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "stayed busy past critique.fork_timeout")
+        assert "prompt_sha256=" not in text, text
+    finally:
+        await _teardown(env)
+
+
+async def test_the_prompt_key_joins_a_write_off_to_the_row_of_the_same_window(
+    tmp_path, caplog
+):
+    """#1337: the point of the key is the join. A completed fork writes a row; a
+    later fork over the same window, written off by the deadline, carries that
+    row's hash -- and a fork over a window that has moved on does not, which is
+    what separates two critique stages of one trace.
+    """
+    hang = {"on": False}
+
+    async def maybe_hang(i, channel):
+        if hang["on"]:
+            await asyncio.sleep(3)
+
+    agent = RoundsForkAgent(
+        {"critique"}, text=KEYED_PREDICTIVE, on_request=maybe_hang
+    )
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        # A fork that finishes: its row is the thing a later write-off must name.
+        await _judged_turn(env, "k337c", PREDICTIVE_ONLY)
+        [row_sha] = await _fork_shas(env)
+        assert agent.calls, "the completed fork reached the agent"
+
+        # Same window, written off: the line names that row.
+        hang["on"] = True
+        await _judged_turn(env, "k337d", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert f"fork prompt_sha256={row_sha}" in text, text
+
+        # The window moved, so the abandoned prompt is a different prompt.
+        env.channel.conversation.messages.append(
+            {"role": "user", "content": "a later message", "_db_id": 77,
+             "_message_type": env.channel.conversation.messages[-1]["_message_type"]}
+        )
+        await _judged_turn(env, "k337e", PREDICTIVE_ONLY)
+        moved = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert len(moved) == 2, moved
+        assert f"fork prompt_sha256={row_sha}" not in moved[1], moved[1]
+    finally:
+        await _teardown(env)
 
 # ---------------------------------------------------------------------------
 # The two config keys: startup, reload, fork time
