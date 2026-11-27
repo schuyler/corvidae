@@ -644,6 +644,8 @@ async def test_a_healthy_writer_reports_the_workers_own_error(
         release.set()
         holder.join(2.0)
         writer._conn.close()
+
+
 async def test_a_queued_unit_is_refused_by_name_when_the_route_frees(
     tmp_path: Path,
 ) -> None:
@@ -654,8 +656,6 @@ async def test_a_queued_unit_is_refused_by_name_when_the_route_frees(
     queued unit must be refused by name once the route is free, naming itself and
     the abandoned unit, not just the other plugin's owner.
     """
-    import corvidae.session_writer as sw
-
     writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=0.5)
     lock = writer._lock()
     await lock.acquire()  # the unit ahead holds the route
@@ -688,4 +688,24 @@ async def test_a_queued_unit_is_refused_by_name_when_the_route_frees(
         if lock.locked():
             lock.release()
         await writer.close()
+        writer._conn.close()
+
+
+async def test_an_already_abandoned_writer_names_the_caller(tmp_path: Path) -> None:
+    """#1330 round, M5: the entry-path refusal names the caller, not the old owner."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    writer._abandoned = True
+    writer._abandoned_owner = "plugin-a"
+
+    def body(cursor: WriteCursor) -> None:
+        raise AssertionError("a refused unit must not run")
+
+    try:
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(body, owner="plugin-b", deadline_s=1.0)
+        message = str(excinfo.value)
+        assert "plugin-b" in message
+        assert "plugin-a" in message
+        assert excinfo.value.owner == "plugin-b"
+    finally:
         writer._conn.close()

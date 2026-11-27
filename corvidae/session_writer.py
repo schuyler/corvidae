@@ -450,10 +450,9 @@ class SessionWriter:
         # is safe to drop rather than because it could never matter: `_outcome`
         # is reachable only from `_run_unit`, which assigns `_last_unit` while it
         # holds the route lock, so no other unit can be `_last_unit` here. A unit
-        # queued behind the one that was abandoned does reach this method on a
-        # writer that was healthy when it called `write()` — the refusal check at
-        # entry runs before the route lock — and for that unit the flag is still
-        # the right answer: its own answer is unknown too.
+        # that queues behind an abandoned one no longer gets this far — `write()`
+        # re-checks after taking the route lock — so the units that arrive here
+        # on an abandoned writer were abandoned themselves.
         if self._abandoned:
             raise WriteAbandoned(unit.owner, self._path)
         if state == _REVOKED:
