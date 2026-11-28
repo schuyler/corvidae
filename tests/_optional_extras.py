@@ -83,15 +83,18 @@ def _reason(module: str) -> str:
     `--extra` token in every line and require that token to name a declared extra which
     provides the module. What that check reads is the token and nothing else: the capture
     is `[A-Za-z0-9][A-Za-z0-9_-]*`, so a token ends at the first character outside that
-    class, and the assertion counts how many such tokens appear. A row can say whatever
-    it likes around its one token and the test stays green. Naming is enforced; the rest
-    of the sentence is not.
+    class, and the assertion counts how many such tokens appear. Appending text after the
+    clause leaves that test green — measured, not inferred — while adding a second
+    `--extra` token trips the count, and that failure is the assertion doing its job. A row
+    may therefore carry prose the check never reads, but it cannot go silent about its
+    extra or mention two.
 
-    The generic line below is the fallback for an unlisted module, and the only site in
-    this module that says the plugin cannot be imported; the table rows all end in the
-    generator's `uv sync --locked` clause. Outside this module the same opening appears in
-    a literal the generator never sees: `tests/_acp_extra.py` marks its skips with
-    "optional acp extra not installed; the ACP transport cannot be imported".
+    The generic line below is the fallback for an unlisted module, and the only place in
+    this module that emits the phrase "the plugin cannot be imported"; every table row is
+    the generator's template, whose text names `uv sync --locked` and ends in the
+    parenthetical "(exact: unlisted extras are dropped)". Outside this module the same
+    opening appears in a literal the generator never sees: `tests/_acp_extra.py` marks its
+    skips with "optional acp extra not installed; the ACP transport cannot be imported".
 
     It is what the guard's own tests drive with a name deliberately absent from the table.
     """
