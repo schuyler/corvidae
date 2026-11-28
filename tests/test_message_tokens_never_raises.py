@@ -214,9 +214,17 @@ def test_a_sequence_whose_iter_raises_keeps_its_weight() -> None:
 def test_an_aliased_container_is_counted_twice() -> None:
     """#1335 review: `seen` was never cleared, so the second reference to a
     shared container was marked `<cycle>` and the row counted 0.5005x."""
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+        __repr__ = __str__
+
     shared = ["x" * 60_000]
-    twin = {"a": ["x" * 60_000], "b": ["x" * 60_000]}
-    aliased = {"a": shared, "b": shared}
+    # The loss shows on the fallback path, so force it with a field that cannot
+    # be serialised; on the primary path `json.dumps` counts both references.
+    twin = {"a": ["x" * 60_000], "b": ["x" * 60_000], "extra": Bad()}
+    aliased = {"a": shared, "b": shared, "extra": Bad()}
     weight_twin = message_tokens(twin)
     weight_aliased = message_tokens(aliased)
     assert weight_twin > 10_000
