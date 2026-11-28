@@ -41,21 +41,52 @@ from typing import Iterator
 import pytest
 
 #: Skip lines name the extra to install, so a green skip stays actionable.
+# The table is module name -> installable extra, and it is the guard's only source
+# for the skip line. Both halves are tied to the manifest by
+# tests/test_optional_extras.py: the extra must be declared in pyproject, and it
+# must be the extra that provides the module being probed — either named after the
+# dash-normalized module, or depending on it.
+#
+# The wording is an instruction, and it is phrased as an addition rather than as a
+# whole command because `uv sync` is exact. Measured on this checkout at 08:00Z, a
+# bare `uv sync --locked --extra inotify` would have removed `agent-client-protocol`
+# from an environment that had it, so a skip line must not read as "run this and
+# nothing else" while it hands the reader a working command.
+_EXTRAS = {
+    "cross_channel_send": "cross-channel-send",
+    "corvidae_whatsapp": "whatsapp",
+    "context_panel": "context-panel",
+    "webhook_notify": "webhook-notify",
+    "github_webhook": "github-webhook",
+    "goals_notify": "goals-notify",
+    # Package-shaped guards: the probe names the import, and the extra that
+    # provides it is named differently. The rounds on #1341 and #1342 both found
+    # the fallback printing the import name where a reader needed the extra name.
+    "corvidae_cognition": "cognition",
+    "corvidae_inotify": "inotify",
+}
 _REASONS = {
-    "cross_channel_send": "optional cross_channel_send extra not installed",
-    "corvidae_whatsapp": "optional corvidae_whatsapp extra not installed",
-    "context_panel": "optional context_panel extra not installed",
-    "webhook_notify": "optional webhook_notify extra not installed",
-    "github_webhook": "optional github_webhook extra not installed",
-    "goals_notify": "optional goals_notify extra not installed",
+    module: (
+        f"optional {module} extra not installed; add --extra {extra} to "
+        "uv sync --locked (exact: unlisted extras are dropped)"
+    )
+    for module, extra in _EXTRAS.items()
 }
 
 
 def _reason(module: str) -> str:
-    return (
-        f"{_REASONS.get(module, f'optional {module} extra not installed')}; "
-        "the plugin cannot be imported"
-    )
+    """The skip line for an absent extra.
+
+    A table entry owns its whole sentence, because the actionable half differs per
+    extra: the plugin-shaped ones can say the plugin cannot be imported, and the
+    package-shaped ones must name the extra to install instead. An unlisted module
+    gets the generic line, which is what the guard's own tests drive with a name
+    deliberately absent from the table.
+    """
+    known = _REASONS.get(module)
+    if known:
+        return known
+    return f"optional {module} extra not installed; the plugin cannot be imported"
 
 
 def extra_importable(module: str) -> bool:

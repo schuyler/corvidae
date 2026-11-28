@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tomllib
@@ -144,6 +145,82 @@ def test_each_named_extra_has_a_reason():
     for module in _REASONS:
         assert module in _REASONS[module], _REASONS[module]
         assert requires_extra(module).mark.kwargs["reason"].find(module) != -1
+
+
+def test_every_reason_names_the_extra_that_provides_its_module():
+    """The command a skip line prints must be a command that provides that module.
+
+    A reason line is an instruction, so its truth condition is the manifest: if it
+    says ``--extra inotify`` and no such extra is declared, the reader follows a
+    dead end and concludes the guard is lying. Existence is not enough either — a
+    message pointing at some other declared extra is equally wrong and equally
+    plausible, which is the difference a reviewer's mutation found in the first
+    version of this test (``corvidae_inotify`` recommending ``--extra rss`` passed
+    it). So the check is the mapping: the extra is either named after the module in
+    PEP 503 form, or it depends on a distribution with that name.
+
+    The rounds on #1341 and #1342 landed on the same gap from opposite sides — a
+    guarded package named ``corvidae_inotify`` whose extra is ``inotify`` — and this
+    is what keeps the next package-shaped extra from shipping a skip line nobody can
+    act on. Scope: only the root ``pyproject.toml`` is read, so an extra declared by
+    a workspace member rather than here would need this test widened, not a bypass.
+    """
+    manifest = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    declared = manifest["project"]["optional-dependencies"]
+    assert declared, "pyproject declares no optional-dependencies; nothing to check"
+    for module, text in _REASONS.items():
+        hinted = re.findall(r"--extra ([A-Za-z0-9][A-Za-z0-9_-]*)", text)
+        assert len(hinted) == 1, f"{module}: expected one --extra token, got {hinted}: {text!r}"
+        extra = hinted[0]
+        assert extra in declared, (
+            f"{module}: reason says --extra {extra!r}, which this project does not declare"
+        )
+        stem = module.replace("_", "-")
+        providers = {dep.split("[")[0].strip().lower() for dep in declared[extra]}
+        assert extra.replace("_", "-") == stem or stem in providers, (
+            f"{module}: --extra {extra!r} exists but provides {sorted(providers)}, not {stem!r}"
+        )
+
+
+def test_every_guarded_module_in_the_tree_has_a_reason_entry():
+    """A guard added in a test file must join the table in the same commit.
+
+    The fallback line in `_reason` is honest but generic, and for a package-shaped
+    guard it prints the import name where a reader needed the extra name — that is
+    how a slice could ship a skip line nobody could act on, which the #1341 and
+    #1342 rounds found independently. Sweeping the tree turns that into a failure at
+    the commit adding the guard, and it covers `requires_extra` as well, since the
+    marker builds its reason from the same table and would otherwise inherit the
+    misleading fallback with nothing watching.
+
+    What this actually checks, stated because a sweep that overclaims is a worse
+    tripwire than no sweep: a *literal* `optional_extra("name")` or
+    `requires_extra("name")` call in a `.py` file under `tests/`. An aliased import,
+    an attribute call, or a name built from a variable slips past it — none exist in
+    the tree as of 08:00Z (`grep` for both names outside the helper shows only
+    `from _optional_extras import ...` plus literal calls), so the shape is a tripwire
+    for the way this has actually been written, not a proof of completeness. The
+    guard's own tests probe names deliberately absent from the table, so they stay
+    out of the sweep, and editing that exclusion is a visible diff line.
+    """
+    excluded = {pathlib.Path(__file__).resolve(), (_TESTS_DIR / "_optional_extras.py").resolve()}
+    guarded: dict[str, str] = {}
+    for path in sorted(_TESTS_DIR.rglob("*.py")):
+        if path.resolve() in excluded:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") in {"optional_extra", "requires_extra"}
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                guarded.setdefault(node.args[0].value, str(path.relative_to(_REPO_ROOT)))
+    assert guarded, "found no optional_extra()/requires_extra() guards; this sweep reads no tree"
+    missing = {name: where for name, where in guarded.items() if name not in _REASONS}
+    assert not missing, f"guarded imports with no reason entry: {missing}"
 
 
 def test_the_collection_time_guard_names_the_extra_in_its_skip():
