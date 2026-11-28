@@ -90,3 +90,52 @@ def test_the_markers_for_a_cycle_and_a_non_json_key_are_pinned() -> None:
     cycle.append(cycle)
     assert _json_safe({"a": cycle}) == {"a": ["<cycle list>"]}
     assert _json_safe({("not", "a", "string"): 1}) == {"('not', 'a', 'string')": 1}
+
+
+def test_a_row_with_a_provenance_record_and_a_non_string_key_is_counted() -> None:
+    """#1335 review: `sent_form` raised before `sent` was bound."""
+    row = {
+        "role": "user",
+        "content": "hello",
+        "_provenance": {"source": "tool", "origin": "web"},
+        ("not", "a", "string"): "value",
+    }
+    assert message_tokens(row) > 0
+
+
+def test_a_dict_subclass_whose_items_raise_is_counted() -> None:
+    """#1335 review: the handler re-called `_visible`, re-running `items()`."""
+    class BrokenItems(dict):
+        def items(self):
+            raise RuntimeError("items() is broken")
+
+    row = BrokenItems({"role": "user", "content": "hello"})
+    assert message_tokens(row) > 0
+
+
+def test_deep_nesting_with_a_bad_field_is_counted() -> None:
+    """#1335 review: `_json_safe` had no depth budget, so a deep row raised."""
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+        __repr__ = __str__
+
+    cell: object = "leaf"
+    for _ in range(20_000):
+        cell = [cell]
+    row = {"role": "user", "content": cell, "extra": Bad()}
+    assert message_tokens(row) > 0
+
+
+def test_the_handler_is_total_when_sent_form_raises(monkeypatch) -> None:
+    """#1335 review: `sent_form` raising before `sent` was bound took out the
+    handler too (UnboundLocalError), so no number came back."""
+    from corvidae import context as context_mod
+
+    def boom(msg, fence_key):
+        raise AttributeError("'tuple' object has no attribute 'startswith'")
+
+    monkeypatch.setattr(context_mod, "sent_form", boom)
+    row = {"role": "user", "content": "x" * 1_000, ("k",): "v"}
+    assert message_tokens(row) > 0
