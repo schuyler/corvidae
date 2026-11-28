@@ -425,7 +425,7 @@ async def test_a_broken_channel_object_fails_open(caplog):
 from fake_clock import FakeClock  # noqa: E402
 
 with optional_extra("outbound_cap"):
-    from outbound_cap import (  # noqa: E402
+    from outbound_cap import (
         WINDOW_LIMIT_KEY,
         WINDOW_SECONDS_KEY,
         parse_window_limit,
