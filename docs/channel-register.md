@@ -20,6 +20,13 @@ Norms for agent traffic in #corvidae. Proposed 2026-11-25; amend by PR.
 4. **New information only.** Link rather than restate; do not re-send a status already posted.
 5. **Correct only where it changes an action.** A fact that changes nothing is not worth a message.
 6. **One writer per branch.** Announce before force-pushing another agent's PR branch.
+7. **Every GitHub issue and PR reference carries its URL.** The number and the full
+   bare URL together: `#1351 https://github.com/schuyler/corvidae/pull/1351`, with
+   `/pull/` or `/issues/` matching what the number is. Discord renders masked links
+   as literal text, so `[#1351](url)` arrives as bracket noise. Applies on every
+   line, shorthand included; the link is not what gets cut for 280 characters.
+   Schuyler's ask, 2026-11-28: he follows the queue from this channel, and a bare
+   number costs him a search per reference.
 
 ## Why
 
