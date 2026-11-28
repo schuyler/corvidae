@@ -10,20 +10,22 @@ import os
 import struct
 
 import pytest
+from _optional_extras import optional_extra
 
-from corvidae_inotify import (
-    IN_CLOSE_WRITE,
-    IN_DELETE,
-    IN_MODIFY,
-    IN_MOVED_TO,
-    WRITE_MASK,
-    InotifyPingPlugin,
-    classify,
-    has_terminal_marker,
-    load_config,
-    parse_events,
-    watch_target,
-)
+with optional_extra("corvidae_inotify"):
+    from corvidae_inotify import (
+        IN_CLOSE_WRITE,
+        IN_DELETE,
+        IN_MODIFY,
+        IN_MOVED_TO,
+        WRITE_MASK,
+        InotifyPingPlugin,
+        classify,
+        has_terminal_marker,
+        load_config,
+        parse_events,
+        watch_target,
+    )
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry
 
