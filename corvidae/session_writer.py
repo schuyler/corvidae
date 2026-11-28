@@ -74,23 +74,29 @@ class WriteAbandoned(WriteRevoked):
     busy-wait abandonment the worker's own ``COMMIT`` may still land.
     """
 
-    def __init__(self, owner: str, path: str, *, abandoned_owner: str = "") -> None:
+    def __init__(self, owner: str, path: str, *, cause: str = "uninterruptible") -> None:
         self.owner = owner
         self.path = path
-        self.abandoned_owner = abandoned_owner or owner
+        self.cause = cause
         self.deadline_s = float("nan")
-        blamed = (
-            ""
-            if self.abandoned_owner == owner
-            else f" (this writer abandoned a unit from {self.abandoned_owner})"
-        )
-        Exception.__init__(
-            self,
-            f"write unit from {owner} on {path} cannot run{blamed}: a unit whose "
-            "statement ignores interrupt() was abandoned, so whether that write "
-            "landed is unknown and this writer refuses further writes until "
-            "restart — add the plugin to plugins.disabled and report it",
-        )
+        if cause == "rollback":
+            # The statement DID yield to interrupt(); the rollback failed, so the
+            # write did not land and restarting is the whole remedy. Naming the
+            # plugin's statement or plugins.disabled here would be false (#1314).
+            detail = (
+                f"write unit from {owner} on {path} cannot run: a revocation "
+                "could not roll its transaction back, so the connection is still "
+                "inside that open transaction and its write was discarded — "
+                "restart the daemon to recover; the plugin is not at fault"
+            )
+        else:
+            detail = (
+                f"write unit from {owner} on {path} could not be revoked: its "
+                "statement ignores interrupt(), so whether its write landed is "
+                "unknown and this writer refuses further writes until restart — add "
+                "the plugin to plugins.disabled and report it"
+            )
+        Exception.__init__(self, detail)
 
 
 @dataclass(frozen=True)
@@ -251,6 +257,10 @@ class SessionWriter:
         #: inside a statement, so closing it here would block the loop (#1315).
         self._abandoned = False
         self._abandoned_owner = ""
+        # Why the writer stopped accepting units: "uninterruptible" (a statement
+        # that ignores interrupt()) or "rollback" (a revocation that could not
+        # roll back). Only the message differs; the refusal is the same (#1314).
+        self._abandon_cause = "uninterruptible"
 
     @classmethod
     def open(
@@ -312,9 +322,7 @@ class SessionWriter:
         """
         if self._abandoned:
             raise WriteAbandoned(
-                owner or self._abandoned_owner,
-                self._path,
-                abandoned_owner=self._abandoned_owner,
+                self._abandoned_owner, self._path, cause=self._abandon_cause
             )
 
     async def write(
@@ -573,9 +581,13 @@ class SessionWriter:
         fails with "cannot start a transaction within a transaction" until
         restart — so the writer marks itself abandoned instead, which turns that
         opaque failure into a ``WriteAbandoned`` naming this plugin. The
-        connection is not closed and reopened here: this runs on the revoker
-        thread while the worker may still be inside a statement on that
-        connection, and closing it there crashes the interpreter (#1326).
+        connection is not closed and reopened here. That is a conservative call,
+        not a measured hazard: the revoker holds ``unit.lock`` while every
+        statement on this connection takes that lock, so no statement of *this*
+        unit can be running — #1326's crash needs a statement running with no
+        unit behind it, which the writer does not produce. What is unmeasured is
+        whether a reopen here is safe in every remaining state, and a named
+        refusal is a better default than an unproven recovery (#1314 review).
         """
         for attempt in (1, 2):
             try:
@@ -609,6 +621,7 @@ class SessionWriter:
                     extra={"owner": unit.owner},
                 )
                 self._abandoned_owner = unit.owner
+                self._abandon_cause = "rollback"
                 self._abandoned = True
 
     def _revoke(self, unit: _Unit) -> None:
@@ -632,6 +645,11 @@ class SessionWriter:
             self._abandoned = True
             return
         if not outcome:
+            return
+        if self._abandoned:
+            # The rollback failed, so the R3 sentence below would be false: the
+            # unit was not rolled back and plugins.disabled is not the remedy.
+            # One ERROR per revocation, and it is the true one (#1314).
             return
         # Step 4: R3 ERROR naming the owner and the deadline.
         logger.error(

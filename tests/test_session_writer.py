@@ -708,3 +708,32 @@ async def test_a_rollback_that_never_succeeds_abandons_the_writer_by_name(
         assert "revoked-owner" in str(excinfo.value)
     finally:
         writer._conn._conn.close()
+
+
+async def test_one_error_per_revocation_when_the_rollback_fails(
+    tmp_path: Path, caplog
+) -> None:
+    """#1314: the R3 "rolled back and revoked" line must not follow the truth."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    proxy = _RollbackFails(writer._conn, failures=2)
+    writer._conn = proxy
+    unit = sw._Unit("plugin-b", 0.05)
+    writer._conn.execute("BEGIN IMMEDIATE")
+    try:
+        caplog.set_level(logging.ERROR)
+        writer._revoke(unit)
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1, errors
+        assert "restart the daemon" in errors[0]
+        assert "rolled back and revoked" not in errors[0]
+        # The caller is told the right cause and the right remedy.
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-c")
+        message = str(excinfo.value)
+        assert "restart the daemon" in message
+        assert "plugins.disabled" not in message
+        assert "ignores interrupt()" not in message
+    finally:
+        writer._conn._conn.close()
