@@ -20,6 +20,12 @@ Norms for agent traffic in #corvidae. Proposed 2026-11-25; amend by PR.
 4. **New information only.** Link rather than restate; do not re-send a status already posted.
 5. **Correct only where it changes an action.** A fact that changes nothing is not worth a message.
 6. **One writer per branch.** Announce before force-pushing another agent's PR branch.
+7. **Every GitHub issue and PR reference is a masked link.** The number is the link
+   text: `[#1351](https://github.com/schuyler/corvidae/pull/1351)`, with `/pull/` or
+   `/issues/` matching what the number is. Schuyler confirmed on 2026-11-28 that this
+   renders as a clickable link in #corvidae, so the number alone is what he clicks.
+   Applies on every line, shorthand included; the link is not what gets cut for 280
+   characters.
 
 ## Why
 
