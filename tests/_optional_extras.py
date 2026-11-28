@@ -81,10 +81,11 @@ def _reason(module: str) -> str:
     a table row supplies only its module-to-extra pair. That is what lets
     `test_every_reason_names_the_extra_that_provides_its_module` require exactly one
     `--extra` token in every line and require that token to name a declared extra which
-    provides the module. What that check reads is the token and nothing else — its regex
-    stops at the first whitespace after `--extra` and the assertion counts matches — so a
-    row can still append prose the check never inspects. Naming is enforced; the rest of
-    the sentence is not.
+    provides the module. What that check reads is the token and nothing else: the capture
+    is `[A-Za-z0-9][A-Za-z0-9_-]*`, so a token ends at the first character outside that
+    class, and the assertion counts how many such tokens appear. A row can say whatever
+    it likes around its one token and the test stays green. Naming is enforced; the rest
+    of the sentence is not.
 
     The generic line below is the fallback for an unlisted module, and the only site in
     this module that says the plugin cannot be imported; the table rows all end in the
