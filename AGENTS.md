@@ -103,6 +103,14 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
 * **Say what was reviewed in the PR body:** the rounds it took, any meta-review, and the findings skipped.
 
+# Continuous integration
+
+Five jobs gate a PR -- `kernel`, `full`, `cognition-fts`, `web-smoke`, `image` -- and the test jobs run on a self-hosted runner. A red check is a claim to check, not a verdict to accept.
+
+* Registry flake: `image` dies in under a minute with a `ghcr.io ... 503` line from a `COPY --from=` step. Rerun; do not touch the pin.
+* Runner contention: a check fails at one sha and fails again at another with a *different* signature -- an assertion in a file your diff does not touch, or a `pytest-timeout` dump with the main thread parked in `selectors.poll` -- while recent `main` pushes are green on the same job. Read the runner before you read your diff. `gh run rerun <run-id> --failed` at the identical sha is the instrument: a red that moves while the tree stands still is environmental.
+* Either way, the PR gets the evidence, not the conclusion: the job, both attempt signatures, the sha the rerun ran, and what it printed. `gh run view <run-id> --log-failed` shows only failed steps, so a step missing from that output is evidence that it passed -- write it that way, not as "the step passed in both logs".
+
 # Process instructions
 
 * Read `docs/prd.md` before implementing anything. The PRD is the reference for what must be true; issues, plans, design docs and the existing code derive from it.
