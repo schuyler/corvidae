@@ -84,12 +84,12 @@ def test_a_big_row_with_one_bad_field_keeps_its_weight() -> None:
 
 def test_the_markers_for_a_cycle_and_a_non_json_key_are_pinned() -> None:
     """#1335 review: the fallback's two marker shapes had no failing test."""
-    from corvidae.context import _json_safe
+    from corvidae.context import _json_text
 
     cycle: list = []
     cycle.append(cycle)
-    assert _json_safe({"a": cycle}) == {"a": ["<cycle list>"]}
-    assert _json_safe({("not", "a", "string"): 1}) == {"('not', 'a', 'string')": 1}
+    assert '"<cycle list>"' in _json_text({"a": cycle})
+    assert '{"(\'not\', \'a\', \'string\')":1}' in _json_text({("not", "a", "string"): 1})
 
 
 def test_a_row_with_a_provenance_record_and_a_non_string_key_is_counted() -> None:
@@ -116,7 +116,7 @@ def test_a_dict_subclass_whose_items_raise_is_counted() -> None:
 
 
 def test_deep_nesting_with_a_bad_field_is_counted() -> None:
-    """#1335 review: `_json_safe` had no depth budget, so a deep row raised."""
+    """#1335 review: the fallback used to raise on a deeply nested row."""
     class Bad:
         def __str__(self) -> str:
             raise ValueError("no text")

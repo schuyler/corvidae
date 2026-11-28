@@ -498,39 +498,6 @@ def _json_text(obj: object) -> str:
     return "".join(out)
 
 
-# Depth past which `_json_safe` stops descending: a row nested deeper than this
-# is a marker rather than a RecursionError on the budget path (#1335 review).
-_MAX_SAFE_DEPTH = 50
-
-
-def _json_safe(
-    obj: object, seen: frozenset[int] = frozenset(), depth: int = 0
-) -> object:
-    """``obj`` as JSON can encode it, replacing only what it cannot (#1333).
-
-    A whole-row fallback would count a 60 KB row as a handful of tokens, which
-    reads as "fits" to the compaction this feeds, so the rest of the row keeps
-    its weight and only the offending field becomes a marker.
-    """
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if id(obj) in seen:
-        return f"<cycle {type(obj).__name__}>"
-    if depth >= _MAX_SAFE_DEPTH:
-        return f"<too deep {type(obj).__name__}>"
-    seen = seen | {id(obj)}
-    if isinstance(obj, dict):
-        return {
-            _json_safe_key(k): _json_safe(v, seen, depth + 1) for k, v in obj.items()
-        }
-    if isinstance(obj, (list, tuple, set, frozenset)):
-        return [_json_safe(v, seen, depth + 1) for v in obj]
-    try:
-        return str(obj)
-    except Exception:
-        return f"<unserialisable {type(obj).__name__}>"
-
-
 def _json_safe_key(key: object) -> object:
     """A dict key JSON can encode: scalars as themselves, anything else by text."""
     if key is None or isinstance(key, (str, int, float, bool)):
