@@ -74,27 +74,40 @@ class WriteAbandoned(WriteRevoked):
     busy-wait abandonment the worker's own ``COMMIT`` may still land.
     """
 
-    def __init__(self, owner: str, path: str, *, cause: str = "uninterruptible") -> None:
+    def __init__(
+        self,
+        owner: str,
+        path: str,
+        *,
+        abandoned_owner: str = "",
+        cause: str = "uninterruptible",
+    ) -> None:
         self.owner = owner
         self.path = path
+        self.abandoned_owner = abandoned_owner or owner
         self.cause = cause
         self.deadline_s = float("nan")
+        blamed = (
+            ""
+            if self.abandoned_owner == owner
+            else f" (this writer abandoned a unit from {self.abandoned_owner})"
+        )
         if cause == "rollback":
             # The statement DID yield to interrupt(); the rollback failed, so the
             # write did not land and restarting is the whole remedy. Naming the
             # plugin's statement or plugins.disabled here would be false (#1314).
             detail = (
-                f"write unit from {owner} on {path} cannot run: a revocation "
+                f"write unit from {owner} on {path} cannot run{blamed}: a revocation "
                 "could not roll its transaction back, so the connection is still "
                 "inside that open transaction and its write was discarded — "
                 "restart the daemon to recover; the plugin is not at fault"
             )
         else:
             detail = (
-                f"write unit from {owner} on {path} could not be revoked: its "
-                "statement ignores interrupt(), so whether its write landed is "
-                "unknown and this writer refuses further writes until restart — add "
-                "the plugin to plugins.disabled and report it"
+                f"write unit from {owner} on {path} cannot run{blamed}: a unit whose "
+                "statement ignores interrupt() was abandoned, so whether that write "
+                "landed is unknown and this writer refuses further writes until "
+                "restart — add the plugin to plugins.disabled and report it"
             )
         Exception.__init__(self, detail)
 
@@ -322,7 +335,10 @@ class SessionWriter:
         """
         if self._abandoned:
             raise WriteAbandoned(
-                self._abandoned_owner, self._path, cause=self._abandon_cause
+                owner or self._abandoned_owner,
+                self._path,
+                abandoned_owner=self._abandoned_owner,
+                cause=self._abandon_cause,
             )
 
     async def write(
