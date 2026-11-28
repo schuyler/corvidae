@@ -2056,12 +2056,15 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   [...]}}` on `on_trace_record` and hands the objections to the kernel's
   held-text store with `held.hold_and_wake` (source `pre-send check`,
   origin of the held exchange: the `origin` annotation, else the trace's
-  recorded origin, else `user`). The stub that wakes the revising turn says
-  the reply was held for the reasons in the CONTEXT above and offers both
-  outcomes of a hold: write a revised reply, or decline the turn; either way what
-  the objection taught you belongs in the agent's notes rather than in whatever the
-  turn sends, since a lesson is not a reason to reply. It names no
-  `NO_REPLY`, so Critique 4's silence default does not apply; the decline it
+  recorded origin, else `user`). The stub that wakes the revising turn is chosen per channel, because
+  silence is a promise about the transport and not every transport makes it.
+  Where the channel's system prompt carries the silence instruction — the
+  ``silence`` plugin is loaded and the owning transport declares
+  ``conversational`` — ``REVISION_STUB_WITH_DECLINE`` offers both outcomes of a
+  hold: write a revised reply, or decline the turn; either way what the objection
+  taught you belongs in the agent's notes rather than in whatever the turn sends,
+  since a lesson is not a reason to reply. It names no `NO_REPLY`, so
+  Critique 4's silence default does not apply; the decline it
   offers is the agent's own, executed by the silence plugin, whose instruction
   reaches this turn's system prompt like any other (`silence.py
   transform_system_prompt`) and whose veto drops a final that carries the token
@@ -2069,8 +2072,15 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   (`PreSendHold.suppressed` is read by critique and appraisal only), and
   `on_final` still runs on a vetoed final, which
   `test_r6_a_decline_on_the_revising_turn_sends_nothing_and_clears_the_span` pins.
-  A hold is a defect report, not an order to
-  speak.
+  Wherever either half is missing — the transports that declare a
+  ``check_allowance`` without ``conversational`` (`channels/web.py`,
+  `channels/cli.py`, `channels/acp.py`), a channel no loaded transport claims, or
+  an operator who disabled `silence` — `REVISION_STUB` states the one outcome
+  that is available, because offering a decline there would either point at an
+  instruction the agent was never given or deliver the control string as a
+  message (`PreSendHold._decline_available`). A hold is a defect report, not an
+  order to speak.
+
 - **The revising turn.** It is the turn of that origin at which the store
   offers the batch, and it sees the objections framed as CONTEXT from
   `pre-send check`. A held trace gets no stage 2, so critique runs no lens
