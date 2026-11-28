@@ -1038,10 +1038,12 @@ makes after that raises. Decide what your plugin does on `WriteRevoked`: the
 kernel's `persist_message` logs a WARNING and drops the row, while
 `on_compaction` lets the exception propagate.
 
-**`WriteClosed`.** A write that arrives after the writer was closed — shutdown
+**`WriteClosed`.** A call that arrives after the writer was closed — shutdown
 has run, or the daemon is stopping — raises `WriteClosed` (`.owner`, `.path`,
-and `.deadline_s` as `nan` because no deadline elapsed). The message names the
-path and says to start a new writer; nothing of the unit runs. It is a
+and `.deadline_s` as `nan` because no deadline elapsed). That covers `write()`
+and the writer's two other statement paths, `load_extension` and
+`set_journal_mode`, which name the plugin or themselves in `.owner`. The message
+names the path and says to start a new writer; nothing of the unit runs. It is a
 `WriteRevoked` subclass, but the remedy differs: retrying on a fresh writer is
 safe, while `WriteRevoked` means the unit's rows were discarded.
 

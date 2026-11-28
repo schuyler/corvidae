@@ -882,7 +882,7 @@ async def test_a_queued_write_is_refused_when_close_wins_the_route(
 
 
 async def test_load_extension_after_close_is_refused_by_name(tmp_path: Path) -> None:
-    """#1355: the other two statement paths must refuse by name after close."""
+    """#1355: a load after close names the writer, not SQLite's closed-db text."""
     writer = SessionWriter.open(tmp_path / "sessions.db")
     await writer.close()
 
@@ -896,6 +896,7 @@ async def test_load_extension_after_close_is_refused_by_name(tmp_path: Path) -> 
 
 
 async def test_set_journal_mode_after_close_is_refused_by_name(tmp_path: Path) -> None:
+    """#1355: a mode change after close refuses by name, like the other two."""
     writer = SessionWriter.open(tmp_path / "sessions.db")
     await writer.close()
 
@@ -906,3 +907,54 @@ async def test_set_journal_mode_after_close_is_refused_by_name(tmp_path: Path) -
     # No caller-supplied owner on this method, so it names itself.
     assert "set_journal_mode" in message
     assert str(tmp_path / "sessions.db") in message
+    assert "closed" in message
+
+
+async def test_a_queued_extension_load_is_refused_when_close_wins_the_route(
+    tmp_path: Path,
+) -> None:
+    """#1355 review, F3: the guard has to be *under* the route lock, not before
+    it. A call that queued ahead of close() must not reach a closed connection —
+    and a guard hoisted outside the lock leaves every after-close test green."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    lock = writer._lock()
+    await lock.acquire()
+
+    try:
+        queued = asyncio.create_task(
+            writer.load_extension("libnonexistent.so", owner="plugin-d")
+        )
+        await asyncio.sleep(0.1)  # queued behind the route
+        assert writer._closed is False
+        writer._closed = True  # what close() sets before it releases the route
+        lock.release()
+        with pytest.raises(WriteClosed) as excinfo:
+            await asyncio.wait_for(queued, timeout=2.0)
+        assert "plugin-d" in str(excinfo.value)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer._conn.close()
+
+
+async def test_a_queued_journal_mode_is_refused_when_close_wins_the_route(
+    tmp_path: Path,
+) -> None:
+    """The same placement check for set_journal_mode."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    lock = writer._lock()
+    await lock.acquire()
+
+    try:
+        queued = asyncio.create_task(writer.set_journal_mode("WAL"))
+        await asyncio.sleep(0.1)
+        assert writer._closed is False
+        writer._closed = True
+        lock.release()
+        with pytest.raises(WriteClosed) as excinfo:
+            await asyncio.wait_for(queued, timeout=2.0)
+        assert "set_journal_mode" in str(excinfo.value)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer._conn.close()
