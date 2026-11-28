@@ -446,8 +446,12 @@ class SessionWriter:
             else:
                 # Abandoned: the worker holds this lock inside a C call, so the
                 # wait would be unbounded. Its outcome is unknown, not rolled
-                # back — its own COMMIT may still land.
-                raise WriteAbandoned(unit.owner, self._path)
+                # back — its own COMMIT may still land. The cause comes from the
+                # writer, so a rollback-failure refusal does not blame the
+                # plugin's statement (#1314 review).
+                raise WriteAbandoned(
+                    unit.owner, self._path, cause=self._abandon_cause
+                )
         try:
             state, exc, result = unit.state, unit.exc, unit.result
         finally:
@@ -464,7 +468,7 @@ class SessionWriter:
         # re-checks after taking the route lock — so the units that arrive here
         # on an abandoned writer were abandoned themselves.
         if self._abandoned:
-            raise WriteAbandoned(unit.owner, self._path)
+            raise WriteAbandoned(unit.owner, self._path, cause=self._abandon_cause)
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
         if exc is not None:

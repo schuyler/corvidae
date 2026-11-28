@@ -737,3 +737,26 @@ async def test_one_error_per_revocation_when_the_rollback_fails(
         assert "ignores interrupt()" not in message
     finally:
         writer._conn._conn.close()
+
+
+async def test_every_abandoned_refusal_carries_the_writers_cause(tmp_path: Path) -> None:
+    """#1343 review: `cause` must reach all three raise sites, not one."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    writer._abandoned_owner = "plugin-b"
+    writer._abandon_cause = "rollback"
+    writer._abandoned = True
+    unit = sw._Unit("plugin-b", 0.05)
+    try:
+        # Entry path (`write()` -> `_refuse_if_abandoned`).
+        with pytest.raises(WriteAbandoned) as entry:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
+        # Outcome path (`_outcome`), reached by a unit already inside the writer.
+        with pytest.raises(WriteAbandoned) as outcome:
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()
+    for excinfo in (entry, outcome):
+        assert "restart the daemon" in str(excinfo.value)
+        assert "plugins.disabled" not in str(excinfo.value)
