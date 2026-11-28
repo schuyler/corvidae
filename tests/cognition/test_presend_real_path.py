@@ -564,9 +564,10 @@ class TestRevisionIsNeverHeld:
         ), (
             "the stub no longer offers a choice between the two outcomes"
         )
-        assert "belongs in a file, not in the reply" in text, (
-            "the lesson must be routed to a file: a final that narrates the note "
-            "instead of declining ships the message silence was meant to replace"
+        assert "belongs in your notes, not in this reply" in text, (
+            "the lesson must be routed away from the reply: a final that narrates "
+            "the note instead of declining ships the message silence replaced, and "
+            "a ban scoped to the held draft would license putting it in the new one"
         )
         assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
 
