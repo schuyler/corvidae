@@ -34,9 +34,10 @@ SOURCE = "pre-send check"
 REVISION_STUB = (
     "Your last reply was held back before it was sent, for the reasons in the "
     "CONTEXT above. Either write a revised reply now, or decline this turn the "
-    "way your channel's silence instruction says. Anything worth keeping from "
-    "the objection belongs in your notes, not in this reply. Silence after a "
-    "hold is a complete outcome, not a refusal to comply."
+    "way your channel's silence instruction says. Either way, keep what the "
+    "objection taught you in your notes rather than in what you send: a lesson "
+    "is not a reason to reply. Silence after a hold is a complete outcome, not "
+    "a refusal to comply."
 )
 
 #: Bound on the pending-refusal LRU; a stale entry ages out.

@@ -2058,8 +2058,9 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   origin of the held exchange: the `origin` annotation, else the trace's
   recorded origin, else `user`). The stub that wakes the revising turn says
   the reply was held for the reasons in the CONTEXT above and offers both
-  outcomes of a hold: write a revised reply, or decline the turn; what the
-  objection taught you belongs in the agent's notes, not in the reply either way. It names no
+  outcomes of a hold: write a revised reply, or decline the turn; either way what
+  the objection taught you belongs in the agent's notes, since a lesson is not a
+  reason to reply. It names no
   `NO_REPLY`, so Critique 4's silence default does not apply; the decline it
   offers is the agent's own, executed by the silence plugin, whose instruction
   reaches this turn's system prompt like any other (`silence.py
