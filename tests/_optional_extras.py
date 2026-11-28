@@ -59,6 +59,7 @@ _EXTRAS = {
     "webhook_notify": "webhook-notify",
     "github_webhook": "github-webhook",
     "goals_notify": "goals-notify",
+    "outbound_cap": "outbound-cap",
     # Package-shaped guards: the probe names the import, and the extra that
     # provides it is named differently. The rounds on #1341 and #1342 both found
     # the fallback printing the import name where a reader needed the extra name.
