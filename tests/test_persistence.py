@@ -1290,7 +1290,7 @@ async def test_the_writer_revoke_bound_follows_the_configured_graceful_phase(
     config = {
         "daemon": {
             "shutdown_timeout": 1.5,
-            "persistence": {"path": str(tmp_path / "sessions.db")},
+            "session_db": str(tmp_path / "sessions.db"),
         }
     }
     await plugin.on_start(config)

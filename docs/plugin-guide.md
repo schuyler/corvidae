@@ -961,7 +961,7 @@ database file.
 ```python
 from corvidae.hooks import get_dependency
 from corvidae.persistence import PersistencePlugin
-from corvidae.session_writer import WriteCursor, WriteRevoked
+from corvidae.session_writer import WriteClosed, WriteCursor, WriteRevoked
 
 
 async def note_seen(self, channel_id: str, text: str) -> int | None:
@@ -1038,6 +1038,13 @@ makes after that raises. Decide what your plugin does on `WriteRevoked`: the
 kernel's `persist_message` logs a WARNING and drops the row, while
 `on_compaction` lets the exception propagate.
 
+**`WriteClosed`.** A write that arrives after the writer was closed — shutdown
+has run, or the daemon is stopping — raises `WriteClosed` (`.owner`, `.path`,
+and `.deadline_s` as `nan` because no deadline elapsed). The message names the
+path and says to start a new writer; nothing of the unit runs. It is a
+`WriteRevoked` subclass, but the remedy differs: retrying on a fresh writer is
+safe, while `WriteRevoked` means the unit's rows were discarded.
+
 **Extensions.** `await persistence.load_extension(path, owner="my_plugin")`
 loads a SQLite extension on the write connection, outside any transaction. It
 does not touch `persistence.db`; load it there yourself if you read through it.
@@ -1078,7 +1085,7 @@ plugin has no special standing (#1026).
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin` (`.write`, `.load_extension`, `.db` read-only), `add_column_if_missing` (async, for your own connection), `add_column_if_missing_sync` (takes a `WriteCursor`, for use inside a unit), `view_rows`, `decodable_summaries` |
-| `corvidae.session_writer` | `WriteCursor`, `WriteResult`, `WriteRevoked`, `DEFAULT_WRITE_DEADLINE_S`, `MAX_WRITE_DEADLINE_S`, `open_session_store` (see [Writing to sessions.db](#writing-to-sessionsdb)) |
+| `corvidae.session_writer` | `WriteCursor`, `WriteResult`, `WriteClosed`, `WriteRevoked`, `DEFAULT_WRITE_DEADLINE_S`, `MAX_WRITE_DEADLINE_S`, `open_session_store` (see [Writing to sessions.db](#writing-to-sessionsdb)) |
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |

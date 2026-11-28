@@ -697,6 +697,9 @@ async def test_an_already_abandoned_writer_names_the_caller(tmp_path: Path) -> N
     writer = SessionWriter.open(tmp_path / "sessions.db")
     writer._abandoned = True
     writer._abandoned_owner = "plugin-a"
+    # Closed as well as abandoned: the abandonment message must win, because it
+    # names the unit and the remedy; "start a new one" alone loses that (#1328).
+    await writer.close()
 
     def body(cursor: WriteCursor) -> None:
         raise AssertionError("a refused unit must not run")
@@ -843,3 +846,36 @@ async def test_a_write_after_close_is_refused_by_name(tmp_path: Path) -> None:
     assert str(tmp_path / "sessions.db") in message
     assert "closed" in message
     assert ran == [], "a refused unit must not run"
+
+
+async def test_a_queued_write_is_refused_when_close_wins_the_route(
+    tmp_path: Path,
+) -> None:
+    """#1328 item 3: a unit that queued before close() must not begin on a
+    closed connection — SQLite's "Cannot operate on a closed database" is the
+    text WriteClosed exists to replace."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    lock = writer._lock()
+    await lock.acquire()  # a unit ahead holds the route
+
+    ran: list[str] = []
+
+    def body(cursor: WriteCursor) -> None:
+        ran.append("ran")
+
+    try:
+        queued = asyncio.create_task(
+            writer.write(body, owner="plugin-b", deadline_s=1.0)
+        )
+        await asyncio.sleep(0.1)  # plugin-b passed the entry check and queued
+        assert writer._closed is False
+        writer._closed = True  # what close() sets before it releases the route
+        lock.release()
+        with pytest.raises(WriteClosed) as excinfo:
+            await asyncio.wait_for(queued, timeout=2.0)
+        assert "plugin-b" in str(excinfo.value)
+        assert ran == [], "a refused unit was allowed to run"
+    finally:
+        if lock.locked():
+            lock.release()
+        writer._conn.close()
