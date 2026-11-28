@@ -23,6 +23,7 @@ from corvidae.persistence import PersistencePlugin
 from corvidae.session_writer import (
     SessionWriter,
     WriteAbandoned,
+    WriteClosed,
     WriteCursor,
     WriteRevoked,
     open_session_store,
@@ -823,3 +824,22 @@ async def test_every_abandoned_refusal_carries_the_writers_cause(tmp_path: Path)
     for excinfo in (entry, outcome):
         assert "restart the daemon" in str(excinfo.value)
         assert "plugins.disabled" not in str(excinfo.value)
+
+
+async def test_a_write_after_close_is_refused_by_name(tmp_path: Path) -> None:
+    """#1328 item 3: a late write must name the writer, not fail inside SQLite."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    await writer.close()
+
+    ran: list[str] = []
+
+    def body(cursor: WriteCursor) -> None:
+        ran.append("ran")
+
+    with pytest.raises(WriteClosed) as excinfo:
+        await writer.write(body, owner="plugin-b")
+    message = str(excinfo.value)
+    assert "plugin-b" in message
+    assert str(tmp_path / "sessions.db") in message
+    assert "closed" in message
+    assert ran == [], "a refused unit must not run"
