@@ -2057,9 +2057,14 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   held-text store with `held.hold_and_wake` (source `pre-send check`,
   origin of the held exchange: the `origin` annotation, else the trace's
   recorded origin, else `user`). The stub that wakes the revising turn says
-  the reply was held for the reasons in the CONTEXT above and asks for a
-  revised one. It names no `NO_REPLY`, so Critique 4's silence default does
-  not apply, though the agent may still decline.
+  the reply was held for the reasons in the CONTEXT above and offers both
+  outcomes of a hold: write a revised reply, or send nothing this turn and
+  keep what the objection taught you somewhere durable. It names no
+  `NO_REPLY`, so Critique 4's silence default does not apply; the decline it
+  offers is still the agent's own, executed by the silence veto, which the
+  revision span does not suppress (`PreSendHold.suppressed` is read by
+  critique and appraisal only). A hold is a defect report, not an order to
+  speak.
 - **The revising turn.** It is the turn of that origin at which the store
   offers the batch, and it sees the objections framed as CONTEXT from
   `pre-send check`. A held trace gets no stage 2, so critique runs no lens

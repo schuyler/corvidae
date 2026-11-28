@@ -542,6 +542,24 @@ class TestRevisionIsNeverHeld:
         assert "NO_REPLY" not in stub["text"]
         assert "NO_REPLY" not in P.REVISION_STUB
 
+    async def test_r6_stub_text_offers_silence_as_well_as_revision(self, make_env, P):
+        """R6 with the hold's other outcome named: the stub that wakes the
+        revising turn offers a revision *and* sending nothing. A hold is a
+        defect report, not an order to speak, and the decline it offers is one
+        the kernel can honour — the revision span suppresses the pre-send check
+        only (``suppressed()`` is read by critique and appraisal), so the
+        silence veto still fires on that turn's final."""
+        env = await make_env({"the draft": OBJECTIONS})
+        script(env.plugin, _make_text_response("the draft"), _make_text_response("revised"))
+
+        await say(env)
+
+        (stub,) = env.spy.stubs("user")
+        text = stub["text"].lower()
+        assert "revised reply" in text, "the revision option went missing"
+        assert "send nothing" in text, "the decline option went missing"
+        assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
+
     async def test_r6_revision_is_sent_unchecked_and_the_next_final_is_checked(
         self, make_env, caplog
     ):

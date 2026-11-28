@@ -24,10 +24,18 @@ logger = logging.getLogger("corvidae.presend")
 #: The held batch's source and its frame label.
 SOURCE = "pre-send check"
 
-#: The revising turn's stub text. It names no NO_REPLY: a revision is never held.
+#: The revising turn's stub text: both outcomes of a hold, not one command.
+#: It names no NO_REPLY — the token belongs to the channel's silence
+#: instruction (``silence.py``), and naming it here invites it into prose,
+#: where the veto drops the whole reply. Silence is still offered, because the
+#: revision span suppresses only the pre-send check: ``suppressed()`` is
+#: consulted by critique and appraisal, never by the silence veto, so a decline
+#: on the revising turn is withheld the way any other decline is.
 REVISION_STUB = (
     "Your last reply was held back before it was sent, for the reasons in the "
-    "CONTEXT above. Write a revised reply now."
+    "CONTEXT above. Either write a revised reply now, or send nothing this turn "
+    "and keep what the objection taught you somewhere durable. Silence after a "
+    "hold is a complete outcome, not a refusal to comply."
 )
 
 #: Bound on the pending-refusal LRU; a stale entry ages out.
