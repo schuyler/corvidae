@@ -622,3 +622,35 @@ class TestEndTurnAtAgentLevel:
         finally:
             await pm.get_plugin("task").on_stop()
             await db.close()
+
+
+async def test_on_stop_bounds_its_drain_and_says_what_it_abandoned(
+    monkeypatch, caplog
+) -> None:
+    """#851: the drain cannot spend a short shutdown budget on its own."""
+    import asyncio
+    import logging
+    import time
+
+    from corvidae_cognition import silence as silence_mod
+
+    # A write that will never finish: the drain must give up on it.
+    async def never() -> None:
+        await asyncio.sleep(60)
+
+    plugin = silence_mod.SilencePlugin()
+    monkeypatch.setattr(silence_mod, "RECORD_DRAIN_BOUND_S", 0.05)
+    task = asyncio.create_task(never())
+    plugin._record_tasks.add(task)
+    caplog.set_level(logging.WARNING)
+    try:
+        started = time.monotonic()
+        await plugin.on_stop()
+        elapsed = time.monotonic() - started
+    finally:
+        task.cancel()
+        plugin._record_tasks.discard(task)
+
+    assert elapsed < 0.3, elapsed  # the patched 0.05 s bound, not a larger one
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("abandoning them" in m for m in messages), messages

@@ -82,6 +82,10 @@ _MESSAGE_TYPES = frozenset(t.value for t in MessageType)
 _SUMMARY_CHARS = 200
 _CLOSE_TIMEOUT = 1.0
 _HANDLER_WAIT = 0.5
+# Bound on each stage of the forced path that runs after the shutdown bound has
+# already fired (#851): it must be small, because the graceful phase is already
+# spent by the time it runs.
+_FORCE_STOP_BOUND = 0.25
 # The whole of on_stop is bounded by the web transport's share of
 # daemon.shutdown_timeout (#760): that phase is shared with every other
 # plugin's on_stop, the idle tracker and the clock, so it keeps a reserve.
@@ -561,6 +565,43 @@ class WebPlugin(TransportPlugin):
                 "%d handler(s) may still be open — raise daemon.shutdown_timeout",
                 bound, len(self._clients), len(self._handlers),
             )
+        finally:
+            # The bound cancelling the coroutine would otherwise skip the stages
+            # after the one that hung, leaving the listener bound until the loop
+            # is torn down. Force the remaining two down, each under its own
+            # small bound so this path cannot overrun in turn (#851).
+            await self._force_handlers_and_listener()
+
+    async def _force_handlers_and_listener(self) -> None:
+        """Cancel leftover handlers and stop the listener, whatever stage hung.
+
+        Runs after the bounded shutdown, including when that shutdown timed out.
+        Idempotent: a handler set already emptied and a runner already cleaned up
+        make both steps no-ops.
+        """
+        handlers = [t for t in self._handlers if not t.done()]
+        for task in handlers:
+            task.cancel()
+        if handlers:
+            try:
+                async with asyncio.timeout(_FORCE_STOP_BOUND):
+                    await asyncio.wait(handlers)
+            except TimeoutError:
+                logger.warning(
+                    "web: %d socket handler(s) did not end within %.2fs after the "
+                    "shutdown bound", len(handlers), _FORCE_STOP_BOUND,
+                )
+        if self._runner is not None:
+            runner, self._runner = self._runner, None
+            try:
+                async with asyncio.timeout(_FORCE_STOP_BOUND):
+                    await runner.cleanup()
+            except TimeoutError:
+                logger.warning(
+                    "web: the listener on %s did not close within %.2fs after the "
+                    "shutdown bound; it may still be bound",
+                    self._login_base, _FORCE_STOP_BOUND,
+                )
 
     async def _stop_sockets_and_listener(self) -> None:
         """Close sockets, cancel handlers and stop the listener (bounded)."""
