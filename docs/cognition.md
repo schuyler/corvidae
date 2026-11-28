@@ -2075,7 +2075,8 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   Wherever either half is missing — the transports that declare a
   ``check_allowance`` without ``conversational`` (`channels/web.py`,
   `channels/cli.py`, `channels/acp.py`), a channel no loaded transport claims, or
-  an operator who disabled `silence` — `REVISION_STUB` states the one outcome
+  an operator who disabled `silence` — `REVISION_STUB_REVISE_ONLY` states the one
+  outcome
   that is available, because offering a decline there would either point at an
   instruction the agent was never given or deliver the control string as a
   message (`PreSendHold._decline_available`). A hold is a defect report, not an

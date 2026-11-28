@@ -25,9 +25,10 @@ logger = logging.getLogger("corvidae.presend")
 SOURCE = "pre-send check"
 
 #: The revising turn's stub text on a channel that cannot be left unanswered:
-#: one outcome, stated plainly. The other outcome is not available everywhere
-#: the pre-send check runs — see ``PreSendHold._decline_available``.
-REVISION_STUB = (
+#: one outcome, stated plainly. Named for what it offers, because the bare
+#: ``REVISION_STUB`` of #1346 meant both outcomes and an unqualified name would
+#: have flipped meaning for anyone reading the old references.
+REVISION_STUB_REVISE_ONLY = (
     "Your last reply was held back before it was sent, for the reasons in the "
     "CONTEXT above. Write a revised reply now, and keep what the objection "
     "taught you in your notes rather than in what you send: a lesson is not a "
@@ -166,10 +167,22 @@ class PreSendHold:
         A channel no loaded transport claims (``internal:*``) gets the
         revision-only text: no transport, no instruction to point at.
         """
-        if not self.pm.has_plugin("silence"):
+        # Fails closed to the one-outcome notice: a raise here would land in
+        # ``on_final``'s except, which holds the draft with no revising turn at
+        # all. Withholding the offer is a smaller mistake than withholding the
+        # reply.
+        try:
+            if not self.pm.has_plugin("silence"):
+                return False
+            facts = owning_transport(self.pm, channel)
+            return facts is not None and facts.conversational
+        except Exception:
+            logger.warning(
+                "pre-send hold on channel %s: the decline offer could not be "
+                "resolved, so the revising turn was asked for a revision only",
+                getattr(channel, "id", channel), exc_info=True,
+            )
             return False
-        facts = owning_transport(self.pm, channel)
-        return facts is not None and facts.conversational
 
     async def on_final(
         self, channel, trace_id: str | None, response_text: str, annotations: dict,
@@ -203,7 +216,7 @@ class PreSendHold:
             await held.hold_and_wake(
                 channel, pending.origin, SOURCE, pending.objections,
                 stub_text=(REVISION_STUB_WITH_DECLINE
-                           if self._decline_available(channel) else REVISION_STUB),
+                           if self._decline_available(channel) else REVISION_STUB_REVISE_ONLY),
                 stub_text_wins=True,
             )
         except Exception:
