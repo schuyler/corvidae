@@ -103,6 +103,15 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
 * **Say what was reviewed in the PR body:** the rounds it took, any meta-review, and the findings skipped.
 
+# Continuous integration
+
+The test jobs -- `kernel`, `full`, `cognition-fts`, `web-smoke` -- gate every PR and run on a self-hosted runner. `image` gates only PRs whose paths match the filter in `image.yml`, so a docs-only PR sees 4 checks and should not wait for a 5th. A red check is a claim to check, not a verdict to accept.
+
+* Registry flake: `image` dies in under a minute with a `ghcr.io ... 503` line from a `COPY --from=` step. Rerun; do not touch the pin.
+* Runner contention, the 2 symptoms to check before your diff: the same job failing on 2 attempts with *different* signatures -- an assertion in a file your diff does not touch, or a `pytest-timeout` dump with the main thread parked in `selectors.poll` -- while recent `main` pushes are green on that job. `gh api repos/<owner>/<repo>/actions/workflows/tests.yml/runs` gives that history.
+* The instrument is a rerun at one sha: `gh run rerun <run-id> --repo <owner>/<repo> --failed`. Same sha, same job, tree unchanged, red on one attempt and green on the next -- that flip is what "environmental" means, and it means only that your diff did not cause it. A failure that repeats at the same sha, or a test that flakes on its own file, is a real defect and gets an issue, not a rerun.
+* The PR gets the evidence, not the conclusion: the job, each attempt's signature, the sha the rerun ran, and what it printed. Do not read a step's status out of `gh run view <run-id> --log-failed`: across 2 failing attempts of the `kernel` job it returned 548 lines with no step attribution at all, then 114 lines covering a single step, so a step missing from that output proves neither that it passed nor that it ran. Write what the excerpt held, and read the step itself with `gh run view <run-id> --job <job-id> --log`.
+
 # Process instructions
 
 * Read `docs/prd.md` before implementing anything. The PRD is the reference for what must be true; issues, plans, design docs and the existing code derive from it.
