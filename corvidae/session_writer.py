@@ -757,6 +757,11 @@ class SessionWriter:
         # while the blocking load still runs on the connection.
         async def locked() -> None:
             async with self._lock():
+                # Under the route lock, like write(): a load that queued behind
+                # close() would otherwise reach SQLite and come back with
+                # "Cannot operate on a closed database" (#1355).
+                if self._closed:
+                    raise WriteClosed(owner, self._path)
                 logger.debug("loading sqlite extension %s for %s", path, owner)
                 await self._blocking(load)
 
@@ -771,6 +776,10 @@ class SessionWriter:
         # Shielded for the same reason as load_extension.
         async def locked() -> str:
             async with self._lock():
+                if self._closed:
+                    # No caller-supplied owner here, so the name is the method:
+                    # the message still says which writer refused and why.
+                    raise WriteClosed("set_journal_mode", self._path)
                 return await self._blocking(apply)
 
         return await self._shielded(locked())

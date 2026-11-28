@@ -879,3 +879,30 @@ async def test_a_queued_write_is_refused_when_close_wins_the_route(
         if lock.locked():
             lock.release()
         writer._conn.close()
+
+
+async def test_load_extension_after_close_is_refused_by_name(tmp_path: Path) -> None:
+    """#1355: the other two statement paths must refuse by name after close."""
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    await writer.close()
+
+    with pytest.raises(WriteClosed) as excinfo:
+        await writer.load_extension("libnonexistent.so", owner="plugin-c")
+
+    message = str(excinfo.value)
+    assert "plugin-c" in message
+    assert str(tmp_path / "sessions.db") in message
+    assert "closed" in message
+
+
+async def test_set_journal_mode_after_close_is_refused_by_name(tmp_path: Path) -> None:
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    await writer.close()
+
+    with pytest.raises(WriteClosed) as excinfo:
+        await writer.set_journal_mode("WAL")
+
+    message = str(excinfo.value)
+    # No caller-supplied owner on this method, so it names itself.
+    assert "set_journal_mode" in message
+    assert str(tmp_path / "sessions.db") in message
