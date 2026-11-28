@@ -92,7 +92,7 @@ from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.persistence import PersistencePlugin
-from corvidae_cognition.fork_log import ForkRecorder
+from corvidae_cognition.fork_log import ForkRecorder, prompt_sha256
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.held import HeldContext
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
@@ -119,6 +119,34 @@ def _window_blocks(channel) -> list[dict]:
     """The window a fork renders, as blocks; empty when there is none."""
     conv = getattr(channel, "conversation", None)
     return list(getattr(conv, "messages", None) or [])
+
+def _dispatched_prompt_sha(channel) -> bytes | None:
+    """The key of the prompt a dispatched fork rendered, or None when there is
+    no window to key.
+
+    The same hash ``fork_log`` writes on the row (``prompt_sha256`` over the
+    window blocks), so a skip line and a completion row join on it. It is read
+    at the dispatch point, so it describes the prompt the fork was sent with
+    even if the window moves before the miss is logged.
+
+    Two things follow from the key being a content hash. It identifies a
+    *prompt*, not a dispatch: two forks rendered over identical windows share
+    the key, which is a true collision rather than a mis-attribution, because
+    they are the same prompt. And if the window moves between dispatch and
+    write-off, the key matches no row -- a miss, never a false match.
+    """
+    try:
+        blocks = _window_blocks(channel)
+        if not blocks:
+            return None
+        return prompt_sha256(blocks)
+    except Exception:
+        # A window that cannot be hashed is a key this line does not have. The
+        # write-off still says everything else it said, and the miss stays out of
+        # the caller: #1333 is the catalogue of row shapes that make serializing
+        # raise.
+        return None
+
 
 # --------------------------------------------------------------------------
 # Best-guess defaults (§6-tunable; resolved through resolve_tunable at
@@ -2124,15 +2152,31 @@ class CritiquePlugin(CorvidaePlugin):
             )
 
     def _skip_lens(
-        self, channel, lens: str, trace_id: str, reason: str, **kwargs
+        self,
+        channel,
+        lens: str,
+        trace_id: str,
+        reason: str,
+        fork_sha: bytes | None = None,
+        **kwargs,
     ) -> None:
         """Log that one lens was skipped: lens, trace, channel and what was
-        missing (PRD §3.8.5)."""
+        missing (PRD §3.8.5).
+
+        ``fork_sha`` names the prompt that was abandoned, for the write-offs that
+        follow a dispatched fork (#1337). Without it a skip line and a late
+        ``fork_log`` row share only a ``trace_id``, and a trace runs several
+        critique stages, so that join credits a later stage's answer to an
+        earlier stage's timeout.
+        """
         logger.warning(
             "critique lens %s skipped for trace %s on channel %s: %s; "
-            "no objections from this lens",
+            "no objections from this lens%s",
             lens, trace_id, channel.id, reason,
-            extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
+            "" if fork_sha is None else f" (fork prompt_sha256={fork_sha.hex()})",
+            extra={"channel": channel.id, "trace_id": trace_id,
+                   "fork_prompt_sha256": None if fork_sha is None else fork_sha.hex()},
+            **kwargs,
         )
 
     def _fork_target(self, channel, trace_id):
@@ -2233,6 +2277,7 @@ class CritiquePlugin(CorvidaePlugin):
         # Set once the pre-render wait is over: tells a deadline that hit
         # while the channel was still busy from one that hit after it.
         forking = False
+        dispatched_sha: bytes | None = None
         try:
             # The two warnings below report a span measured on the event loop's
             # own clock, read *before* the timer is armed. Not a
@@ -2281,6 +2326,12 @@ class CritiquePlugin(CorvidaePlugin):
                 agent, cut = target if idle else (target, None)
                 epoch = self._compactions.get(channel.id, 0)
 
+                # The key of the prompt about to be dispatched, read here and not
+                # in a handler: after a compaction the window holds something other
+                # than what the fork was sent, and hashing that would name a row
+                # belonging to a different fork.
+                dispatched_sha = _dispatched_prompt_sha(channel)
+
                 async def stay_quiet() -> None:
                     """Between rounds: wait out a waiting message, then stop
                     the fork if the channel compacted since it started."""
@@ -2308,7 +2359,8 @@ class CritiquePlugin(CorvidaePlugin):
         except _ForkStale:
             for lens in lenses:
                 self._skip_lens(
-                    channel, lens, trace_id, "the channel compacted while the fork ran")
+                    channel, lens, trace_id, "the channel compacted while the fork ran",
+                    fork_sha=dispatched_sha)
             return None
         except Exception as exc:
             # Only the deadline's own expiry is a timeout miss; a TimeoutError
@@ -2320,13 +2372,15 @@ class CritiquePlugin(CorvidaePlugin):
                     f"after {waited:.3f}s" if forking
                     else f"the channel stayed busy past critique.fork_timeout "
                          f"({timeout} s) after {waited:.3f}s")
+                # A busy-wait miss dispatched nothing, so it names no prompt.
                 for lens in lenses:
-                    self._skip_lens(channel, lens, trace_id, reason)
+                    self._skip_lens(channel, lens, trace_id, reason, fork_sha=dispatched_sha)
                 return None
             for lens in lenses:
                 self._skip_lens(
                     channel, lens, trace_id,
                     f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                    fork_sha=dispatched_sha,
                     exc_info=True,
                 )
             return None

@@ -24,6 +24,7 @@ tests/test_fork_read_only_tools.py.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import logging
@@ -676,6 +677,258 @@ async def test_r5_5_a_provider_timeout_is_not_reported_as_the_deadline(tmp_path,
     finally:
         await _teardown(env)
 
+
+# --- naming the prompt that was abandoned (#1337) ---------------------------------------
+
+
+async def _fork_shas(env) -> list[str]:
+    """The `prompt_sha256` of every fork row this env's database holds, as hex."""
+    import aiosqlite as _aio
+
+    db = await _aio.connect(env.db_path)
+    try:
+        async with db.execute(
+            "SELECT prompt_sha256 FROM fork_log ORDER BY id"
+        ) as cur:
+            return [bytes(row[0]).hex() async for row in cur]
+    finally:
+        await db.close()
+
+
+async def test_r5_5_the_deadline_warning_names_the_abandoned_prompt(tmp_path, caplog):
+    """#1337: a fork written off by the deadline names the prompt it gave up on.
+
+    The skip line carried lens, trace, channel and the bound, which is not enough
+    to find the row a late completion writes later: a trace runs several critique
+    stages, so `trace_id` matches a later stage's fork as easily as the abandoned
+    one. The key here is the same hash the row stores, so the join is a key match.
+    """
+
+    async def hangs(i, channel):
+        await asyncio.sleep(3)  # outlives the 0.05 s deadline; the test's own does not
+
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    # Read at the dispatch moment, the way the code does: a hash taken after
+    # the turn describes whatever the window holds then, not what was sent.
+    expected = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337a", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert f"fork prompt_sha256={expected}" in text, text
+        # The message is for a human; the record is for a joiner. Both must carry it.
+        [rec] = [r for r in caplog.records if 'exceeded critique.fork_timeout' in r.getMessage()]
+        assert rec.fork_prompt_sha256 == expected, vars(rec)
+    finally:
+        await _teardown(env)
+
+
+async def test_r5_5_a_busy_channel_names_no_prompt_because_none_was_built(
+    tmp_path, caplog, fast_poll
+):
+    """#1337 guard: a deadline that hit during the quiet wait abandons no prompt,
+    so it names none. This passes before the key existed as well as after; it pins
+    that the key means "a request was dispatched", not "a fork stage ran".
+    """
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    agent.waiting[env.channel.id] = 1
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337b", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "stayed busy past critique.fork_timeout")
+        assert "prompt_sha256=" not in text, text
+        [rec] = [r for r in caplog.records if 'stayed busy past' in r.getMessage()]
+        assert rec.fork_prompt_sha256 is None, vars(rec)
+    finally:
+        await _teardown(env)
+
+
+async def test_the_prompt_key_joins_a_write_off_to_the_row_of_the_same_window(
+    tmp_path, caplog
+):
+    """#1337: the point of the key is the join. A completed fork writes a row; a
+    later fork over the same window, written off by the deadline, carries that
+    row's hash -- and a fork over a window that has moved on does not, which is
+    what separates two critique stages of one trace.
+    """
+    hang = {"on": False}
+
+    async def maybe_hang(i, channel):
+        if hang["on"]:
+            await asyncio.sleep(3)
+
+    agent = RoundsForkAgent(
+        {"critique"}, text=KEYED_PREDICTIVE, on_request=maybe_hang
+    )
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        # A fork that finishes: its row is the thing a later write-off must name.
+        await _judged_turn(env, "k337c", PREDICTIVE_ONLY)
+        [row_sha] = await _fork_shas(env)
+        assert agent.calls, "the completed fork reached the agent"
+
+        # Same window, written off: the line names that row.
+        hang["on"] = True
+        await _judged_turn(env, "k337d", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert f"fork prompt_sha256={row_sha}" in text, text
+
+        # The window moved, so the abandoned prompt is a different prompt.
+        env.channel.conversation.messages.append(
+            {"role": "user", "content": "a later message", "_db_id": 77,
+             "_message_type": env.channel.conversation.messages[-1]["_message_type"]}
+        )
+        await _judged_turn(env, "k337e", PREDICTIVE_ONLY)
+        moved = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert len(moved) == 2, moved
+        after = critique_module.prompt_sha256(
+            critique_module._window_blocks(env.channel)
+        ).hex()
+        assert f"fork prompt_sha256={after}" in moved[1], moved[1]
+        assert after != row_sha
+    finally:
+        await _teardown(env)
+
+
+async def test_the_compaction_miss_names_the_prompt_that_was_dispatched(
+    tmp_path, caplog
+):
+    """#1337: the key names the abandoned prompt, not whatever the window holds by
+    the time the miss is logged. The window moves while the fork is in flight, so
+    hashing it in the handler would name a different fork's row.
+    """
+
+    moved_by = []
+
+    async def compacts_and_moves(i, channel):
+        if i:
+            return
+        moved_by.append(i)
+        msgs = channel.conversation.messages
+        msgs.append(
+            {"role": "user", "content": "the compaction's cut", "_db_id": 88,
+             "_message_type": msgs[-1]["_message_type"]}
+        )
+        await env.plugin.before_compaction(
+            channel=channel, compacted_ids=[], cut=0
+        )
+
+    agent = RoundsForkAgent(
+        {"critique"}, text=KEYED_PREDICTIVE, on_request=compacts_and_moves
+    )
+    env = await _env_with(tmp_path, agent, with_held=True)
+    _watch_held(env)
+    dispatched = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337f", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "compacted while the fork ran")
+        assert f"fork prompt_sha256={dispatched}" in text, text
+        # The premise, stated as a fact about the test: the compaction callback ran,
+        # and the marker it appends is in the window the fork was abandoned over.
+        # Without those, `!= dispatched` would only show that a turn happened.
+        assert moved_by == [0], moved_by
+        contents = [m.get("content") for m in env.channel.conversation.messages]
+        assert "the compaction's cut" in contents, contents
+        assert critique_module.prompt_sha256(
+            critique_module._window_blocks(env.channel)
+        ).hex() != dispatched
+    finally:
+        await _teardown(env)
+
+
+async def test_a_fork_that_fails_mid_flight_is_written_off_with_its_prompt(
+    tmp_path, caplog
+):
+    """#1337: the key is not timeout-specific. A fork that raises was dispatched,
+    and its write-off names the prompt it was sent with."""
+
+    class Boom(RoundsForkAgent):
+        async def fork(self, channel, instruction, **kwargs):
+            raise RuntimeError("provider exploded")
+
+    agent = Boom({"critique"}, text=KEYED_PREDICTIVE)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 5}})
+    dispatched = critique_module.prompt_sha256(
+        critique_module._window_blocks(env.channel)
+    ).hex()
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337g", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "the fork failed or its reply was unusable")
+        assert f"fork prompt_sha256={dispatched}" in text, text
+    finally:
+        await _teardown(env)
+
+
+def test_a_window_that_cannot_be_hashed_yields_no_key_rather_than_a_raise():
+    """#1337: the key is computed on the way out of an exception handler, so it
+    must not raise there -- a hash failure would replace the caught exception and
+    swallow the skip line it was meant to decorate.
+    """
+    unhashable = type("C", (), {"conversation": type("V", (), {"messages": [
+        {"role": "user", "content": object()}]})})()
+    assert critique_module._dispatched_prompt_sha(unhashable) is None
+    # Reading the window is part of what can fail, so it belongs inside the guard:
+    # a `messages` that cannot even be listed is the same miss, not a raise.
+    unlistable = type("C", (), {"conversation": type("V", (), {"messages": 5})})()
+    assert critique_module._dispatched_prompt_sha(unlistable) is None
+    # Positive control: the same call on a window that can be serialized keys it.
+    hashable = type("C", (), {"conversation": type("V", (), {"messages": [
+        {"role": "user", "content": "m1"}]})})()
+    # Not merely non-None: the join only works if the key is the bytes fork_log
+    # writes, computed here independently of the helper's own code path.
+    want = hashlib.sha256(
+        json.dumps(
+            critique_module._window_blocks(hashable),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()
+    ).digest()
+    assert critique_module._dispatched_prompt_sha(hashable) == want
+
+
+async def test_a_hash_failure_still_logs_the_skip_without_a_key(
+    tmp_path, caplog, monkeypatch
+):
+    """#1337: the key is computed on the way out of an exception handler, so a
+    hashing failure must cost the key and nothing else -- not the skip line, and
+    not the caller's exception.
+    """
+
+    calls = []
+
+    def raiser(messages):
+        calls.append(len(messages))
+        raise TypeError("not JSON serializable")
+
+    async def hangs(i, channel):
+        await asyncio.sleep(3)
+
+    monkeypatch.setattr(critique_module, "prompt_sha256", raiser)
+    agent = RoundsForkAgent({"critique"}, text=KEYED_PREDICTIVE, on_request=hangs)
+    env = await _env_with(tmp_path, agent, config={"critique": {"fork_timeout": 0.05}})
+    caplog.set_level(logging.WARNING)
+    try:
+        await _judged_turn(env, "k337h", PREDICTIVE_ONLY)
+        [text] = _warnings(caplog, "exceeded critique.fork_timeout")
+        assert "predictive" in text and "trace k337h " in text, text
+        assert "prompt_sha256" not in text, text
+        # The line and the record agree about having no key: a failed hash must not
+        # leave a join key behind for a consumer reading records.
+        [rec] = [r for r in caplog.records if 'exceeded critique.fork_timeout' in r.getMessage()]
+        assert rec.fork_prompt_sha256 is None, vars(rec)
+        # And the failure really happened on this path: without the call the line
+        # would read the same if the skip path had stopped hashing altogether.
+        assert calls, "the timeout skip never asked for a key"
+    finally:
+        await _teardown(env)
 
 # ---------------------------------------------------------------------------
 # The two config keys: startup, reload, fork time
