@@ -430,7 +430,12 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
             visible = sent if sent is not None else _visible(msg)
             return count_tokens(_json_text(visible))
         except Exception:
-            return count_tokens(_json_text(msg))
+            try:
+                return count_tokens(_json_text(msg))
+            except Exception:
+                # Last resort, and it must not raise either: the budget path
+                # owes the caller a number (#1335 review).
+                return count_tokens(_repr_or_marker(msg))
 
 
 def _json_text(obj: object) -> str:
@@ -483,7 +488,17 @@ def _json_text(obj: object) -> str:
             continue
         if isinstance(item, (list, tuple, set, frozenset)):
             seen.add(id(item))
-            values = list(item)
+            try:
+                values = list(item)
+            except Exception:
+                # A sequence whose `__iter__` raises is a field, not the row:
+                # replace it and keep counting the rest (#1335 review).
+                out.append(
+                    json.dumps(
+                        f"<unserialisable {type(item).__name__}>", ensure_ascii=False
+                    )
+                )
+                continue
             stack.append(("text", "]"))
             for index, value in enumerate(reversed(values)):
                 if index:

@@ -168,3 +168,29 @@ def test_a_row_nested_past_the_old_depth_cap_keeps_its_payload() -> None:
     assert weight_deep >= int(weight_clean * 0.95), (weight_deep, weight_clean)
 
 
+
+
+def test_a_sequence_whose_iter_raises_is_counted_not_fatal() -> None:
+    """#1335 review: an unguarded `_json_text` let a raising `__iter__` escape."""
+    class BadSequence(list):
+        def __iter__(self):
+            raise RuntimeError("__iter__ is broken")
+
+    row = {"role": "user", "content": BadSequence(["x" * 60_000]), "extra": "y"}
+    assert message_tokens(row) > 0
+
+
+def test_a_row_that_defeats_every_path_still_returns_a_number() -> None:
+    """#1335 review: the last resort must not raise."""
+    class BothBroken:
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+        __repr__ = __str__
+
+    class BadSequence(list):
+        def __iter__(self):
+            raise RuntimeError("__iter__ is broken")
+
+    row = {"content": BadSequence([BothBroken()])}
+    assert message_tokens(row) > 0
