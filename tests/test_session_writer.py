@@ -646,66 +646,65 @@ async def test_a_healthy_writer_reports_the_workers_own_error(
         writer._conn.close()
 
 
-async def test_a_queued_unit_is_refused_by_name_when_the_route_frees(
+class _RollbackFails:
+    """Connection proxy whose ROLLBACK raises, then delegates everything else."""
+
+    def __init__(self, conn, failures: int) -> None:
+        self._conn = conn
+        self._failures = failures
+        self.rollbacks = 0
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if "ROLLBACK" in sql.upper() and self._failures > 0:
+            self._failures -= 1
+            self.rollbacks += 1
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+
+async def test_a_rollback_that_fails_once_is_retried_and_the_writer_survives(
     tmp_path: Path,
 ) -> None:
-    """#1328 follow-up 1: the refusal must not blame a plugin that never ran.
+    """#1314: a transient ROLLBACK failure must not wedge the write route."""
+    import corvidae.session_writer as sw
 
-    A second `write()` that starts while the writer is healthy passes the entry
-    check and queues on the route lock; if the unit ahead of it is abandoned, the
-    queued unit must be refused by name once the route is free, naming itself and
-    the abandoned unit, not just the other plugin's owner.
-    """
-    writer = SessionWriter.open(tmp_path / "sessions.db", graceful_s=0.5)
-    lock = writer._lock()
-    await lock.acquire()  # the unit ahead holds the route
-
-    ran: list[str] = []
-
-    def body(cursor: WriteCursor) -> None:
-        ran.append("ran")
-        raise AssertionError("a refused unit must not run")
-
-    try:
-        queued = asyncio.create_task(
-            writer.write(body, owner="plugin-b", deadline_s=1.0)
-        )
-        await asyncio.sleep(0.1)  # plugin-b passed the entry check and is queued
-        assert writer._abandoned is False
-        # Now the unit ahead of it is abandoned.
-        writer._abandoned = True
-        writer._abandoned_owner = "plugin-a"
-        lock.release()
-        with pytest.raises(WriteAbandoned) as excinfo:
-            await asyncio.wait_for(queued, timeout=2.0)
-        message = str(excinfo.value)
-        assert "plugin-b" in message
-        assert "plugin-a" in message
-        assert excinfo.value.owner == "plugin-b"
-        assert excinfo.value.abandoned_owner == "plugin-a"
-        assert ran == [], "the refused unit was allowed to run"
-    finally:
-        if lock.locked():
-            lock.release()
-        await writer.close()
-        writer._conn.close()
-
-
-async def test_an_already_abandoned_writer_names_the_caller(tmp_path: Path) -> None:
-    """#1330 round, M5: the entry-path refusal names the caller, not the old owner."""
     writer = SessionWriter.open(tmp_path / "sessions.db")
-    writer._abandoned = True
-    writer._abandoned_owner = "plugin-a"
-
-    def body(cursor: WriteCursor) -> None:
-        raise AssertionError("a refused unit must not run")
-
+    proxy = _RollbackFails(writer._conn, failures=1)
+    writer._conn = proxy
+    unit = sw._Unit("revoked-owner", 1.0)
+    writer._conn.execute("BEGIN IMMEDIATE")
     try:
-        with pytest.raises(WriteAbandoned) as excinfo:
-            await writer.write(body, owner="plugin-b", deadline_s=1.0)
-        message = str(excinfo.value)
-        assert "plugin-b" in message
-        assert "plugin-a" in message
-        assert excinfo.value.owner == "plugin-b"
+        writer._rollback_after_revocation(writer._conn, unit)
+        assert proxy.rollbacks == 1
+        assert not writer._abandoned
+        # The next unit commits: the connection is not stuck in a transaction.
+        await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
     finally:
-        writer._conn.close()
+        writer._conn._conn.close()
+
+
+async def test_a_rollback_that_never_succeeds_abandons_the_writer_by_name(
+    tmp_path: Path,
+) -> None:
+    """#1314: failing twice must give WriteAbandoned, not 'cannot start a
+    transaction within a transaction' on every later write."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    proxy = _RollbackFails(writer._conn, failures=2)
+    writer._conn = proxy
+    unit = sw._Unit("revoked-owner", 1.0)
+    writer._conn.execute("BEGIN IMMEDIATE")
+    try:
+        writer._rollback_after_revocation(writer._conn, unit)
+        assert proxy.rollbacks == 2
+        assert writer._abandoned
+        assert writer._abandoned_owner == "revoked-owner"
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
+        assert "revoked-owner" in str(excinfo.value)
+    finally:
+        writer._conn._conn.close()

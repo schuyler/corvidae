@@ -559,11 +559,57 @@ class SessionWriter:
             if unit.state in (_COMMITTED, _ROLLED_BACK) and not caused_by_us:
                 return False
             if conn.in_transaction:
-                conn.execute("ROLLBACK")
+                self._rollback_after_revocation(conn, unit)
             unit.state, unit.exc = _REVOKED, None
             return True
         finally:
             unit.lock.release()
+
+    def _rollback_after_revocation(self, conn: sqlite3.Connection, unit: _Unit) -> None:
+        """ROLLBACK a revoked unit, tolerating a rollback that itself fails (#1314).
+
+        One retry covers a transient I/O error. If it still fails the connection
+        stays inside an open transaction, and every later ``BEGIN IMMEDIATE``
+        fails with "cannot start a transaction within a transaction" until
+        restart — so the writer marks itself abandoned instead, which turns that
+        opaque failure into a ``WriteAbandoned`` naming this plugin. The
+        connection is not closed and reopened here: this runs on the revoker
+        thread while the worker may still be inside a statement on that
+        connection, and closing it there crashes the interpreter (#1326).
+        """
+        for attempt in (1, 2):
+            try:
+                conn.execute("ROLLBACK")
+                if attempt == 2:
+                    logger.warning(
+                        "write unit from %r on %s: the first ROLLBACK after "
+                        "revocation failed and the retry succeeded; the "
+                        "transaction is closed",
+                        unit.owner, self._path,
+                        extra={"owner": unit.owner},
+                    )
+                return
+            except sqlite3.Error as exc:
+                if attempt == 1:
+                    logger.warning(
+                        "write unit from %r on %s: ROLLBACK after revocation "
+                        "raised %s: %s; retrying once",
+                        unit.owner, self._path, type(exc).__name__, exc,
+                        extra={"owner": unit.owner},
+                    )
+                    continue
+                logger.error(
+                    "write unit from %r on %s: ROLLBACK still fails after a "
+                    "retry (%s: %s), so the connection is left inside an open "
+                    "transaction — this writer now refuses every further write "
+                    "(WriteAbandoned) rather than fail every BEGIN with "
+                    "'cannot start a transaction within a transaction'; restart "
+                    "the daemon to recover",
+                    unit.owner, self._path, type(exc).__name__, exc,
+                    extra={"owner": unit.owner},
+                )
+                self._abandoned_owner = unit.owner
+                self._abandoned = True
 
     def _revoke(self, unit: _Unit) -> None:
         """Revoke an overrun unit and log the R3 ERROR (daemon thread)."""
