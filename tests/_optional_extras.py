@@ -80,12 +80,19 @@ def _reason(module: str) -> str:
     One generator — the `_REASONS` comprehension above — owns the whole sentence, and
     a table row supplies only its module-to-extra pair. That is what lets
     `test_every_reason_names_the_extra_that_provides_its_module` require exactly one
-    `--extra` token in every line: no row can opt out of naming its extra, and no row
-    can add a clause the check has not seen.
+    `--extra` token in every line and require that token to name a declared extra which
+    provides the module. What that check reads is the token and nothing else — its regex
+    stops at the first whitespace after `--extra` and the assertion counts matches — so a
+    row can still append prose the check never inspects. Naming is enforced; the rest of
+    the sentence is not.
 
-    The generic line below is the fallback for an unlisted module, and the only place
-    the plugin-shaped phrasing survives; it is what the guard's own tests drive with a
-    name deliberately absent from the table.
+    The generic line below is the fallback for an unlisted module, and the only site in
+    this module that says the plugin cannot be imported; the table rows all end in the
+    generator's `uv sync --locked` clause. Outside this module the same opening appears in
+    a literal the generator never sees: `tests/_acp_extra.py` marks its skips with
+    "optional acp extra not installed; the ACP transport cannot be imported".
+
+    It is what the guard's own tests drive with a name deliberately absent from the table.
     """
     known = _REASONS.get(module)
     if known:
