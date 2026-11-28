@@ -556,9 +556,35 @@ class TestRevisionIsNeverHeld:
 
         (stub,) = env.spy.stubs("user")
         text = stub["text"].lower()
-        assert "revised reply" in text, "the revision option went missing"
-        assert "send nothing" in text, "the decline option went missing"
+        # Pinned as an offered disjunction: two bare substrings would also pass
+        # on wording that orders one outcome ("send nothing rather than revise").
+        assert "either write a revised reply now, or decline this turn" in text, (
+            "the stub no longer offers a choice between the two outcomes"
+        )
         assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
+
+    async def test_r6_a_decline_on_the_revising_turn_clears_the_span(self, make_env):
+        """R6 with the silence branch taken: offering decline is honest only if
+        taking it cannot re-arm the hold. The revision's final clears the span
+        whatever it says, so the decline made no second hold and the channel's
+        next final is checked again."""
+        env = await make_env({
+            "the draft": OBJECTIONS, "NO_REPLY": OBJECTIONS, "second reply": ["still wrong"],
+        })
+        script(
+            env.plugin, _make_text_response("the draft"), _make_text_response("NO_REPLY"),
+            _make_text_response("second reply"), _make_text_response("second revision"),
+        )
+
+        await say(env)
+        # The decline went unchecked — the span was still open — and drew no hold.
+        assert env.checker.checked == ["the draft"]
+        assert len(env.trace.held()) == 1
+
+        # Span cleared: this turn's final is checked again, and it makes the new hold.
+        await say(env, "another question")
+        assert env.checker.checked == ["the draft", "second reply"]
+        assert len(env.trace.held()) == 2
 
     async def test_r6_revision_is_sent_unchecked_and_the_next_final_is_checked(
         self, make_env, caplog
