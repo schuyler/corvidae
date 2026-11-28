@@ -60,3 +60,23 @@ def test_a_row_whose_repr_also_raises_is_still_counted() -> None:
 
     row = _Hostile({"content": _RaisesOnStr()})
     assert message_tokens(row) >= 0
+
+
+def test_a_big_row_with_one_bad_field_keeps_its_weight() -> None:
+    """#1335: a whole-row fallback reported 60 KB as fitting (#1333 review)."""
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no text for you")
+
+        __repr__ = __str__
+
+    body = "x" * 60_000
+    clean = {"role": "user", "content": body}
+    poisoned = {"role": "user", "content": body, "extra": Bad()}
+
+    weight_clean = message_tokens(clean)
+    weight_poisoned = message_tokens(poisoned)
+
+    assert weight_clean > 5_000, weight_clean  # 60 KB of "x" is not a handful
+    # Only the bad field is replaced; the row keeps its weight.
+    assert weight_poisoned >= int(weight_clean * 0.95), (weight_poisoned, weight_clean)

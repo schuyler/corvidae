@@ -383,13 +383,16 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     person row's header is a separate message and is not counted here, as
     before.
 
-    Encoding a row never raises for the caller (PRD §3.1.18.1): ``default=str``
-    counts a value JSON cannot encode by its text, a row that is not a mapping
-    is counted by its repr, and the shapes that defeat both — a key
-    ``_visible()`` cannot treat as a string, a value whose ``str()`` raises,
-    cyclic content — are counted by the row's repr with one WARNING (#1333).
-    This sits on the budget path, where a raise aborts the compaction that is
-    supposed to make a turn fit.
+    Encoding a row does not raise for the caller (PRD §3.1.18.1) on anything
+    that raises ``Exception``: ``default=str`` counts a value JSON cannot encode
+    by its text, a row that is not a mapping is counted by its repr, and the
+    shapes that defeat both — a key ``_visible()`` cannot treat as a string, a
+    value whose ``str()`` raises, cyclic content — are counted field by field,
+    the offending field as a marker, with one WARNING naming the type and
+    exception (#1333). Only a field is replaced, never the row: a 60 KB row with
+    one bad value still counts as 60 KB, because a whole-row fallback would
+    report it as fitting and defeat the compaction it feeds. A ``BaseException``
+    still propagates.
     """
     if not isinstance(msg, dict):
         return count_tokens(_repr_or_marker(msg))
@@ -410,12 +413,49 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     except Exception as exc:  # the budget path must always produce a number
         logger.warning(
             "message_tokens: could not serialize a %s row (%s: %s); counting its "
-            "repr instead",
+            "fields with the offending one replaced by a marker",
             type(msg).__name__,
             type(exc).__name__,
             exc,
         )
-        return count_tokens(_repr_or_marker(msg))
+        return count_tokens(
+            json.dumps(
+                _json_safe(sent if sent is not None else _visible(msg)),
+                ensure_ascii=False,
+            )
+        )
+
+
+def _json_safe(obj: object, seen: frozenset[int] = frozenset()) -> object:
+    """``obj`` as JSON can encode it, replacing only what it cannot (#1333).
+
+    A whole-row fallback would count a 60 KB row as a handful of tokens, which
+    reads as "fits" to the compaction this feeds, so the rest of the row keeps
+    its weight and only the offending field becomes a marker.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if id(obj) in seen:
+        return f"<cycle {type(obj).__name__}>"
+    seen = seen | {id(obj)}
+    if isinstance(obj, dict):
+        return {_json_safe_key(k): _json_safe(v, seen) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [_json_safe(v, seen) for v in obj]
+    try:
+        return str(obj)
+    except Exception:
+        return f"<unserialisable {type(obj).__name__}>"
+
+
+def _json_safe_key(key: object) -> object:
+    """A dict key JSON can encode: scalars as themselves, anything else by text."""
+    if key is None or isinstance(key, (str, int, float, bool)):
+        return key
+    try:
+        return str(key)
+    except Exception:
+        return f"<unserialisable key {type(key).__name__}>"
 
 
 def _repr_or_marker(msg: object) -> str:
