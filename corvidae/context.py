@@ -420,7 +420,7 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
             "fields with the offending one replaced by a marker",
             type(msg).__name__,
             type(exc).__name__,
-            exc,
+            _safe_text(exc),
         )
         # The handler must be total too: rebuilding can re-run the failing step
         # (`_visible` on a dict subclass whose `items()` raises) or exhaust the
@@ -456,6 +456,13 @@ def _json_text(obj: object) -> str:
         if kind == "text":
             out.append(str(item))
             continue
+        if kind == "leave":
+            # The id blocked only the current chain: an aliased container
+            # (`{"a": shared, "b": shared}`) must count both times. Leaving it in
+            # `seen` marked the second one `<cycle>` and halved the row's weight
+            # (#1335 review).
+            seen.discard(item)
+            continue
         if item is None or isinstance(item, (bool, int, float, str)):
             out.append(json.dumps(item, ensure_ascii=False))
             continue
@@ -464,6 +471,7 @@ def _json_text(obj: object) -> str:
             continue
         if isinstance(item, dict):
             seen.add(id(item))
+            stack.append(("leave", id(item)))
             try:
                 pairs = list(item.items())
             except Exception:
@@ -488,6 +496,7 @@ def _json_text(obj: object) -> str:
             continue
         if isinstance(item, (list, tuple, set, frozenset)):
             seen.add(id(item))
+            stack.append(("leave", id(item)))
             try:
                 values = list(item)
             except Exception:
@@ -516,6 +525,14 @@ def _json_text(obj: object) -> str:
         except Exception:
             out.append(json.dumps(f"<unserialisable {type(item).__name__}>"))
     return "".join(out)
+
+
+def _safe_text(obj: object) -> str:
+    """`str(obj)` that cannot raise, for the same reason as `_type_name`."""
+    try:
+        return str(obj)
+    except Exception:
+        return "<unprintable>"
 
 
 def _base_values(item: object) -> list | None:
