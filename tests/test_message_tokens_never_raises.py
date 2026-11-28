@@ -209,3 +209,44 @@ def test_a_sequence_whose_iter_raises_keeps_its_weight() -> None:
     weight_guarded = message_tokens(guarded)
     assert weight_clean > 5_000  # 60 KB is not a handful
     assert weight_guarded >= int(weight_clean * 0.95), (weight_guarded, weight_clean)
+
+
+def test_an_aliased_container_is_counted_twice() -> None:
+    """#1335 review: `seen` was never cleared, so the second reference to a
+    shared container was marked `<cycle>` and the row counted 0.5005x."""
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+        __repr__ = __str__
+
+    shared = ["x" * 60_000]
+    # The loss shows on the fallback path, so force it with a field that cannot
+    # be serialised; on the primary path `json.dumps` counts both references.
+    twin = {"a": ["x" * 60_000], "b": ["x" * 60_000], "extra": Bad()}
+    aliased = {"a": shared, "b": shared, "extra": Bad()}
+    weight_twin = message_tokens(twin)
+    weight_aliased = message_tokens(aliased)
+    assert weight_twin > 10_000
+    assert weight_aliased >= int(weight_twin * 0.95), (weight_aliased, weight_twin)
+
+
+def test_a_warning_path_whose_exception_cannot_be_printed_still_counts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1335 review: the WARNING interpolated `exc`, so a row failing with an
+    exception whose `__str__` raises took the fallback down with it."""
+
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+    class BrokenItems(dict):
+        def items(self):
+            raise Unprintable()
+
+    row = BrokenItems({"content": "x" * 1_000})
+    with caplog.at_level(logging.WARNING):
+        tokens = message_tokens(row)
+    assert tokens > 0
+    assert any("could not serialize" in r.getMessage() for r in caplog.records)
