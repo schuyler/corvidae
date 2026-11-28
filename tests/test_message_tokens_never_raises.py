@@ -80,3 +80,13 @@ def test_a_big_row_with_one_bad_field_keeps_its_weight() -> None:
     assert weight_clean > 5_000, weight_clean  # 60 KB of "x" is not a handful
     # Only the bad field is replaced; the row keeps its weight.
     assert weight_poisoned >= int(weight_clean * 0.95), (weight_poisoned, weight_clean)
+
+
+def test_the_markers_for_a_cycle_and_a_non_json_key_are_pinned() -> None:
+    """#1335 review: the fallback's two marker shapes had no failing test."""
+    from corvidae.context import _json_safe
+
+    cycle: list = []
+    cycle.append(cycle)
+    assert _json_safe({"a": cycle}) == {"a": ["<cycle list>"]}
+    assert _json_safe({("not", "a", "string"): 1}) == {"('not', 'a', 'string')": 1}
