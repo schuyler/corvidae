@@ -31,9 +31,16 @@ import logging
 from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, final_was_unsent, hookimpl, owning_transport
 from corvidae.prompts import resolve_prompt
+from corvidae.shutdown import DEFAULT_SHUTDOWN_TIMEOUTS, stop_bound_seconds
 from corvidae.tool import Tool, ToolContext, tool_to_schema
 
 logger = logging.getLogger("corvidae.silence")
+
+# Bound on draining in-flight outcome writes at shutdown (#851): an unbounded
+# drain can spend a short daemon.shutdown_timeout on its own and push the
+# daemon onto the forced-exit path. Same helper as the web transport and the
+# session writer, so every plugin's stop share is derived the same way.
+RECORD_DRAIN_BOUND_S = stop_bound_seconds(DEFAULT_SHUTDOWN_TIMEOUTS.graceful)
 
 # Same literal as critique.py's NO_REPLY_MARKER, which critique's own veto keys on.
 NO_REPLY = "NO_REPLY"
@@ -250,9 +257,20 @@ class SilencePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Let in-flight outcome writes land rather than abandoning them."""
-        while self._record_tasks:
-            await asyncio.gather(*set(self._record_tasks), return_exceptions=True)
+        """Let in-flight outcome writes land, but not past this plugin's share."""
+        try:
+            async with asyncio.timeout(RECORD_DRAIN_BOUND_S):
+                while self._record_tasks:
+                    await asyncio.gather(
+                        *set(self._record_tasks), return_exceptions=True
+                    )
+        except TimeoutError:
+            logger.warning(
+                "silence: %d outcome write(s) still running after %.2fs at "
+                "shutdown; abandoning them so the daemon stays off the "
+                "forced-exit path",
+                len(self._record_tasks), RECORD_DRAIN_BOUND_S,
+            )
 
     @hookimpl
     async def should_send_response(self, channel, text, emission, trace_id, annotations) -> bool | None:

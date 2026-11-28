@@ -1526,6 +1526,35 @@ class TestStopBound:
         assert not any("browser tabs" in m for m in messages), messages
 
 
+class TestForcedStopAfterBound:
+    """Whatever stage hangs, the listener is not left bound (#851)."""
+
+    async def test_listener_is_released_when_socket_close_outlasts_the_bound(
+            self, make_env, caplog, monkeypatch):
+        env = await make_env()
+        env.plugin._stop_bound = 0.2
+        # A peer whose close never finishes, so the bound fires inside stage 1.
+        real_close = env.plugin._close_client
+
+        async def slow_close(*args, **kwargs):
+            await asyncio.sleep(60)
+            return await real_close(*args, **kwargs)
+
+        monkeypatch.setattr(env.plugin, "_close_client", slow_close)
+        client = await env.connect()
+        env.plugin._clients.add(client)
+        caplog.set_level(logging.DEBUG)
+        try:
+            await asyncio.wait_for(env.plugin.on_stop(), timeout=5.0)
+        finally:
+            env.plugin._clients.clear()
+        # The stages after the hung one still ran.
+        assert env.plugin._runner is None, "runner.cleanup() was skipped"
+        messages = [r.getMessage() for r in caplog.records
+                    if r.levelno >= logging.WARNING]
+        assert any("daemon.shutdown_timeout" in m for m in messages), messages
+
+
 class TestBackpressure:
 
     async def test_stop_with_peer_that_never_reads(self, make_env):
