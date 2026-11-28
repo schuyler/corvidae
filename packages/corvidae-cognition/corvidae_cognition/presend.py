@@ -17,21 +17,32 @@ import logging
 from dataclasses import dataclass
 
 from corvidae.held import HeldContext
-from corvidae.hooks import Refusal, final_was_unsent, get_dependency
+from corvidae.hooks import Refusal, final_was_unsent, get_dependency, owning_transport
 
 logger = logging.getLogger("corvidae.presend")
 
 #: The held batch's source and its frame label.
 SOURCE = "pre-send check"
 
-#: The revising turn's stub text: both outcomes of a hold, not one command.
-#: It names no NO_REPLY — the token belongs to the channel's silence
-#: instruction (``silence.py``), and naming it here invites it into prose,
-#: where the veto drops the whole reply. Silence is still offered, because the
-#: revision span suppresses only the pre-send check: ``suppressed()`` is
-#: consulted by critique and appraisal, never by the silence veto, so a decline
-#: on the revising turn is withheld the way any other decline is.
-REVISION_STUB = (
+#: The revising turn's stub text on a channel that cannot be left unanswered:
+#: one outcome, stated plainly. Named for what it offers, because the bare
+#: ``REVISION_STUB`` of #1346 meant both outcomes and an unqualified name would
+#: have flipped meaning for anyone reading the old references.
+REVISION_STUB_REVISE_ONLY = (
+    "Your last reply was held back before it was sent, for the reasons in the "
+    "CONTEXT above. Write a revised reply now, and keep what the objection "
+    "taught you in your notes rather than in what you send: a lesson is not a "
+    "reason to reply."
+)
+
+#: The revising turn's stub text where the channel's system prompt carries the
+#: silence instruction: both outcomes of a hold, not one command. It names no
+#: NO_REPLY — the token belongs to that instruction (``silence.py``), and naming
+#: it here invites it into prose, where the veto drops the whole reply. Silence
+#: is offered because the revision span suppresses only the pre-send check:
+#: ``suppressed()`` is consulted by critique and appraisal, never by the silence
+#: veto, so a decline on the revising turn is withheld the way any other is.
+REVISION_STUB_WITH_DECLINE = (
     "Your last reply was held back before it was sent, for the reasons in the "
     "CONTEXT above. Either write a revised reply now, or decline this turn the "
     "way your channel's silence instruction says. Either way, keep what the "
@@ -134,6 +145,45 @@ class PreSendHold:
         revision.offered_trace = revision.turn_trace
         revision.admitted = len(admitted_keys)
 
+    def _decline_available(self, channel) -> bool:
+        """Whether a decline on this channel is honoured rather than delivered.
+
+        Silence is offered only where silence is real, and that needs both
+        halves, each measured here rather than assumed:
+
+        * the ``silence`` plugin is loaded. It owns the veto, so without it the
+          decline token is a message to a human — an offer that ships its own
+          control string is worse than no offer (#1346 follow-up, finding F3).
+        * the owning transport can be left unanswered at all. The three
+          transports that declare a ``check_allowance`` without declaring
+          ``conversational`` — ``channels/web.py:402``, ``channels/cli.py:35``,
+          ``channels/acp.py:463`` — run the pre-send check but never receive the
+          silence instruction, so the offer would point at an instruction the
+          agent was never given, and a task-shaped transport must be answered
+          (#1346 follow-up, finding F1). This is the gate ``silence.py`` applies
+          to ``end_turn`` and to appending the instruction, so the offer and the
+          instruction cannot disagree about a channel.
+
+        A channel no loaded transport claims (``internal:*``) gets the
+        revision-only text: no transport, no instruction to point at.
+        """
+        # Fails closed to the one-outcome notice: a raise here would land in
+        # ``on_final``'s except, which holds the draft with no revising turn at
+        # all. Withholding the offer is a smaller mistake than withholding the
+        # reply.
+        try:
+            if not self.pm.has_plugin("silence"):
+                return False
+            facts = owning_transport(self.pm, channel)
+            return facts is not None and facts.conversational
+        except Exception:
+            logger.warning(
+                "pre-send hold on channel %s: the decline offer could not be "
+                "resolved, so the revising turn was asked for a revision only",
+                getattr(channel, "id", channel), exc_info=True,
+            )
+            return False
+
     async def on_final(
         self, channel, trace_id: str | None, response_text: str, annotations: dict,
     ) -> bool:
@@ -165,7 +215,9 @@ class PreSendHold:
             held = get_dependency(self.pm, "held", HeldContext)
             await held.hold_and_wake(
                 channel, pending.origin, SOURCE, pending.objections,
-                stub_text=REVISION_STUB, stub_text_wins=True,
+                stub_text=(REVISION_STUB_WITH_DECLINE
+                           if self._decline_available(channel) else REVISION_STUB_REVISE_ONLY),
+                stub_text_wins=True,
             )
         except Exception:
             logger.warning(

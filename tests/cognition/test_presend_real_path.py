@@ -470,7 +470,7 @@ class TestInTimeHold:
 
         stubs = env.spy.stubs("user")
         assert len(stubs) == 1
-        assert stubs[0]["text"] == P.REVISION_STUB
+        assert stubs[0]["text"] == P.REVISION_STUB_REVISE_ONLY
         assert len(env.trace.held()) == 1
 
 
@@ -529,6 +529,33 @@ class TestLateRefusal:
 # ---------------------------------------------------------------------------
 
 
+async def _wire_decline(
+    env, *, silence: bool = True, conversational: bool | None = True
+) -> None:
+    """Register, for real, the two things a decline offer depends on: the
+    ``silence`` plugin (it owns the veto that drops the token) and a transport
+    that owns this channel (it decides whether the channel can go unanswered at
+    all). ``silence=False`` is the operator's ``plugins.disabled`` case; ``conversational=None``
+        leaves the channel unclaimed, the ``internal:*``
+    case; ``False`` is a task-shaped transport that must be answered."""
+    from corvidae.hooks import TransportPlugin
+    from corvidae_cognition.silence import SilencePlugin
+
+    pm = env.plugin.pm
+    if silence:
+        plugin = SilencePlugin()
+        await plugin.on_init(pm, {})  # no block: token mode, built-in instruction
+        pm.register(plugin, name="silence")
+    if conversational is None:
+        return
+
+    # Built with ``type`` rather than a class statement: a class body cannot
+    # read the enclosing function's locals, so ``conversational`` would be an
+    # undefined name there (measured: NameError at the class body).
+    chat = type("Chat", (TransportPlugin,), {"transport": "test", "conversational": conversational})
+    pm.register(chat(), name="chat")
+
+
 class TestRevisionIsNeverHeld:
     async def test_r6_stub_text_has_no_no_reply_instruction(self, make_env, P):
         """R6: the stub that wakes the revising turn, and the constant it comes
@@ -540,23 +567,31 @@ class TestRevisionIsNeverHeld:
 
         (stub,) = env.spy.stubs("user")
         assert "NO_REPLY" not in stub["text"]
-        assert "NO_REPLY" not in P.REVISION_STUB
+        assert "NO_REPLY" not in P.REVISION_STUB_REVISE_ONLY
 
     async def test_r6_stub_text_offers_silence_as_well_as_revision(self, make_env, P):
-        """R6 with the hold's other outcome named: the stub that wakes the
-        revising turn offers a revision *and* sending nothing. A hold is a
-        defect report, not an order to speak, and the decline it offers is one
-        the kernel can honour — the revision span suppresses the pre-send check
-        only (``suppressed()`` is read by critique and appraisal), so the
-        silence veto still fires on that turn's final."""
+        """R6 with the hold's other outcome named: on a channel where the
+        silence instruction is present, the stub offers a revision *and* sending
+        nothing. A hold is a defect report, not an order to speak, and the
+        decline it offers is one the kernel can honour — the revision span
+        suppresses the pre-send check only (``suppressed()`` is read by critique
+        and appraisal), so the silence veto still fires on that turn's final.
+        This env is wired with ``silence`` and a conversational transport, which
+        is what makes the offer performable; the offer's absence elsewhere is
+        ``test_r6_the_decline_is_offered_only_where_a_decline_is_honoured``."""
         env = await make_env({"the draft": OBJECTIONS})
+        await _wire_decline(env)
         script(env.plugin, _make_text_response("the draft"), _make_text_response("revised"))
 
         await say(env)
 
         (stub,) = env.spy.stubs("user")
+        assert stub["text"] == P.REVISION_STUB_WITH_DECLINE
         text = stub["text"].lower()
-        # Pinned as an offered disjunction: two bare substrings would also pass
+        # Pinned as an offered disjunction, deliberately a long literal: it
+        # detects drift in the one sentence that carries the offer, and mutation
+        # of the offer's polarity or its routing fails here rather than silently
+        # passing on a paraphrase. Two bare substrings would also pass
         # on wording that orders one outcome ("send nothing rather than revise").
         assert (
             "either write a revised reply now, or decline this turn the way your "
@@ -572,6 +607,53 @@ class TestRevisionIsNeverHeld:
         )
         assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
 
+    async def test_r6_the_decline_is_offered_only_where_a_decline_is_honoured(
+        self, make_env, P
+    ):
+        """The offer of silence is a promise about the transport, so the transport
+        gets to decide whether it is made. Four channel shapes in which a
+        decline would be delivered rather than dropped: nothing wired (the plain
+        daemon with neither half), a conversational transport without the plugin
+        (the token is a message to a human), a transport that must be answered
+        (the instruction is never appended), and a channel no transport claims.
+        The first is the production default and cannot isolate one half on its
+        own; the two single-half shapes exist to pin each half separately."""
+        for label, wiring in [
+            ("nothing wired at all", None),
+            ("a conversational transport without silence", {"silence": False}),
+            ("a transport that must be answered", {"conversational": False}),
+            ("no transport claims the channel", {"conversational": None}),
+        ]:
+            env = await make_env({"the draft": OBJECTIONS})
+            if wiring is not None:
+                await _wire_decline(env, **wiring)
+            script(env.plugin, _make_text_response("the draft"), _make_text_response("revised"))
+
+            await say(env)
+
+            (stub,) = env.spy.stubs("user")
+            assert stub["text"] == P.REVISION_STUB_REVISE_ONLY, f"{label}: expected the revision-only notice"
+            assert "decline this turn" not in stub["text"], f"{label}: silence was offered anyway"
+
+    async def test_r6_a_predicate_that_raises_offers_the_revision_only(self, make_env, P):
+        """The gate decides what to offer, so a failure in it must narrow the
+        offer rather than escape: `on_final`'s except would hold the draft with
+        no revising turn at all, which withholds a reply to save an
+        instruction."""
+        env = await make_env({"the draft": OBJECTIONS})
+        await _wire_decline(env)
+
+        def boom(_name: str) -> bool:
+            raise RuntimeError("plugin manager unavailable")
+
+        env.plugin.pm.has_plugin = boom
+        script(env.plugin, _make_text_response("the draft"), _make_text_response("revised"))
+
+        await say(env)
+
+        (stub,) = env.spy.stubs("user")
+        assert stub["text"] == P.REVISION_STUB_REVISE_ONLY
+
     async def test_r6_a_decline_on_the_revising_turn_sends_nothing_and_clears_the_span(
         self, make_env
     ):
@@ -585,11 +667,10 @@ class TestRevisionIsNeverHeld:
         env = await make_env({
             "the draft": OBJECTIONS, "NO_REPLY": OBJECTIONS, "second reply": ["still wrong"],
         })
-        from corvidae_cognition.silence import SilencePlugin
-
-        silence = SilencePlugin()
-        await silence.on_init(env.plugin.pm, {})  # no block: token mode, built-in instruction
-        env.plugin.pm.register(silence, name="silence")
+        # Wired the way the offer is made in production: plugin and transport
+        # together, so the honoured decline is exercised on a channel that was
+        # actually offered one.
+        await _wire_decline(env)
         script(
             env.plugin, _make_text_response("the draft"), _make_text_response("NO_REPLY"),
             _make_text_response("second reply"), _make_text_response("second revision"),
@@ -885,7 +966,7 @@ class TestRevisionBehindPendingStub:
     ):
         """#1222 R1/R2: a draft of a ``critique``-origin turn is refused while
         critique's wake stub is pending for the same channel. The revising turn
-        (one turn) has the window's notification row read ``REVISION_STUB``,
+        (one turn) has the window's notification row read ``REVISION_STUB_REVISE_ONLY``,
         not critique's note (R1), and both critique's finding and the pre-send
         objections are admitted at it (R2)."""
         from corvidae.held import HeldContext
@@ -918,9 +999,9 @@ class TestRevisionBehindPendingStub:
         assert env.plugin._client.chat.await_count == 2
         # R1: the stub row in the window and the revising prompt carry the revision's text.
         window = "\n".join(str(m.get("content")) for m in env.channel.conversation.messages)
-        assert P.REVISION_STUB in window
+        assert P.REVISION_STUB_REVISE_ONLY in window
         assert CRITIQUE_NOTE not in window
-        assert P.REVISION_STUB in prompt_text(env.plugin, 1)
+        assert P.REVISION_STUB_REVISE_ONLY in prompt_text(env.plugin, 1)
         assert CRITIQUE_NOTE not in prompt_text(env.plugin, 1)
         # R2: both batches reach the revising turn's prompt, and both were announced.
         assert FINDING in prompt_text(env.plugin, 1)
