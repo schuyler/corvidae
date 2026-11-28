@@ -81,20 +81,21 @@ def _reason(module: str) -> str:
     a table row supplies only its module-to-extra pair. That is what lets
     `test_every_reason_names_the_extra_that_provides_its_module` require exactly one
     `--extra` token in every line and require that token to name a declared extra which
-    provides the module. What that check reads is the token and nothing else: the capture
-    is `[A-Za-z0-9][A-Za-z0-9_-]*`, so a token ends at the first character outside that
-    class, and the assertion counts how many such tokens appear. Appending text after the
-    clause leaves that test green — measured, not inferred — while adding a second
-    `--extra` token trips the count, and that failure is the assertion doing its job. A row
-    may therefore carry prose the check never reads, but it cannot go silent about its
-    extra or mention two.
+    provides the module. Of the row's prose, the only part that check inspects is the
+    token: the capture is `[A-Za-z0-9][A-Za-z0-9_-]*`, so a token ends at the first
+    character outside that class, and the assertion counts how many such tokens appear.
+    Appending text after the clause leaves that test green, while adding an additional
+    `--extra` token fails on `assert len(hinted) == 1` — both measured, with the count
+    visible in the failure output. A row may therefore carry prose the check never reads,
+    but it cannot go silent about its extra or mention two.
 
     The generic line below is the fallback for an unlisted module, and the only place in
     this module that emits the phrase "the plugin cannot be imported"; every table row is
     the generator's template, whose text names `uv sync --locked` and ends in the
     parenthetical "(exact: unlisted extras are dropped)". Outside this module the same
-    opening appears in a literal the generator never sees: `tests/_acp_extra.py` marks its
-    skips with "optional acp extra not installed; the ACP transport cannot be imported".
+    opening — "optional <module> extra not installed;" — survives in a literal the
+    generator never sees, and its tail differs: `tests/_acp_extra.py` marks its skips with
+    "optional acp extra not installed; the ACP transport cannot be imported".
 
     It is what the guard's own tests drive with a name deliberately absent from the table.
     """
