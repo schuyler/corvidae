@@ -77,11 +77,27 @@ _REASONS = {
 def _reason(module: str) -> str:
     """The skip line for an absent extra.
 
-    A table entry owns its whole sentence, because the actionable half differs per
-    extra: the plugin-shaped ones can say the plugin cannot be imported, and the
-    package-shaped ones must name the extra to install instead. An unlisted module
-    gets the generic line, which is what the guard's own tests drive with a name
-    deliberately absent from the table.
+    One generator — the `_REASONS` comprehension above — owns the whole sentence, and
+    a table row supplies only its module-to-extra pair. That is what lets
+    `test_every_reason_names_the_extra_that_provides_its_module` require exactly one
+    `--extra` token in every line and require that token to name a declared extra which
+    provides the module. Of the row's prose, the only part that check inspects is the
+    token: the capture is `[A-Za-z0-9][A-Za-z0-9_-]*`, so a token ends at the first
+    character outside that class, and the assertion counts how many such tokens appear.
+    Appending text after the clause leaves that test green, while adding an additional
+    `--extra` token fails on `assert len(hinted) == 1` — both measured, with the count
+    visible in the failure output. A row may therefore carry prose the check never reads,
+    but it cannot go silent about its extra or mention two.
+
+    The generic line below is the fallback for an unlisted module, and the only place in
+    this module that emits the phrase "the plugin cannot be imported"; every table row is
+    the generator's template, whose text names `uv sync --locked` and ends in the
+    parenthetical "(exact: unlisted extras are dropped)". Outside this module the same
+    opening — "optional <module> extra not installed;" — survives in a literal the
+    generator never sees, and its tail differs: `tests/_acp_extra.py` marks its skips with
+    "optional acp extra not installed; the ACP transport cannot be imported".
+
+    It is what the guard's own tests drive with a name deliberately absent from the table.
     """
     known = _REASONS.get(module)
     if known:
