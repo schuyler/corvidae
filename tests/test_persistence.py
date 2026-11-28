@@ -1270,3 +1270,33 @@ def test_busy_timeout_ms_from_config_rejects_unusable_values():
     assert busy_timeout_ms_from_config(
         {"daemon": {"sqlite_busy_timeout_ms": "45000"}}
     ) == 45000
+
+
+async def test_the_writer_revoke_bound_follows_the_configured_graceful_phase(
+    tmp_path: Path,
+) -> None:
+    """#1328 item 5: `on_start` dropping `graceful_s` was unpinned.
+
+    The revoke bound has to sit inside the shutdown budget it runs under, so the
+    plugin must pass the configured graceful phase to `open_session_store`. A
+    writer opened with the module default would refuse to finish inside a
+    shutdown configured shorter than that default.
+    """
+    from corvidae.persistence import PersistencePlugin
+    from corvidae.session_writer import stop_bound_seconds
+
+    pm = create_plugin_manager()
+    plugin = PersistencePlugin(pm)
+    config = {
+        "daemon": {
+            "shutdown_timeout": 1.5,
+            "session_db": str(tmp_path / "sessions.db"),
+        }
+    }
+    await plugin.on_start(config)
+    try:
+        assert plugin.writer is not None
+        assert plugin.writer._revoke_bound_s == stop_bound_seconds(1.5)
+        assert plugin.writer._revoke_bound_s < 1.5
+    finally:
+        await plugin.on_stop()

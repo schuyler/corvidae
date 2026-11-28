@@ -65,6 +65,28 @@ class WriteRevoked(Exception):
         )
 
 
+class WriteClosed(WriteRevoked):
+    """A write arrived after the writer was closed (#1328, item 3).
+
+    Left to SQLite the caller sees "Cannot operate on a closed database", which
+    names neither the writer's path nor the caller, and reads like a bug in the
+    caller rather than a writer that was already shut down.
+    """
+
+    def __init__(self, owner: str, path: str) -> None:
+        self.owner = owner
+        self.path = path
+        # No deadline elapsed, so `deadline_s` is nan rather than absent: the
+        # attribute exists because WriteRevoked has one, and reading it here
+        # tells the caller there was no deadline to report.
+        self.deadline_s = float("nan")
+        Exception.__init__(
+            self,
+            f"write unit from {owner} on {path} cannot run: this writer was "
+            "closed, so start a new one (the shutdown path closes it)",
+        )
+
+
 class WriteAbandoned(WriteRevoked):
     """A unit could not be revoked, so its outcome is unknown (#1315).
 
@@ -350,6 +372,12 @@ class SessionWriter:
     ) -> T:
         """Run ``fn`` as one transactional unit with a deadline."""
         self._refuse_if_abandoned(owner)
+        if self._closed:
+            # A writer closed by shutdown must refuse rather than let SQLite
+            # report "Cannot operate on a closed database" (#1328, item 3).
+            # Abandonment is checked first: it names the unit that caused it,
+            # which is more use to the caller than "start a new one".
+            raise WriteClosed(owner, self._path)
         # Reject a deadline outside the accepted range.
         if not 0 < deadline_s <= MAX_WRITE_DEADLINE_S:
             raise ValueError(
@@ -366,6 +394,13 @@ class SessionWriter:
                 # writer was healthy would otherwise enter `_run_unit` on a
                 # writer abandoned by the unit ahead of it (#1328, follow-up 1).
                 self._refuse_if_abandoned(owner)
+                # Re-check once the route is ours: a unit that entered while the
+                # writer was open queues behind close() during its bounded wait
+                # for the route, and would otherwise begin on a closed connection
+                # and get SQLite's "Cannot operate on a closed database" — the
+                # text WriteClosed exists to replace (#1328, item 3 review).
+                if self._closed:
+                    raise WriteClosed(owner, self._path)
                 return await self._run_unit(fn, owner, deadline_s)
 
         return await self._shielded(locked())
