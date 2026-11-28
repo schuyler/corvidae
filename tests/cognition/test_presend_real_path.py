@@ -564,6 +564,10 @@ class TestRevisionIsNeverHeld:
         ), (
             "the stub no longer offers a choice between the two outcomes"
         )
+        assert "belongs in a file, not in the reply" in text, (
+            "the lesson must be routed to a file: a final that narrates the note "
+            "instead of declining ships the message silence was meant to replace"
+        )
         assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
 
     async def test_r6_a_decline_on_the_revising_turn_sends_nothing_and_clears_the_span(
