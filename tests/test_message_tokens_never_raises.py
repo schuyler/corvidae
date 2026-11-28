@@ -194,3 +194,18 @@ def test_a_row_that_defeats_every_path_still_returns_a_number() -> None:
 
     row = {"content": BadSequence([BothBroken()])}
     assert message_tokens(row) > 0
+
+
+def test_a_sequence_whose_iter_raises_keeps_its_weight() -> None:
+    """#1335 review: the sequence guard turned a 15,017-token row into 21."""
+    class BadSequence(list):
+        def __iter__(self):
+            raise RuntimeError("__iter__ is broken")
+
+    body = "x" * 60_000
+    clean = {"content": body}
+    guarded = {"content": BadSequence([body])}
+    weight_clean = message_tokens(clean)
+    weight_guarded = message_tokens(guarded)
+    assert weight_clean > 5_000  # 60 KB is not a handful
+    assert weight_guarded >= int(weight_clean * 0.95), (weight_guarded, weight_clean)

@@ -491,14 +491,19 @@ def _json_text(obj: object) -> str:
             try:
                 values = list(item)
             except Exception:
-                # A sequence whose `__iter__` raises is a field, not the row:
-                # replace it and keep counting the rest (#1335 review).
-                out.append(
-                    json.dumps(
-                        f"<unserialisable {type(item).__name__}>", ensure_ascii=False
+                # A sequence whose `__iter__` raises is a field, not the row.
+                # Iterate through the builtin base so the contents still count:
+                # replacing the whole sequence with a marker turned a 15,017-token
+                # row into 21 tokens (#1335 review).
+                values = _base_values(item)
+                if values is None:
+                    out.append(
+                        json.dumps(
+                            f"<unserialisable {type(item).__name__}>",
+                            ensure_ascii=False,
+                        )
                     )
-                )
-                continue
+                    continue
             stack.append(("text", "]"))
             for index, value in enumerate(reversed(values)):
                 if index:
@@ -511,6 +516,22 @@ def _json_text(obj: object) -> str:
         except Exception:
             out.append(json.dumps(f"<unserialisable {type(item).__name__}>"))
     return "".join(out)
+
+
+def _base_values(item: object) -> list | None:
+    """The elements of a builtin sequence, bypassing an overridden ``__iter__``.
+
+    ``list(subclass_instance)`` calls the override; ``list.__iter__(instance)``
+    reads the underlying storage, which is what the count needs when a subclass's
+    ``__iter__`` raises (#1335 review).
+    """
+    for base in (list, tuple, set, frozenset):
+        if isinstance(item, base):
+            try:
+                return list(base.__iter__(item))
+            except Exception:
+                return None
+    return None
 
 
 def _json_safe_key(key: object) -> object:
