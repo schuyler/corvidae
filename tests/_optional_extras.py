@@ -77,11 +77,15 @@ _REASONS = {
 def _reason(module: str) -> str:
     """The skip line for an absent extra.
 
-    A table entry owns its whole sentence, because the actionable half differs per
-    extra: the plugin-shaped ones can say the plugin cannot be imported, and the
-    package-shaped ones must name the extra to install instead. An unlisted module
-    gets the generic line, which is what the guard's own tests drive with a name
-    deliberately absent from the table.
+    One generator — the `_REASONS` comprehension above — owns the whole sentence, and
+    a table row supplies only its module-to-extra pair. That is what lets
+    `test_every_reason_names_the_extra_that_provides_its_module` require exactly one
+    `--extra` token in every line: no row can opt out of naming its extra, and no row
+    can add a clause the check has not seen.
+
+    The generic line below is the fallback for an unlisted module, and the only place
+    the plugin-shaped phrasing survives; it is what the guard's own tests drive with a
+    name deliberately absent from the table.
     """
     known = _REASONS.get(module)
     if known:
