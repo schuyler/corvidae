@@ -94,10 +94,12 @@ def test_the_markers_for_a_cycle_and_a_non_json_key_are_pinned() -> None:
 
 def test_a_row_with_a_provenance_record_and_a_non_string_key_is_counted() -> None:
     """#1335 review: `sent_form` raised before `sent` was bound."""
+    from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode
+
     row = {
-        "role": "user",
-        "content": "hello",
-        "_provenance": {"source": "tool", "origin": "web"},
+        "role": "tool",
+        "content": "payload",
+        PROVENANCE_KEY: encode(ItemMetadata(tool="lookup", untrusted=True), {}),
         ("not", "a", "string"): "value",
     }
     assert message_tokens(row) > 0

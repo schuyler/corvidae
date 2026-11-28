@@ -396,10 +396,6 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     """
     if not isinstance(msg, dict):
         return count_tokens(_repr_or_marker(msg))
-    # Bound before the try: `sent_form` can raise before assigning (a row whose
-    # provenance record and keys defeat it), and the handler must still have a
-    # value to work from (#1335 review).
-    sent: dict | None = None
     try:
         sent = sent_form(msg, fence_key)
         # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
@@ -422,25 +418,15 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
             type(exc).__name__,
             exc,
         )
-        # The handler must be total too: rebuilding can re-run the failing step
-        # (`_visible` on a dict subclass whose `items()` raises) or exhaust the
-        # stack (`_json_safe` on very deep nesting), and a raise here is the
-        # failure this whole path exists to prevent (#1335 review).
-        try:
-            safe = _json_safe(sent if sent is not None else _visible(msg))
-            return count_tokens(json.dumps(safe, ensure_ascii=False))
-        except Exception:
-            return count_tokens(_repr_or_marker(msg))
+        return count_tokens(
+            json.dumps(
+                _json_safe(sent if sent is not None else _visible(msg)),
+                ensure_ascii=False,
+            )
+        )
 
 
-# Depth past which `_json_safe` stops descending: a row nested deeper than this
-# is a marker rather than a RecursionError on the budget path (#1335 review).
-_MAX_SAFE_DEPTH = 50
-
-
-def _json_safe(
-    obj: object, seen: frozenset[int] = frozenset(), depth: int = 0
-) -> object:
+def _json_safe(obj: object, seen: frozenset[int] = frozenset()) -> object:
     """``obj`` as JSON can encode it, replacing only what it cannot (#1333).
 
     A whole-row fallback would count a 60 KB row as a handful of tokens, which
@@ -451,15 +437,11 @@ def _json_safe(
         return obj
     if id(obj) in seen:
         return f"<cycle {type(obj).__name__}>"
-    if depth >= _MAX_SAFE_DEPTH:
-        return f"<too deep {type(obj).__name__}>"
     seen = seen | {id(obj)}
     if isinstance(obj, dict):
-        return {
-            _json_safe_key(k): _json_safe(v, seen, depth + 1) for k, v in obj.items()
-        }
+        return {_json_safe_key(k): _json_safe(v, seen) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set, frozenset)):
-        return [_json_safe(v, seen, depth + 1) for v in obj]
+        return [_json_safe(v, seen) for v in obj]
     try:
         return str(obj)
     except Exception:
