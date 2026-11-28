@@ -395,9 +395,13 @@ def _import_time_imports(tree: ast.Module):
 def _extra_import_names() -> set[str]:
     """Every import name an optional extra provides, read from the tree.
 
-    `_REASONS` covers the six plugin packages that had module-scope imports when
-    the guard helper was written; the point of this scan is that the next extra
-    does not need to be remembered by hand. Each ``packages/*`` distribution
+    `_REASONS` is the hand-written seed: the plugin packages that had module-scope
+    imports when the guard helper was written, plus the package-shaped extras whose
+    import name differs from the extra that provides them. No count is quoted here on
+    purpose — the table grows with each guarded extra, and a stale figure in a
+    docstring is a defect report waiting to happen (#1345). The point of this scan is
+    that the next extra does not need to be remembered by hand. Each ``packages/*``
+    distribution
     contributes its project name and any top-level package directory inside it,
     which is how the import name is recovered where it differs from the
     distribution (``corvidae-whatsapp`` ships ``corvidae_whatsapp``).
