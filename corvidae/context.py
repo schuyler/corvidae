@@ -269,7 +269,13 @@ def unsent_marker_emission(content: object) -> str | None:
 
 
 def _visible(msg: dict) -> dict:
-    return {k: v for k, v in msg.items() if not k.startswith("_")}
+    # A key that is not a string cannot be a `_`-prefixed tag, so it is kept and
+    # counted rather than crashing on `startswith` (#1333).
+    return {
+        k: v
+        for k, v in msg.items()
+        if not (isinstance(k, str) and k.startswith("_"))
+    }
 
 
 def unanswered_user_messages(messages: list[dict]) -> list[dict]:
@@ -377,25 +383,173 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     person row's header is a separate message and is not counted here, as
     before.
 
-    Encoding a row is not expected to raise for ordinary content: ``default=str``
-    counts a value JSON cannot encode by its text, and a row that is not a mapping
-    at all is counted by its repr. It is not yet *never* raises: a non-scalar dict
-    key, a value whose ``str()`` raises, and cyclic content all get past both guards
-    and reach the caller, identically on the parent of this branch (#1333, which
-    #1335 closes). PRD §3.1.18.1's never-raises clause is that contract; claiming it
-    here before it holds would let a caller rely on a guarantee nothing enforces.
+    Encoding a row does not raise for the caller (PRD §3.1.18.1) on anything
+    that raises ``Exception``: ``default=str`` counts a value JSON cannot encode
+    by its text, a row that is not a mapping is counted by its repr, and the
+    shapes that defeat both — a key ``_visible()`` cannot treat as a string, a
+    value whose ``str()`` raises, cyclic content — are counted field by field,
+    the offending field as a marker, with one WARNING naming the type and
+    exception (#1333). Only a field is replaced, never the row: a 60 KB row with
+    one bad value still counts as 60 KB, because a whole-row fallback would
+    report it as fitting and defeat the compaction it feeds. A ``BaseException``
+    still propagates.
     """
     if not isinstance(msg, dict):
-        return count_tokens(repr(msg))
-    sent = sent_form(msg, fence_key)
-    # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
-    # character into a six-character \uXXXX sequence and the tokenizer charges
-    # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
-    # compaction long before the provider runs out of context (#754). What the
-    # model receives is the characters, so that is what the estimate counts.
-    return count_tokens(
-        json.dumps(sent if sent is not None else _visible(msg), default=str, ensure_ascii=False)
-    )
+        return count_tokens(_repr_or_marker(msg))
+    # Bound before the try: `sent_form` can raise before assigning (a row whose
+    # provenance record and keys defeat it), and the handler must still have a
+    # value to work from (#1335 review).
+    sent: dict | None = None
+    try:
+        sent = sent_form(msg, fence_key)
+        # ensure_ascii=False: json.dumps would otherwise turn each non-ASCII
+        # character into a six-character \uXXXX sequence and the tokenizer charges
+        # for those, over-counting a CJK or emoji window by 3.5x to 4x and firing
+        # compaction long before the provider runs out of context (#754). What the
+        # model receives is the characters, so that is what the estimate counts.
+        return count_tokens(
+            json.dumps(
+                sent if sent is not None else _visible(msg),
+                default=str,
+                ensure_ascii=False,
+            )
+        )
+    except Exception as exc:  # the budget path must always produce a number
+        logger.warning(
+            "message_tokens: could not serialize a %s row (%s: %s); counting its "
+            "fields with the offending one replaced by a marker",
+            type(msg).__name__,
+            type(exc).__name__,
+            exc,
+        )
+        # The handler must be total too: rebuilding can re-run the failing step
+        # (`_visible` on a dict subclass whose `items()` raises) or exhaust the
+        # stack (`_json_safe` on very deep nesting), and a raise here is the
+        # failure this whole path exists to prevent (#1335 review).
+        try:
+            visible = sent if sent is not None else _visible(msg)
+            return count_tokens(_json_text(visible))
+        except Exception:
+            try:
+                return count_tokens(_json_text(msg))
+            except Exception:
+                # Last resort, and it must not raise either: the budget path
+                # owes the caller a number (#1335 review).
+                return count_tokens(_repr_or_marker(msg))
+
+
+def _json_text(obj: object) -> str:
+    """JSON text for ``obj``, serialised with an explicit stack (#1335 review).
+
+    The handler that catches a ``json.dumps`` failure cannot use ``json.dumps``
+    itself: its C encoder recurses, so a row nested deeper than the interpreter
+    limit raises again, and a depth cap that replaced the deep subtree with a
+    marker silently lost a 60 KB payload (15,080 tokens against a clean twin's
+    45,423). Walking with a stack costs heap instead of stack, keeps every leaf
+    in the count, and needs no cap.
+    """
+    out: list[str] = []
+    stack: list[tuple[str, object]] = [("value", obj)]
+    seen: set[int] = set()
+    while stack:
+        kind, item = stack.pop()
+        if kind == "text":
+            out.append(str(item))
+            continue
+        if item is None or isinstance(item, (bool, int, float, str)):
+            out.append(json.dumps(item, ensure_ascii=False))
+            continue
+        if id(item) in seen:
+            out.append(json.dumps(f"<cycle {type(item).__name__}>", ensure_ascii=False))
+            continue
+        if isinstance(item, dict):
+            seen.add(id(item))
+            try:
+                pairs = list(item.items())
+            except Exception:
+                try:
+                    pairs = list(dict.copy(item).items())
+                except Exception:
+                    out.append(
+                        json.dumps(
+                            f"<unserialisable {type(item).__name__}>",
+                            ensure_ascii=False,
+                        )
+                    )
+                    continue
+            stack.append(("text", "}"))
+            for index, (key, value) in enumerate(reversed(pairs)):
+                if index:
+                    stack.append(("text", ", "))
+                stack.append(("value", value))
+                stack.append(("text", ":"))
+                stack.append(("text", json.dumps(_json_safe_key(key), ensure_ascii=False)))
+            out.append("{")
+            continue
+        if isinstance(item, (list, tuple, set, frozenset)):
+            seen.add(id(item))
+            try:
+                values = list(item)
+            except Exception:
+                # A sequence whose `__iter__` raises is a field, not the row.
+                # Iterate through the builtin base so the contents still count:
+                # replacing the whole sequence with a marker turned a 15,017-token
+                # row into 21 tokens (#1335 review).
+                values = _base_values(item)
+                if values is None:
+                    out.append(
+                        json.dumps(
+                            f"<unserialisable {type(item).__name__}>",
+                            ensure_ascii=False,
+                        )
+                    )
+                    continue
+            stack.append(("text", "]"))
+            for index, value in enumerate(reversed(values)):
+                if index:
+                    stack.append(("text", ", "))
+                stack.append(("value", value))
+            out.append("[")
+            continue
+        try:
+            out.append(json.dumps(str(item), ensure_ascii=False))
+        except Exception:
+            out.append(json.dumps(f"<unserialisable {type(item).__name__}>"))
+    return "".join(out)
+
+
+def _base_values(item: object) -> list | None:
+    """The elements of a builtin sequence, bypassing an overridden ``__iter__``.
+
+    ``list(subclass_instance)`` calls the override; ``list.__iter__(instance)``
+    reads the underlying storage, which is what the count needs when a subclass's
+    ``__iter__`` raises (#1335 review).
+    """
+    for base in (list, tuple, set, frozenset):
+        if isinstance(item, base):
+            try:
+                return list(base.__iter__(item))
+            except Exception:
+                return None
+    return None
+
+
+def _json_safe_key(key: object) -> object:
+    """A dict key JSON can encode: scalars as themselves, anything else by text."""
+    if key is None or isinstance(key, (str, int, float, bool)):
+        return key
+    try:
+        return str(key)
+    except Exception:
+        return f"<unserialisable key {type(key).__name__}>"
+
+
+def _repr_or_marker(msg: object) -> str:
+    """``repr(msg)``, or a marker when the object's own repr raises (#1333)."""
+    try:
+        return repr(msg)
+    except Exception:
+        return f"<unrepresentable {type(msg).__name__}>"
 
 
 class ContextWindow:
