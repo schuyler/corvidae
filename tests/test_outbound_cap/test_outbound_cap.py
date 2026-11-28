@@ -13,19 +13,22 @@ import asyncio
 import logging
 
 import pytest
-from outbound_cap import (
-    COUNT_PROGRESS_KEY,
-    MAX_MESSAGES_KEY,
-    OutboundCapPlugin,
-    parse_count_progress,
-    parse_max_messages,
-)
+from _optional_extras import optional_extra
+
+with optional_extra("outbound_cap"):
+    from outbound_cap import (
+        COUNT_PROGRESS_KEY,
+        MAX_MESSAGES_KEY,
+        OutboundCapPlugin,
+        parse_count_progress,
+        parse_max_messages,
+    )
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import (
     TransportPlugin,
-    hookimpl,
     create_plugin_manager,
+    hookimpl,
     resolve_reject_wins,
 )
 
@@ -420,12 +423,14 @@ async def test_a_broken_channel_object_fails_open(caplog):
 # ---------------------------------------------------------------------------
 
 from fake_clock import FakeClock  # noqa: E402
-from outbound_cap import (  # noqa: E402
-    WINDOW_LIMIT_KEY,
-    WINDOW_SECONDS_KEY,
-    parse_window_limit,
-    parse_window_seconds,
-)
+
+with optional_extra("outbound_cap"):
+    from outbound_cap import (
+        WINDOW_LIMIT_KEY,
+        WINDOW_SECONDS_KEY,
+        parse_window_limit,
+        parse_window_seconds,
+    )
 
 WINDOWED = {"outbound_cap": {"max_messages_per_window": 3, "window_seconds": 60}}
 
