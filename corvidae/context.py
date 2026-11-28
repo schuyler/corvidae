@@ -427,10 +427,75 @@ def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
         # stack (`_json_safe` on very deep nesting), and a raise here is the
         # failure this whole path exists to prevent (#1335 review).
         try:
-            safe = _json_safe(sent if sent is not None else _visible(msg))
-            return count_tokens(json.dumps(safe, ensure_ascii=False))
+            visible = sent if sent is not None else _visible(msg)
+            return count_tokens(_json_text(visible))
         except Exception:
-            return count_tokens(_repr_or_marker(msg))
+            return count_tokens(_json_text(msg))
+
+
+def _json_text(obj: object) -> str:
+    """JSON text for ``obj``, serialised with an explicit stack (#1335 review).
+
+    The handler that catches a ``json.dumps`` failure cannot use ``json.dumps``
+    itself: its C encoder recurses, so a row nested deeper than the interpreter
+    limit raises again, and a depth cap that replaced the deep subtree with a
+    marker silently lost a 60 KB payload (15,080 tokens against a clean twin's
+    45,423). Walking with a stack costs heap instead of stack, keeps every leaf
+    in the count, and needs no cap.
+    """
+    out: list[str] = []
+    stack: list[tuple[str, object]] = [("value", obj)]
+    seen: set[int] = set()
+    while stack:
+        kind, item = stack.pop()
+        if kind == "text":
+            out.append(str(item))
+            continue
+        if item is None or isinstance(item, (bool, int, float, str)):
+            out.append(json.dumps(item, ensure_ascii=False))
+            continue
+        if id(item) in seen:
+            out.append(json.dumps(f"<cycle {type(item).__name__}>", ensure_ascii=False))
+            continue
+        if isinstance(item, dict):
+            seen.add(id(item))
+            try:
+                pairs = list(item.items())
+            except Exception:
+                try:
+                    pairs = list(dict.copy(item).items())
+                except Exception:
+                    out.append(
+                        json.dumps(
+                            f"<unserialisable {type(item).__name__}>",
+                            ensure_ascii=False,
+                        )
+                    )
+                    continue
+            stack.append(("text", "}"))
+            for index, (key, value) in enumerate(reversed(pairs)):
+                if index:
+                    stack.append(("text", ", "))
+                stack.append(("value", value))
+                stack.append(("text", ":"))
+                stack.append(("text", json.dumps(_json_safe_key(key), ensure_ascii=False)))
+            out.append("{")
+            continue
+        if isinstance(item, (list, tuple, set, frozenset)):
+            seen.add(id(item))
+            values = list(item)
+            stack.append(("text", "]"))
+            for index, value in enumerate(reversed(values)):
+                if index:
+                    stack.append(("text", ", "))
+                stack.append(("value", value))
+            out.append("[")
+            continue
+        try:
+            out.append(json.dumps(str(item), ensure_ascii=False))
+        except Exception:
+            out.append(json.dumps(f"<unserialisable {type(item).__name__}>"))
+    return "".join(out)
 
 
 # Depth past which `_json_safe` stops descending: a row nested deeper than this

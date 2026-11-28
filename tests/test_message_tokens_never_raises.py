@@ -141,3 +141,30 @@ def test_the_handler_is_total_when_sent_form_raises(monkeypatch) -> None:
     monkeypatch.setattr(context_mod, "sent_form", boom)
     row = {"role": "user", "content": "x" * 1_000, ("k",): "v"}
     assert message_tokens(row) > 0
+
+
+def _nested(depth: int, leaf: object) -> object:
+    cell = leaf
+    for _ in range(depth):
+        cell = [cell]
+    return cell
+
+
+def test_a_row_nested_past_the_old_depth_cap_keeps_its_payload() -> None:
+    """#1335 review: a depth cap replaced a 60 KB payload with a marker —
+    15,080 tokens against the clean twin's 45,423."""
+    class BothBroken:
+        def __str__(self) -> str:
+            raise ValueError("no text")
+
+        __repr__ = __str__
+
+    body = "x" * 60_000
+    clean = {"role": "user", "content": _nested(500, body)}
+    deep = {"role": "user", "content": _nested(500, body), "extra": BothBroken()}
+
+    weight_clean = message_tokens(clean)
+    weight_deep = message_tokens(deep)
+    assert weight_deep >= int(weight_clean * 0.95), (weight_deep, weight_clean)
+
+
