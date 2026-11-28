@@ -558,33 +558,50 @@ class TestRevisionIsNeverHeld:
         text = stub["text"].lower()
         # Pinned as an offered disjunction: two bare substrings would also pass
         # on wording that orders one outcome ("send nothing rather than revise").
-        assert "either write a revised reply now, or decline this turn" in text, (
+        assert (
+            "either write a revised reply now, or decline this turn the way your "
+            "channel's silence instruction says" in text
+        ), (
             "the stub no longer offers a choice between the two outcomes"
         )
         assert "NO_REPLY" not in stub["text"], "the token stays in the silence instruction"
 
-    async def test_r6_a_decline_on_the_revising_turn_clears_the_span(self, make_env):
-        """R6 with the silence branch taken: offering decline is honest only if
-        taking it cannot re-arm the hold. The revision's final clears the span
-        whatever it says, so the decline made no second hold and the channel's
-        next final is checked again."""
+    async def test_r6_a_decline_on_the_revising_turn_sends_nothing_and_clears_the_span(
+        self, make_env
+    ):
+        """R6 with the silence branch taken, through the real veto. Offering
+        decline is honest only if taking it (a) sends nothing, (b) does not re-arm
+        the hold, and (c) leaves the channel checked again — the last is the live
+        hazard, since a span that stayed open would stop the pre-send check from
+        ever running on this channel again. ``silence`` is registered here rather
+        than in the shared fixture because this is the only criterion that needs
+        the veto in the room."""
         env = await make_env({
             "the draft": OBJECTIONS, "NO_REPLY": OBJECTIONS, "second reply": ["still wrong"],
         })
+        from corvidae_cognition.silence import SilencePlugin
+
+        silence = SilencePlugin()
+        await silence.on_init(env.plugin.pm, {})  # no block: token mode, built-in instruction
+        env.plugin.pm.register(silence, name="silence")
         script(
             env.plugin, _make_text_response("the draft"), _make_text_response("NO_REPLY"),
             _make_text_response("second reply"), _make_text_response("second revision"),
         )
 
         await say(env)
-        # The decline went unchecked — the span was still open — and drew no hold.
+        # The decline was not checked (the span was open) and nothing reached the
+        # channel: the veto fired, so the token did not ship as a reply.
         assert env.checker.checked == ["the draft"]
+        assert sent(env) == []
         assert len(env.trace.held()) == 1
 
-        # Span cleared: this turn's final is checked again, and it makes the new hold.
+        # Span cleared: this turn's final is checked again, makes the new hold,
+        # and its revision goes out — the channel is not stuck unsendable.
         await say(env, "another question")
         assert env.checker.checked == ["the draft", "second reply"]
         assert len(env.trace.held()) == 2
+        assert sent(env) == ["second revision"]
 
     async def test_r6_revision_is_sent_unchecked_and_the_next_final_is_checked(
         self, make_env, caplog

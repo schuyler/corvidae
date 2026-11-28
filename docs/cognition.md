@@ -2061,9 +2061,14 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   outcomes of a hold: write a revised reply, or decline the turn and keep
   what the objection taught you somewhere durable. It names no
   `NO_REPLY`, so Critique 4's silence default does not apply; the decline it
-  offers is still the agent's own, executed by the silence veto, which the
-  revision span does not suppress (`PreSendHold.suppressed` is read by
-  critique and appraisal only). A hold is a defect report, not an order to
+  offers is the agent's own, executed by the silence plugin, whose instruction
+  reaches this turn's system prompt like any other (`silence.py
+  transform_system_prompt`) and whose veto drops a final that carries the token
+  (`should_send_response`). The revision span does not suppress that veto
+  (`PreSendHold.suppressed` is read by critique and appraisal only), and
+  `on_final` still runs on a vetoed final, which
+  `test_r6_a_decline_on_the_revising_turn_sends_nothing_and_clears_the_span` pins.
+  A hold is a defect report, not an order to
   speak.
 - **The revising turn.** It is the turn of that origin at which the store
   offers the batch, and it sees the objections framed as CONTEXT from
