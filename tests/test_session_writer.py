@@ -709,3 +709,117 @@ async def test_an_already_abandoned_writer_names_the_caller(tmp_path: Path) -> N
         assert excinfo.value.owner == "plugin-b"
     finally:
         writer._conn.close()
+class _RollbackFails:
+    """Connection proxy whose ROLLBACK raises, then delegates everything else."""
+
+    def __init__(self, conn, failures: int) -> None:
+        self._conn = conn
+        self._failures = failures
+        self.rollbacks = 0
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if "ROLLBACK" in sql.upper() and self._failures > 0:
+            self._failures -= 1
+            self.rollbacks += 1
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+
+async def test_a_rollback_that_fails_once_is_retried_and_the_writer_survives(
+    tmp_path: Path,
+) -> None:
+    """#1314: a transient ROLLBACK failure must not wedge the write route."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    proxy = _RollbackFails(writer._conn, failures=1)
+    writer._conn = proxy
+    unit = sw._Unit("revoked-owner", 1.0)
+    writer._conn.execute("BEGIN IMMEDIATE")
+    try:
+        writer._rollback_after_revocation(writer._conn, unit)
+        assert proxy.rollbacks == 1
+        assert not writer._abandoned
+        # The next unit commits: the connection is not stuck in a transaction.
+        await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
+    finally:
+        writer._conn._conn.close()
+
+
+async def test_a_rollback_that_never_succeeds_abandons_the_writer_by_name(
+    tmp_path: Path,
+) -> None:
+    """#1314: failing twice must give WriteAbandoned, not 'cannot start a
+    transaction within a transaction' on every later write."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    proxy = _RollbackFails(writer._conn, failures=2)
+    writer._conn = proxy
+    unit = sw._Unit("revoked-owner", 1.0)
+    writer._conn.execute("BEGIN IMMEDIATE")
+    try:
+        writer._rollback_after_revocation(writer._conn, unit)
+        assert proxy.rollbacks == 2
+        assert writer._abandoned
+        assert writer._abandoned_owner == "revoked-owner"
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
+        assert "revoked-owner" in str(excinfo.value)
+    finally:
+        writer._conn._conn.close()
+
+
+async def test_one_error_per_revocation_when_the_rollback_fails(
+    tmp_path: Path, caplog
+) -> None:
+    """#1314: the R3 "rolled back and revoked" line must not follow the truth."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    proxy = _RollbackFails(writer._conn, failures=2)
+    writer._conn = proxy
+    unit = sw._Unit("plugin-b", 0.05)
+    writer._conn.execute("BEGIN IMMEDIATE")
+    try:
+        caplog.set_level(logging.ERROR)
+        writer._revoke(unit)
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1, errors
+        assert "restart the daemon" in errors[0]
+        assert "rolled back and revoked" not in errors[0]
+        # The caller is told the right cause and the right remedy.
+        with pytest.raises(WriteAbandoned) as excinfo:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-c")
+        message = str(excinfo.value)
+        assert "restart the daemon" in message
+        assert "plugins.disabled" not in message
+        assert "ignores interrupt()" not in message
+    finally:
+        writer._conn._conn.close()
+
+
+async def test_every_abandoned_refusal_carries_the_writers_cause(tmp_path: Path) -> None:
+    """#1343 review: `cause` must reach all three raise sites, not one."""
+    import corvidae.session_writer as sw
+
+    writer = SessionWriter.open(tmp_path / "sessions.db")
+    writer._abandoned_owner = "plugin-b"
+    writer._abandon_cause = "rollback"
+    writer._abandoned = True
+    unit = sw._Unit("plugin-b", 0.05)
+    try:
+        # Entry path (`write()` -> `_refuse_if_abandoned`).
+        with pytest.raises(WriteAbandoned) as entry:
+            await writer.write(lambda cur: cur.execute("SELECT 1"), owner="plugin-b")
+        # Outcome path (`_outcome`), reached by a unit already inside the writer.
+        with pytest.raises(WriteAbandoned) as outcome:
+            writer._outcome(unit)
+    finally:
+        writer._conn.close()
+    for excinfo in (entry, outcome):
+        assert "restart the daemon" in str(excinfo.value)
+        assert "plugins.disabled" not in str(excinfo.value)

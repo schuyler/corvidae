@@ -74,23 +74,42 @@ class WriteAbandoned(WriteRevoked):
     busy-wait abandonment the worker's own ``COMMIT`` may still land.
     """
 
-    def __init__(self, owner: str, path: str, *, abandoned_owner: str = "") -> None:
+    def __init__(
+        self,
+        owner: str,
+        path: str,
+        *,
+        abandoned_owner: str = "",
+        cause: str = "uninterruptible",
+    ) -> None:
         self.owner = owner
         self.path = path
         self.abandoned_owner = abandoned_owner or owner
+        self.cause = cause
         self.deadline_s = float("nan")
         blamed = (
             ""
             if self.abandoned_owner == owner
             else f" (this writer abandoned a unit from {self.abandoned_owner})"
         )
-        Exception.__init__(
-            self,
-            f"write unit from {owner} on {path} cannot run{blamed}: a unit whose "
-            "statement ignores interrupt() was abandoned, so whether that write "
-            "landed is unknown and this writer refuses further writes until "
-            "restart — add the plugin to plugins.disabled and report it",
-        )
+        if cause == "rollback":
+            # The statement DID yield to interrupt(); the rollback failed, so the
+            # write did not land and restarting is the whole remedy. Naming the
+            # plugin's statement or plugins.disabled here would be false (#1314).
+            detail = (
+                f"write unit from {owner} on {path} cannot run{blamed}: a revocation "
+                "could not roll its transaction back, so the connection is still "
+                "inside that open transaction and its write was discarded — "
+                "restart the daemon to recover; the plugin is not at fault"
+            )
+        else:
+            detail = (
+                f"write unit from {owner} on {path} cannot run{blamed}: a unit whose "
+                "statement ignores interrupt() was abandoned, so whether that write "
+                "landed is unknown and this writer refuses further writes until "
+                "restart — add the plugin to plugins.disabled and report it"
+            )
+        Exception.__init__(self, detail)
 
 
 @dataclass(frozen=True)
@@ -251,6 +270,10 @@ class SessionWriter:
         #: inside a statement, so closing it here would block the loop (#1315).
         self._abandoned = False
         self._abandoned_owner = ""
+        # Why the writer stopped accepting units: "uninterruptible" (a statement
+        # that ignores interrupt()) or "rollback" (a revocation that could not
+        # roll back). Only the message differs; the refusal is the same (#1314).
+        self._abandon_cause = "uninterruptible"
 
     @classmethod
     def open(
@@ -315,6 +338,7 @@ class SessionWriter:
                 owner or self._abandoned_owner,
                 self._path,
                 abandoned_owner=self._abandoned_owner,
+                cause=self._abandon_cause,
             )
 
     async def write(
@@ -438,8 +462,12 @@ class SessionWriter:
             else:
                 # Abandoned: the worker holds this lock inside a C call, so the
                 # wait would be unbounded. Its outcome is unknown, not rolled
-                # back — its own COMMIT may still land.
-                raise WriteAbandoned(unit.owner, self._path)
+                # back — its own COMMIT may still land. The cause comes from the
+                # writer, so a rollback-failure refusal does not blame the
+                # plugin's statement (#1314 review).
+                raise WriteAbandoned(
+                    unit.owner, self._path, cause=self._abandon_cause
+                )
         try:
             state, exc, result = unit.state, unit.exc, unit.result
         finally:
@@ -456,7 +484,7 @@ class SessionWriter:
         # re-checks after taking the route lock — so the units that arrive here
         # on an abandoned writer were abandoned themselves.
         if self._abandoned:
-            raise WriteAbandoned(unit.owner, self._path)
+            raise WriteAbandoned(unit.owner, self._path, cause=self._abandon_cause)
         if state == _REVOKED:
             raise WriteRevoked(unit.owner, unit.deadline_s)
         if exc is not None:
@@ -559,11 +587,62 @@ class SessionWriter:
             if unit.state in (_COMMITTED, _ROLLED_BACK) and not caused_by_us:
                 return False
             if conn.in_transaction:
-                conn.execute("ROLLBACK")
+                self._rollback_after_revocation(conn, unit)
             unit.state, unit.exc = _REVOKED, None
             return True
         finally:
             unit.lock.release()
+
+    def _rollback_after_revocation(self, conn: sqlite3.Connection, unit: _Unit) -> None:
+        """ROLLBACK a revoked unit, tolerating a rollback that itself fails (#1314).
+
+        One retry covers a transient I/O error. If it still fails the connection
+        stays inside an open transaction, and every later ``BEGIN IMMEDIATE``
+        fails with "cannot start a transaction within a transaction" until
+        restart — so the writer marks itself abandoned instead, which turns that
+        opaque failure into a ``WriteAbandoned`` naming this plugin. The
+        connection is not closed and reopened here. That is a conservative call,
+        not a measured hazard: the revoker holds ``unit.lock`` while every
+        statement on this connection takes that lock, so no statement of *this*
+        unit can be running — #1326's crash needs a statement running with no
+        unit behind it, which the writer does not produce. What is unmeasured is
+        whether a reopen here is safe in every remaining state, and a named
+        refusal is a better default than an unproven recovery (#1314 review).
+        """
+        for attempt in (1, 2):
+            try:
+                conn.execute("ROLLBACK")
+                if attempt == 2:
+                    logger.warning(
+                        "write unit from %r on %s: the first ROLLBACK after "
+                        "revocation failed and the retry succeeded; the "
+                        "transaction is closed",
+                        unit.owner, self._path,
+                        extra={"owner": unit.owner},
+                    )
+                return
+            except sqlite3.Error as exc:
+                if attempt == 1:
+                    logger.warning(
+                        "write unit from %r on %s: ROLLBACK after revocation "
+                        "raised %s: %s; retrying once",
+                        unit.owner, self._path, type(exc).__name__, exc,
+                        extra={"owner": unit.owner},
+                    )
+                    continue
+                logger.error(
+                    "write unit from %r on %s: ROLLBACK still fails after a "
+                    "retry (%s: %s), so the connection is left inside an open "
+                    "transaction — this writer now refuses every further write "
+                    "(WriteAbandoned) rather than fail every BEGIN with "
+                    "'cannot start a transaction within a transaction'; restart "
+                    "the daemon to recover",
+                    unit.owner, self._path, type(exc).__name__, exc,
+                    extra={"owner": unit.owner},
+                )
+                self._abandoned_owner = unit.owner
+                self._abandon_cause = "rollback"
+                self._abandoned = True
 
     def _revoke(self, unit: _Unit) -> None:
         """Revoke an overrun unit and log the R3 ERROR (daemon thread)."""
@@ -586,6 +665,11 @@ class SessionWriter:
             self._abandoned = True
             return
         if not outcome:
+            return
+        if self._abandoned:
+            # The rollback failed, so the R3 sentence below would be false: the
+            # unit was not rolled back and plugins.disabled is not the remedy.
+            # One ERROR per revocation, and it is the true one (#1314).
             return
         # Step 4: R3 ERROR naming the owner and the deadline.
         logger.error(
